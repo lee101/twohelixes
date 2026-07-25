@@ -13,7 +13,7 @@ await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 
 const result = await Bun.build({
-  entrypoints: ["./src/app.ts", "./src/app.css"],
+  entrypoints: ["./src/app.ts", "./src/marketing.ts", "./src/app.css"],
   outdir,
   target: "browser",
   format: "esm",
@@ -28,6 +28,16 @@ if (!result.success) {
   for (const log of result.logs) console.error(log);
   process.exit(1);
 }
+
+// Static art plates are copied verbatim; Bun does not bundle them.
+const assets = new URL("./assets/", import.meta.url).pathname;
+const { readdir, copyFile, mkdir: mk } = await import("node:fs/promises");
+try {
+  const names = await readdir(assets);
+  await mk(outdir + "art", { recursive: true });
+  for (const name of names) await copyFile(assets + name, outdir + "art/" + name);
+  console.log(`copied ${names.length} art files`);
+} catch { /* no assets is fine */ }
 
 const total = result.outputs.reduce((n, o) => n + o.size, 0);
 console.log(

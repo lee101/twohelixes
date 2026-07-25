@@ -80,13 +80,24 @@ def _serve(relative: str) -> router.Result:
     )
 
     raw = path.read_bytes()
-    if content_type.startswith(("text/", "application/json")) or suffix == ".svg":
-        body = raw.decode("utf-8", "replace")
-    else:
-        # Binary assets cross the Mojo boundary as text, so they travel base64
-        # and the client decodes them.
-        body = base64.b64encode(raw).decode()
-        content_type = f"{content_type};base64"
+    if not (content_type.startswith(("text/", "application/json")) or suffix == ".svg"):
+        # The Mojo bridge carries UTF-8 strings, so a binary body cannot cross
+        # it intact. nginx serves /static/ straight from disk in production
+        # (see deploy/nginx-twohelixes.com.conf), which is the only path these
+        # files should ever take. Failing loudly here beats emitting a bogus
+        # "image/webp;base64" that no browser can decode.
+        log.warning(
+            "refusing to serve binary %s through the Python layer; "
+            "nginx must serve /static/",
+            relative,
+        )
+        return router.error(
+            501,
+            "binary_static_unsupported",
+            f"{suffix} assets are served by nginx, not the app server",
+        )
+
+    body = raw.decode("utf-8", "replace")
 
     if stat.st_size <= MAX_CACHED_BYTES:
         with _lock:

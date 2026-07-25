@@ -104,10 +104,17 @@ def _stripe() -> Any:
 
 @router.post("/v1/billing/checkout")
 def checkout(ctx: router.Context) -> router.Result:
-    """Create a Checkout session for a credit pack or a subscription."""
+    """Create a Checkout session.
+
+    Defaults to Stripe's *embedded* mode, which mounts the payment form inside
+    our own page: no bounce to stripe.com and back, so the user never loses
+    context mid-purchase. Pass `embedded: false` for the hosted redirect, which
+    is the fallback when Stripe.js cannot load.
+    """
     identity = auth.require(ctx)
     pack_id = str(ctx.field("pack") or "")
     price_id = str(ctx.field("price_id") or "")
+    embedded = bool(ctx.field("embedded", True))
 
     try:
         stripe = _stripe()
@@ -115,51 +122,97 @@ def checkout(ctx: router.Context) -> router.Result:
         return router.error(503, "billing_unavailable", str(exc))
 
     customer_id = _ensure_customer(stripe, identity)
+    site = config.site_url()
+
+    if price_id:
+        mode = "subscription"
+        line_items = [{"price": price_id, "quantity": 1}]
+        metadata = {"user_id": identity.user_id, "kind": "subscription"}
+    else:
+        pack = next((p for p in CREDIT_PACKS if p["id"] == pack_id), None)
+        if pack is None:
+            return router.error(400, "unknown_pack")
+        mode = "payment"
+        line_items = [
+            {
+                "price_data": {
+                    "currency": "usd",
+                    "unit_amount": pack["amount_cents"],
+                    "product_data": {
+                        "name": f"twoHelixes API credits ({pack['credits']:,})"
+                    },
+                },
+                "quantity": 1,
+            }
+        ]
+        metadata = {
+            "user_id": identity.user_id,
+            "kind": "credits",
+            "credits": str(pack["credits"]),
+        }
+
+    params: dict[str, Any] = {
+        "mode": mode,
+        "customer": customer_id,
+        "line_items": line_items,
+        "client_reference_id": identity.user_id,
+        "metadata": metadata,
+    }
 
     try:
-        if price_id:
-            session = stripe.checkout.Session.create(
-                mode="subscription",
-                customer=customer_id,
-                line_items=[{"price": price_id, "quantity": 1}],
-                success_url=f"{config.site_url()}/app?billing=success",
-                cancel_url=f"{config.site_url()}/pricing?billing=cancelled",
-                client_reference_id=identity.user_id,
-                metadata={"user_id": identity.user_id, "kind": "subscription"},
+        if embedded:
+            params["ui_mode"] = "embedded"
+            # Embedded mode takes a return_url instead of success/cancel; the
+            # placeholder is substituted by Stripe.
+            params["return_url"] = (
+                f"{site}/billing/complete?session_id={{CHECKOUT_SESSION_ID}}"
             )
-        else:
-            pack = next((p for p in CREDIT_PACKS if p["id"] == pack_id), None)
-            if pack is None:
-                return router.error(400, "unknown_pack")
-            session = stripe.checkout.Session.create(
-                mode="payment",
-                customer=customer_id,
-                line_items=[
-                    {
-                        "price_data": {
-                            "currency": "usd",
-                            "unit_amount": pack["amount_cents"],
-                            "product_data": {
-                                "name": f"twoHelixes API credits ({pack['credits']:,})"
-                            },
-                        },
-                        "quantity": 1,
-                    }
-                ],
-                success_url=f"{config.site_url()}/app?billing=success",
-                cancel_url=f"{config.site_url()}/pricing?billing=cancelled",
-                client_reference_id=identity.user_id,
-                metadata={
-                    "user_id": identity.user_id,
-                    "kind": "credits",
-                    "credits": str(pack["credits"]),
-                },
+            session = stripe.checkout.Session.create(**params)
+            return router.json_result(
+                {
+                    "mode": "embedded",
+                    "client_secret": session.client_secret,
+                    "id": session.id,
+                }
             )
+
+        params["success_url"] = f"{site}/app?billing=success"
+        params["cancel_url"] = f"{site}/pricing?billing=cancelled"
+        session = stripe.checkout.Session.create(**params)
+        return router.json_result({"mode": "hosted", "url": session.url, "id": session.id})
+
     except Exception as exc:  # noqa: BLE001 - Stripe raises many shapes
         log.exception("checkout failed")
         return router.error(502, "checkout_failed", str(exc))
 
-    return router.json_result({"url": session.url, "id": session.id})
+
+@router.get("/v1/billing/session/{session_id}")
+def session_status(ctx: router.Context) -> router.Result:
+    """Report on a finished embedded checkout.
+
+    Credits are granted by the webhook, never here - a user who reloads this
+    page must not be able to mint more. This only reports what happened so the
+    UI can say something useful while the webhook lands.
+    """
+    identity = auth.require(ctx)
+    try:
+        stripe = _stripe()
+        session = stripe.checkout.Session.retrieve(ctx.params["session_id"])
+    except RuntimeError as exc:
+        return router.error(503, "billing_unavailable", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return router.error(404, "unknown_session", str(exc))
+
+    if (session.get("metadata") or {}).get("user_id") != identity.user_id:
+        return router.error(403, "not_your_session")
+
+    return router.json_result(
+        {
+            "status": session.get("status"),
+            "payment_status": session.get("payment_status"),
+            "credits": credits.balance(identity.user_id),
+        }
+    )
 
 
 def _ensure_customer(stripe: Any, identity: Any) -> str:

@@ -19,20 +19,16 @@ from typing import Any, Iterable, Sequence
 log = logging.getLogger("twohelixes.tools")
 
 CURRENCY = re.compile(r"[^\d.\-eE]")
-DATE_HINTS = (
-    "date",
-    "time",
-    "day",
-    "month",
-    "year",
-    "week",
-    "quarter",
-    "timestamp",
-    "created",
-    "updated",
-    "period",
-    "dt",
-)
+
+# Matched against *tokens* of the column name, never as substrings. "dt" as a
+# substring matches "width" and "depth", which is how `sepal_width` once got
+# charted as a time axis.
+DATE_HINTS = frozenset({
+    "date", "dates", "time", "times", "day", "days", "month", "months",
+    "year", "years", "week", "weeks", "quarter", "timestamp", "ts",
+    "created", "updated", "modified", "period", "dt", "datetime",
+    "at", "on",
+})
 MEASURE_HINTS = (
     "amount",
     "total",
@@ -121,7 +117,7 @@ def column_role(df: Any, column: str) -> str:
 
     if pd.api.types.is_datetime64_any_dtype(series):
         return "time"
-    if any(hint in lowered for hint in DATE_HINTS) and looks_like_dates(series):
+    if _has_date_token(lowered) and looks_like_dates(series):
         return "time"
 
     if pd.api.types.is_bool_dtype(series):
@@ -146,8 +142,27 @@ def column_role(df: Any, column: str) -> str:
     return "category"
 
 
+def _tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t}
+
+
+def _has_date_token(name: str) -> bool:
+    """True when a whole token of the name is a date word.
+
+    Token matching, not substring: `width` and `depth` both contain "dt", and
+    treating that as a date hint puts a measurement on the time axis.
+    """
+    return bool(_tokens(name) & DATE_HINTS)
+
+
 def looks_like_dates(series: Any, sample: int = 40) -> bool:
     import pandas as pd
+
+    # A numeric column is never a date. pandas will happily read 3.5 as an
+    # offset from the epoch, so without this guard every float column with a
+    # date-ish name parses "successfully".
+    if pd.api.types.is_numeric_dtype(series):
+        return False
 
     values = series.dropna().head(sample)
     if values.empty:

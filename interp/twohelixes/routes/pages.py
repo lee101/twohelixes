@@ -31,176 +31,424 @@ def _css() -> str:
     dark_vars = ";".join(f"{k}:{v}" for k, v in dark.items())
 
     return f"""
+/* ---------------------------------------------------------------------
+   Design tokens. The series colours come from the validated chart palette
+   and must not be hand-edited; everything else here is UI chrome and is
+   free to change.
+   --------------------------------------------------------------------- */
 *,*::before,*::after{{box-sizing:border-box}}
-body,h1,h2,h3,p,figure,ul{{margin:0}}
-ul{{padding:0;list-style:none}}
+body,h1,h2,h3,h4,p,figure,ul,ol{{margin:0}}
+ul,ol{{padding:0;list-style:none}}
 img,svg{{max-width:100%;display:block}}
-:root{{color-scheme:light;{light_vars};
-  --radius:14px;--shell:min(1120px,100% - 2.5rem);
+button{{font:inherit;color:inherit}}
+
+:root{{
+  color-scheme:light;
+  {light_vars};
+  --panel:#ffffff;
+  --panel-2:#f7f7f5;
+  --border:#e6e5e1;
+  --border-strong:#d5d4cf;
+  --accent:var(--series-1);
+  --accent-soft:color-mix(in srgb,var(--series-1) 10%,transparent);
+  --accent-ring:color-mix(in srgb,var(--series-1) 35%,transparent);
+  --ok:var(--series-3);
+
+  /* One spacing scale, used everywhere. */
+  --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem;
+  --s5:1.5rem; --s6:2rem; --s7:3rem; --s8:4rem;
+
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-full:999px;
+
+  /* Two-layer shadows: a tight contact shadow plus a soft ambient one.
+     A single large blur reads as a smudge at these sizes. */
+  --sh-1:0 1px 2px rgba(16,16,14,.05), 0 1px 3px rgba(16,16,14,.04);
+  --sh-2:0 2px 4px rgba(16,16,14,.05), 0 6px 16px rgba(16,16,14,.06);
+  --sh-3:0 8px 24px rgba(16,16,14,.10), 0 2px 6px rgba(16,16,14,.06);
+
+  --shell:min(1140px,100% - 2.5rem);
   --font:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-  --panel:#ffffff;--border:#e8e7e3}}
-@media (prefers-color-scheme:dark){{
-  :root:not([data-theme="light"]){{color-scheme:dark;{dark_vars};
-    --panel:#212120;--border:#2e2e2c}}
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }}
-:root[data-theme="dark"]{{color-scheme:dark;{dark_vars};--panel:#212120;--border:#2e2e2c}}
+
+@media (prefers-color-scheme:dark){{
+  :root:not([data-theme="light"]){{
+    color-scheme:dark;
+    {dark_vars};
+    --panel:#1f1f1e;
+    --panel-2:#252523;
+    --border:#302f2d;
+    --border-strong:#3d3c39;
+    --accent:var(--series-1);
+    --accent-soft:color-mix(in srgb,var(--series-1) 16%,transparent);
+    --accent-ring:color-mix(in srgb,var(--series-1) 45%,transparent);
+    --sh-1:0 1px 2px rgba(0,0,0,.4);
+    --sh-2:0 2px 6px rgba(0,0,0,.45), 0 8px 20px rgba(0,0,0,.35);
+    --sh-3:0 10px 30px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+  }}
+}}
+:root[data-theme="dark"]{{
+  color-scheme:dark;
+  {dark_vars};
+  --panel:#1f1f1e; --panel-2:#252523;
+  --border:#302f2d; --border-strong:#3d3c39;
+  --accent-soft:color-mix(in srgb,var(--series-1) 16%,transparent);
+  --accent-ring:color-mix(in srgb,var(--series-1) 45%,transparent);
+  --sh-1:0 1px 2px rgba(0,0,0,.4);
+  --sh-2:0 2px 6px rgba(0,0,0,.45), 0 8px 20px rgba(0,0,0,.35);
+  --sh-3:0 10px 30px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+}}
+
 body{{margin:0;font-family:var(--font);background:var(--surface-1);
-  color:var(--text-primary);line-height:1.55;-webkit-font-smoothing:antialiased}}
+  color:var(--text-primary);line-height:1.55;-webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility}}
 .shell{{width:var(--shell);margin-inline:auto}}
-a{{color:var(--series-1);text-decoration:none}}
+a{{color:var(--accent);text-decoration:none}}
 a:hover{{text-decoration:underline}}
-header.site{{position:sticky;top:0;z-index:20;backdrop-filter:blur(8px);
-  background:color-mix(in srgb,var(--surface-1) 88%,transparent);
+:focus-visible{{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}}
+
+/* --- header ---------------------------------------------------------- */
+header.site{{position:sticky;top:0;z-index:40;backdrop-filter:blur(10px);
+  background:color-mix(in srgb,var(--surface-1) 86%,transparent);
   border-bottom:1px solid var(--border)}}
-header.site .shell{{display:flex;align-items:center;gap:1.25rem;
-  min-height:64px;flex-wrap:wrap}}
-.brand{{display:flex;align-items:center;gap:.6rem;font-weight:650;
-  color:var(--text-primary);font-size:1.05rem}}
-.brand svg{{width:30px;height:30px}}
-nav.main{{display:flex;gap:1.1rem;margin-left:auto;flex-wrap:wrap}}
-nav.main a{{color:var(--text-secondary);font-size:.94rem}}
+header.site .shell{{display:flex;align-items:center;gap:var(--s5);
+  min-height:58px;flex-wrap:wrap}}
+.brand{{display:flex;align-items:center;gap:.55rem;font-weight:660;
+  color:var(--text-primary);font-size:1.02rem;letter-spacing:-.01em}}
+.brand:hover{{text-decoration:none}}
+.brand svg{{width:28px;height:28px}}
+nav.main{{display:flex;gap:1.35rem;margin-left:auto;flex-wrap:wrap}}
+nav.main a{{color:var(--text-secondary);font-size:.92rem;font-weight:500;
+  transition:color .15s}}
+nav.main a:hover{{color:var(--text-primary);text-decoration:none}}
 nav.main a[aria-current]{{color:var(--text-primary);font-weight:600}}
-.btn{{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;
-  padding:.62rem 1.05rem;border-radius:10px;font-weight:600;font-size:.94rem;
-  border:1px solid transparent;cursor:pointer;text-decoration:none}}
+
+/* --- buttons --------------------------------------------------------- */
+.btn{{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;
+  padding:.58rem 1.05rem;border-radius:var(--r-sm);font-weight:600;
+  font-size:.93rem;border:1px solid transparent;cursor:pointer;
+  text-decoration:none;white-space:nowrap;
+  transition:transform .12s ease,box-shadow .15s ease,background .15s,border-color .15s}}
 .btn:hover{{text-decoration:none}}
-.btn-primary{{background:var(--series-1);color:#fff}}
-.btn-ghost{{border-color:var(--border);color:var(--text-primary);background:transparent}}
-.hero{{padding:clamp(3rem,8vw,6rem) 0 clamp(2rem,5vw,3.5rem)}}
-.hero h1{{font-size:clamp(2.1rem,5.2vw,3.5rem);line-height:1.08;
-  letter-spacing:-.022em;max-width:16ch;font-weight:680}}
-.hero p.lede{{margin-top:1.1rem;font-size:clamp(1.02rem,2.1vw,1.2rem);
-  color:var(--text-secondary);max-width:56ch}}
-.hero .actions{{margin-top:1.9rem;display:flex;gap:.75rem;flex-wrap:wrap}}
-.hero-layout{{display:grid;gap:2.5rem;grid-template-columns:1fr;align-items:center}}
-@media(min-width:900px){{.hero-layout{{grid-template-columns:1.15fr .85fr}}}}
-.helix-hero{{display:flex;justify-content:center}}
-.helix-hero svg{{width:min(260px,60vw);height:auto}}
-.grid{{display:grid;gap:1.1rem;grid-template-columns:1fr}}
+.btn:active{{transform:translateY(1px)}}
+.btn-primary{{background:var(--accent);color:#fff;box-shadow:var(--sh-1)}}
+.btn-primary:hover{{box-shadow:var(--sh-2);filter:brightness(1.06)}}
+.btn-ghost{{border-color:var(--border-strong);color:var(--text-primary);
+  background:var(--panel)}}
+.btn-ghost:hover{{border-color:var(--text-muted);box-shadow:var(--sh-1)}}
+.btn-small{{padding:.36rem .7rem;font-size:.85rem}}
+.btn[disabled]{{opacity:.55;pointer-events:none}}
+
+/* --- layout ---------------------------------------------------------- */
+section{{padding:clamp(2rem,4vw,3.25rem) 0}}
+section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
+  margin-bottom:var(--s2);font-weight:670;line-height:1.15}}
+.lead-in{{color:var(--text-secondary);max-width:58ch;margin-bottom:var(--s5)}}
+.grid{{display:grid;gap:var(--s4);grid-template-columns:1fr}}
 @media(min-width:640px){{.grid{{grid-template-columns:repeat(2,1fr)}}}}
 @media(min-width:980px){{.grid.three{{grid-template-columns:repeat(3,1fr)}}}}
-.card{{background:var(--panel);border:1px solid var(--border);
-  border-radius:var(--radius);padding:1.35rem}}
-.card h3{{font-size:1.02rem;margin-bottom:.45rem;font-weight:640}}
-.card p{{color:var(--text-secondary);font-size:.94rem}}
-section{{padding:clamp(2.5rem,6vw,4rem) 0}}
-section h2{{font-size:clamp(1.5rem,3.4vw,2.1rem);letter-spacing:-.015em;
-  margin-bottom:.6rem;font-weight:660}}
-section p.sub{{color:var(--text-secondary);margin-bottom:1.9rem;max-width:60ch}}
-.steps{{counter-reset:step}}
-.steps .card{{position:relative;padding-left:3.4rem}}
-.steps .card::before{{counter-increment:step;content:counter(step);
-  position:absolute;left:1.3rem;top:1.35rem;width:26px;height:26px;
-  border-radius:50%;background:var(--series-1);color:#fff;font-size:.82rem;
-  display:grid;place-items:center;font-weight:700}}
-.price-grid{{display:grid;gap:1.1rem;grid-template-columns:1fr}}
-@media(min-width:860px){{.price-grid{{grid-template-columns:repeat(3,1fr)}}}}
-.plan{{background:var(--panel);border:1px solid var(--border);
-  border-radius:var(--radius);padding:1.6rem;display:flex;flex-direction:column}}
-.plan.highlight{{border-color:var(--series-1);box-shadow:0 0 0 1px var(--series-1)}}
-.plan .amount{{font-size:2.1rem;font-weight:680;letter-spacing:-.02em}}
-.plan .cadence{{color:var(--text-muted);font-size:.88rem}}
-.plan ul{{margin:1.15rem 0;display:grid;gap:.55rem}}
-.plan li{{font-size:.93rem;color:var(--text-secondary);padding-left:1.4rem;
-  position:relative}}
-.plan li::before{{content:"";position:absolute;left:0;top:.52em;width:8px;
-  height:8px;border-radius:2px;background:var(--series-3)}}
-.plan .btn{{margin-top:auto}}
-table.packs{{width:100%;border-collapse:collapse;margin-top:1rem}}
-table.packs th,table.packs td{{text-align:left;padding:.7rem .8rem;
-  border-bottom:1px solid var(--border);font-size:.93rem}}
-table.packs th{{color:var(--text-muted);font-weight:600;font-size:.82rem;
-  text-transform:uppercase;letter-spacing:.04em}}
-.scroll-x{{overflow-x:auto}}
-code,pre{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88rem}}
-pre{{background:var(--panel);border:1px solid var(--border);
-  border-radius:10px;padding:1rem;overflow-x:auto}}
-footer.site{{border-top:1px solid var(--border);padding:2.5rem 0;
-  color:var(--text-muted);font-size:.9rem}}
-footer.site .shell{{display:flex;gap:1.5rem;flex-wrap:wrap;
-  justify-content:space-between}}
-.badge{{display:inline-block;padding:.28rem .6rem;border-radius:999px;
-  background:color-mix(in srgb,var(--series-3) 16%,transparent);
-  color:var(--series-3);font-size:.78rem;font-weight:650}}
-.eyebrow{{display:inline-flex;align-items:center;gap:.45rem;padding:.3rem .7rem;
-  border-radius:999px;background:color-mix(in srgb,var(--series-1) 12%,transparent);
-  color:var(--series-1);font-size:.79rem;font-weight:650}}
-.hero h1{{margin-top:1rem;max-width:15ch;font-size:clamp(2.2rem,5.4vw,3.75rem);
-  line-height:1.04;letter-spacing:-.028em;font-weight:700}}
-.hero p.lede{{max-width:46ch;line-height:1.5}}
-.hero .actions{{margin-top:1.5rem}}
-.hero-note{{margin-top:.9rem;color:var(--text-muted);font-size:.87rem}}
-@media(min-width:900px){{.hero-layout{{grid-template-columns:1fr 1.08fr}}}}
+.split{{display:grid;gap:var(--s6);grid-template-columns:1fr;align-items:center}}
+@media(min-width:940px){{.split{{grid-template-columns:1fr 1fr}}}}
 
-/* A chart in a frame. Used wherever an example appears. */
+.card{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:var(--s5);box-shadow:var(--sh-1);
+  transition:border-color .15s,box-shadow .2s,transform .2s}}
+.card:hover{{border-color:var(--border-strong);box-shadow:var(--sh-2);
+  transform:translateY(-1px)}}
+.card h3{{font-size:1rem;margin-bottom:.4rem;font-weight:640;
+  letter-spacing:-.01em}}
+.card p{{color:var(--text-secondary);font-size:.93rem}}
+.card.fill{{display:flex;flex-direction:column;justify-content:center}}
+
+/* --- hero ------------------------------------------------------------ */
+.hero{{padding:clamp(2.25rem,5vw,4rem) 0 clamp(1.25rem,2.5vw,2rem)}}
+.hero-layout{{display:grid;gap:clamp(1.75rem,3.5vw,3rem);
+  grid-template-columns:1fr;align-items:center}}
+@media(min-width:900px){{.hero-layout{{grid-template-columns:1fr 1.1fr}}}}
+.hero h1{{margin-top:var(--s3);max-width:15ch;
+  font-size:clamp(2.15rem,5.2vw,3.6rem);line-height:1.03;
+  letter-spacing:-.032em;font-weight:700}}
+.hero p.lede{{margin-top:var(--s4);color:var(--text-secondary);
+  font-size:clamp(1rem,1.8vw,1.18rem);max-width:46ch;line-height:1.5}}
+.hero .actions{{margin-top:var(--s5);display:flex;gap:.65rem;flex-wrap:wrap}}
+.hero-note{{margin-top:var(--s3);color:var(--text-muted);font-size:.86rem}}
+.eyebrow{{display:inline-flex;align-items:center;gap:.4rem;
+  padding:.28rem .68rem;border-radius:var(--r-full);
+  background:var(--accent-soft);color:var(--accent);
+  font-size:.78rem;font-weight:650;letter-spacing:.005em}}
+
+/* --- figures --------------------------------------------------------- */
 .figure{{background:var(--panel);border:1px solid var(--border);
-  border-radius:var(--radius);padding:.6rem;overflow:hidden}}
-.figure svg{{width:100%;height:auto;display:block;border-radius:8px}}
-.figure figcaption{{padding:.55rem .5rem .2rem;color:var(--text-muted);
-  font-size:.83rem;line-height:1.45}}
+  border-radius:var(--r-lg);padding:.55rem;overflow:hidden;
+  box-shadow:var(--sh-2)}}
+.figure svg{{width:100%;height:auto;display:block;border-radius:var(--r-sm)}}
+.figure figcaption{{padding:.5rem .55rem .2rem;color:var(--text-muted);
+  font-size:.82rem;line-height:1.45}}
 .figure figcaption b{{color:var(--text-secondary);font-weight:620}}
-.gallery{{display:grid;gap:1.1rem;grid-template-columns:1fr}}
+.gallery{{display:grid;gap:var(--s4);grid-template-columns:1fr}}
 @media(min-width:820px){{.gallery{{grid-template-columns:repeat(2,1fr)}}}}
 
-/* The reasoning trace, shown rather than described. */
+/* --- trace demo ------------------------------------------------------ */
 .trace-demo{{background:var(--panel);border:1px solid var(--border);
-  border-radius:var(--radius);padding:1rem;display:grid;gap:.45rem}}
-.trace-demo .askbox{{background:var(--surface-1);border:1px solid var(--border);
-  border-radius:10px;padding:.6rem .75rem;margin-bottom:.3rem;
-  font-size:.95rem;color:var(--text-primary)}}
-.trace-demo .askbox span{{display:block;margin-bottom:.2rem;font-size:.72rem;
-  color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;
-  font-weight:650}}
-.tstep{{border:1px solid var(--border);border-radius:10px;
-  padding:.5rem .7rem;display:grid;gap:.25rem}}
-.tstep .top{{display:flex;align-items:center;gap:.5rem}}
-.tstep .nm{{font-weight:620;font-size:.89rem}}
-.tstep .ms{{margin-left:auto;color:var(--text-muted);font-size:.77rem;
+  border-radius:var(--r-lg);padding:var(--s4);display:grid;gap:.4rem;
+  box-shadow:var(--sh-2)}}
+.trace-demo .askbox{{background:var(--panel-2);border:1px solid var(--border);
+  border-radius:var(--r-sm);padding:.55rem .7rem;margin-bottom:.25rem;
+  font-size:.94rem;color:var(--text-primary)}}
+.trace-demo .askbox span{{display:block;margin-bottom:.15rem;font-size:.7rem;
+  color:var(--text-muted);text-transform:uppercase;letter-spacing:.07em;
+  font-weight:660}}
+.tstep{{border:1px solid var(--border);border-radius:var(--r-sm);
+  padding:.48rem .65rem;display:grid;gap:.2rem;background:var(--panel)}}
+.tstep .top{{display:flex;align-items:center;gap:.45rem}}
+.tstep .nm{{font-weight:620;font-size:.88rem}}
+.tstep .ms{{margin-left:auto;color:var(--text-muted);font-size:.76rem;
   font-variant-numeric:tabular-nums}}
-.tstep .said{{color:var(--text-secondary);font-size:.85rem;line-height:1.45}}
-.tstep .dot{{width:7px;height:7px;border-radius:50%;
-  background:var(--series-3);flex:0 0 auto}}
-.tstep.now .dot{{background:var(--series-1)}}
+.tstep .said{{color:var(--text-secondary);font-size:.845rem;line-height:1.45}}
+.tstep .dot{{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  flex:0 0 auto}}
+.tstep.now{{border-color:var(--accent-ring);background:var(--accent-soft)}}
+.tstep.now .dot{{background:var(--accent)}}
 
-.stats{{display:grid;gap:1rem;grid-template-columns:repeat(2,1fr)}}
+/* --- stats & chips --------------------------------------------------- */
+.stats{{display:grid;gap:var(--s4);grid-template-columns:repeat(2,1fr)}}
 @media(min-width:780px){{.stats{{grid-template-columns:repeat(4,1fr)}}}}
 .stat{{background:var(--panel);border:1px solid var(--border);
-  border-radius:var(--radius);padding:1.05rem}}
-.stat .n{{font-size:clamp(1.45rem,3vw,1.95rem);font-weight:700;
-  letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}}
-.stat .l{{color:var(--text-muted);font-size:.85rem;margin-top:.25rem}}
+  border-radius:var(--r-md);padding:var(--s4);box-shadow:var(--sh-1)}}
+.stat .n{{font-size:clamp(1.4rem,2.6vw,1.85rem);font-weight:700;
+  letter-spacing:-.025em;font-variant-numeric:tabular-nums;line-height:1.1;
+  color:var(--text-primary)}}
+.stat .l{{color:var(--text-muted);font-size:.84rem;margin-top:.2rem;
+  line-height:1.4}}
+.chips{{display:flex;flex-wrap:wrap;gap:.4rem}}
+.chip{{border:1px solid var(--border);background:var(--panel);
+  border-radius:var(--r-sm);padding:.32rem .6rem;font-size:.83rem;
+  color:var(--text-secondary);box-shadow:var(--sh-1)}}
 
-.chips{{display:flex;flex-wrap:wrap;gap:.45rem}}
-.chip{{border:1px solid var(--border);background:var(--panel);border-radius:8px;
-  padding:.34rem .62rem;font-size:.84rem;color:var(--text-secondary)}}
-.split{{display:grid;gap:2rem;grid-template-columns:1fr;align-items:center}}
-@media(min-width:940px){{.split{{grid-template-columns:1fr 1fr}}}}
-.lead-in{{color:var(--text-secondary);max-width:56ch;margin-bottom:1.5rem}}
+/* --- pricing --------------------------------------------------------- */
+.price-grid{{display:grid;gap:var(--s4);grid-template-columns:1fr}}
+@media(min-width:860px){{.price-grid{{grid-template-columns:repeat(3,1fr)}}}}
+.plan{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:var(--s5);display:flex;
+  flex-direction:column;box-shadow:var(--sh-1);position:relative;
+  transition:border-color .15s,box-shadow .2s,transform .2s}}
+.plan:hover{{box-shadow:var(--sh-2);transform:translateY(-2px)}}
+.plan.highlight{{border-color:var(--accent);box-shadow:var(--sh-2)}}
+.plan.highlight::after{{content:"Most popular";position:absolute;top:-10px;
+  left:var(--s5);background:var(--accent);color:#fff;font-size:.7rem;
+  font-weight:660;padding:.18rem .55rem;border-radius:var(--r-full);
+  letter-spacing:.02em}}
+.plan h3{{font-size:1rem;font-weight:640}}
+.plan .amount{{font-size:2.1rem;font-weight:700;letter-spacing:-.03em;
+  margin-top:.35rem;line-height:1.05}}
+.plan .cadence{{color:var(--text-muted);font-size:.85rem}}
+.plan ul{{margin:var(--s4) 0;display:grid;gap:.5rem}}
+.plan li{{font-size:.91rem;color:var(--text-secondary);padding-left:1.4rem;
+  position:relative;line-height:1.45}}
+.plan li::before{{content:"";position:absolute;left:0;top:.5em;width:7px;
+  height:7px;border-radius:2px;background:var(--ok)}}
+.plan .btn{{margin-top:auto;width:100%}}
 
-/* Sections were carrying too much air once they held real content; the
-   charts and cards now supply the rhythm the padding used to fake. */
-section{{padding:clamp(1.75rem,3.6vw,2.75rem) 0}}
-section h2{{margin-bottom:.5rem}}
+table.packs{{width:100%;border-collapse:collapse;margin-top:var(--s3)}}
+table.packs th,table.packs td{{text-align:left;padding:.62rem .75rem;
+  border-bottom:1px solid var(--border);font-size:.91rem}}
+table.packs th{{color:var(--text-muted);font-weight:620;font-size:.75rem;
+  text-transform:uppercase;letter-spacing:.05em}}
+table.packs tbody tr:hover{{background:var(--panel-2)}}
+.scroll-x{{overflow-x:auto}}
 
-/* On narrow screens keep the brand and the primary action on one row, with
-   the links below. Otherwise the header wraps to three rows and pushes the
-   headline off the first screen. */
+.rules{{display:grid;gap:.6rem;margin-top:.2rem}}
+.rules li{{position:relative;padding-left:1.45rem;font-size:.91rem;
+  color:var(--text-secondary);line-height:1.5}}
+.rules li::before{{content:"";position:absolute;left:0;top:.5em;width:7px;
+  height:7px;border-radius:2px;background:var(--ok)}}
+.rules li b{{color:var(--text-primary);font-weight:620}}
+
+code,pre{{font-family:var(--mono);font-size:.86rem}}
+pre{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-md);padding:var(--s4);overflow-x:auto;
+  box-shadow:var(--sh-1)}}
+.badge{{display:inline-block;padding:.25rem .58rem;border-radius:var(--r-full);
+  background:color-mix(in srgb,var(--ok) 16%,transparent);
+  color:var(--ok);font-size:.76rem;font-weight:650}}
+
+footer.site{{border-top:1px solid var(--border);padding:var(--s6) 0;
+  color:var(--text-muted);font-size:.88rem;margin-top:var(--s5)}}
+footer.site .shell{{display:flex;gap:var(--s5);flex-wrap:wrap;
+  justify-content:space-between}}
+
+/* --- overlay: sign-in and checkout, so neither costs a navigation ---- */
+.overlay{{position:fixed;inset:0;z-index:100;display:none;
+  align-items:center;justify-content:center;padding:var(--s4);
+  background:color-mix(in srgb,#0b0b0b 55%,transparent);
+  backdrop-filter:blur(3px)}}
+.overlay[open]{{display:flex}}
+.sheet{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);box-shadow:var(--sh-3);width:100%;
+  max-width:26rem;padding:var(--s5);position:relative;
+  max-height:calc(100vh - 2rem);overflow-y:auto}}
+.sheet.wide{{max-width:36rem}}
+.sheet h2{{font-size:1.2rem;margin-bottom:.3rem;letter-spacing:-.015em}}
+.sheet p.sub{{color:var(--text-secondary);font-size:.9rem;
+  margin-bottom:var(--s4)}}
+.sheet .close{{position:absolute;top:.7rem;right:.7rem;border:0;
+  background:transparent;color:var(--text-muted);cursor:pointer;
+  font-size:1.35rem;line-height:1;padding:.2rem .4rem;border-radius:var(--r-sm)}}
+.sheet .close:hover{{background:var(--panel-2);color:var(--text-primary)}}
+.field{{display:grid;gap:.3rem;margin-bottom:var(--s3)}}
+.field label{{font-size:.78rem;font-weight:640;color:var(--text-muted);
+  text-transform:uppercase;letter-spacing:.05em}}
+.field input{{font:inherit;font-size:.95rem;padding:.6rem .7rem;
+  border-radius:var(--r-sm);border:1px solid var(--border-strong);
+  background:var(--surface-1);color:var(--text-primary);width:100%}}
+.field input:focus-visible{{outline:2px solid var(--accent);outline-offset:1px}}
+.form-note{{color:var(--text-muted);font-size:.82rem;margin-top:var(--s3);
+  line-height:1.45}}
+.form-error{{color:var(--series-8);font-size:.86rem;margin-top:var(--s2)}}
+#checkout-mount{{min-height:20rem}}
+
+/* --- mobile: compact, thumb-reachable, no wasted vertical -------------
+   A phone screen is the scarcest space we have, so below 720px the page
+   tightens rather than merely reflowing: smaller section padding, a scrolling
+   nav instead of a wrapping one, full-width primary actions, and sheets that
+   dock to the bottom where a thumb already is. */
 @media(max-width:719px){{
-  header.site .shell{{gap:.6rem;padding-block:.55rem}}
-  .brand{{margin-right:auto}}
-  nav.main{{order:3;width:100%;margin-left:0;gap:1rem;
-    padding-top:.2rem;font-size:.92rem}}
+  :root{{--shell:min(100%, 100% - 1.75rem)}}
+  header.site .shell{{gap:.5rem;padding-block:.45rem;min-height:52px}}
+  .brand{{margin-right:auto;font-size:.98rem}}
+  .brand svg{{width:24px;height:24px}}
+  /* One scrolling row beats a wrapping block that pushes the headline down. */
+  nav.main{{order:3;width:100%;margin-left:0;gap:1.1rem;padding:.15rem 0 .1rem;
+    font-size:.88rem;overflow-x:auto;flex-wrap:nowrap;
+    scrollbar-width:none;-ms-overflow-style:none}}
+  nav.main::-webkit-scrollbar{{display:none}}
+
+  section{{padding:1.5rem 0}}
+  .hero{{padding:1.5rem 0 .5rem}}
+  .hero h1{{font-size:clamp(1.95rem,8.5vw,2.5rem);max-width:100%}}
+  .hero p.lede{{font-size:1rem;margin-top:.7rem}}
+  .hero .actions{{margin-top:1.1rem;gap:.5rem}}
+  .hero .actions .btn{{flex:1 1 auto;min-height:44px}}
+  .hero-note{{margin-top:.6rem}}
+
+  .card{{padding:1rem;border-radius:var(--r-md)}}
+  .figure{{padding:.4rem;border-radius:var(--r-md)}}
+  .stat{{padding:.85rem}}
+  .stats{{gap:.6rem}}
+  .gallery,.grid,.split{{gap:.85rem}}
+  .lead-in{{margin-bottom:1rem}}
+  section h2{{font-size:1.35rem}}
+  .plan{{padding:1.15rem}}
+
+  /* 44px minimum touch target on anything tappable. */
+  .btn{{min-height:42px}}
+  .btn-small{{min-height:36px}}
+  .chip{{padding:.4rem .65rem}}
+
+  /* Sheets dock to the bottom: reachable, and the keyboard does not cover
+     the submit button when the email field focuses. */
+  .overlay{{align-items:flex-end;padding:0}}
+  .sheet{{max-width:100%;border-radius:var(--r-lg) var(--r-lg) 0 0;
+    padding:1.25rem 1.1rem calc(1.25rem + env(safe-area-inset-bottom));
+    max-height:88vh}}
+  .sheet .close{{top:.5rem;right:.5rem;font-size:1.6rem;padding:.3rem .5rem}}
+  .field input{{font-size:16px}}  /* 16px stops iOS zooming the viewport */
+
+  footer.site{{padding:1.5rem 0}}
+  footer.site .shell{{gap:.6rem}}
+  table.packs th,table.packs td{{padding:.5rem .45rem;font-size:.86rem}}
 }}
 
-/* A short card beside a tall chart leaves a void, so this one carries a list
-   that fills the column and reads faster than a paragraph. */
-.rules{{display:grid;gap:.7rem;margin-top:.2rem}}
-.rules li{{position:relative;padding-left:1.5rem;font-size:.92rem;
-  color:var(--text-secondary);line-height:1.5}}
-.rules li::before{{content:"";position:absolute;left:0;top:.5em;width:8px;
-  height:8px;border-radius:2px;background:var(--series-3)}}
-.rules li b{{color:var(--text-primary);font-weight:620}}
-.card.fill{{display:flex;flex-direction:column;justify-content:center}}
+@media(max-width:400px){{
+  .stats{{grid-template-columns:1fr 1fr}}
+  .hero h1{{font-size:1.85rem}}
+}}
+@media (prefers-reduced-motion:reduce){{
+  *{{transition:none !important;animation:none !important}}
+  .card:hover,.plan:hover{{transform:none}}
+}}
+
+/* --- film grain ------------------------------------------------------
+   A fractal-noise plate over the page background only. It stops large flat
+   fields banding on cheap panels and gives the bone surface a paper quality
+   flat CSS colour cannot. It must never sit over a chart, a control or body
+   text, so it is fixed, behind everything, and non-interactive. If it reads
+   as texture rather than material, it is too strong. */
+body::before{{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  opacity:.045;mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:180px 180px}}
+@media (prefers-color-scheme:dark){{
+  :root:not([data-theme="light"]) body::before{{
+    mix-blend-mode:screen;opacity:.05}}
+}}
+:root[data-theme="dark"] body::before{{mix-blend-mode:screen;opacity:.05}}
+header.site,main,footer.site,.overlay{{position:relative;z-index:1}}
+
+/* --- art plates ------------------------------------------------------ */
+.plate{{position:relative;border-radius:var(--r-lg);overflow:hidden;
+  background:var(--surface-1);box-shadow:var(--sh-1);
+  border:1px solid var(--border)}}
+.plate img{{width:100%;height:100%;object-fit:cover;display:block}}
+.plate.bleed{{aspect-ratio:16/9}}
+/* The plates are levelled to the page's bone white, so no fade is needed;
+   an overlay here only added haze. */
+
+.hero-art{{position:relative}}
+.hero-art .plate{{aspect-ratio:16/10}}
+.hero-art .figure{{position:absolute;right:-2%;bottom:-14%;width:min(74%,26rem);
+  box-shadow:var(--sh-3)}}
+@media(max-width:899px){{
+  .hero-art .figure{{position:static;width:100%;margin-top:var(--s4)}}
+}}
+
+.band{{background:var(--panel-2);border-block:1px solid var(--border)}}
+.kicker{{font-size:.74rem;font-weight:660;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--text-muted);margin-bottom:.55rem}}
+"""
+
+
+def _overlays() -> str:
+    """Sign-in and checkout sheets.
+
+    Both live on every marketing page so neither costs a navigation: a visitor
+    who decides to buy on the pricing page stays on the pricing page.
+    """
+    return """
+<div class="overlay" id="signin-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="signin-title">
+  <div class="sheet">
+    <button class="close" data-action="close" aria-label="Close">&times;</button>
+    <h2 id="signin-title">Sign in</h2>
+    <p class="sub" id="signin-reason">Your email is enough. No password to
+    forget.</p>
+    <form id="signin-form" novalidate>
+      <div class="field">
+        <label for="signin-email">Email</label>
+        <input id="signin-email" type="email" required autocomplete="email"
+               placeholder="you@company.com" inputmode="email">
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:100%">
+        Continue</button>
+      <p class="form-error" id="signin-error"></p>
+    </form>
+    <p class="form-note">New accounts get free queries straight away. We use
+    your email to keep your dashboards; nothing else.</p>
+  </div>
+</div>
+
+<div class="overlay" id="checkout-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="checkout-title">
+  <div class="sheet wide">
+    <button class="close" data-action="close" aria-label="Close">&times;</button>
+    <h2 id="checkout-title">Add credits</h2>
+    <p class="sub" id="checkout-status">Preparing secure checkout&hellip;</p>
+    <div id="checkout-mount"></div>
+    <p class="form-note">Payments are processed by Stripe. Card details never
+    reach our servers.</p>
+  </div>
+</div>
 """
 
 
@@ -219,18 +467,22 @@ def _page(title: str, description: str, body: str, path: str = "/") -> str:
 <meta property="og:description" content="{html.escape(description)}">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>{_css()}</style>
-</head><body>
+</head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}">
 <header class="site"><div class="shell">
-  <a class="brand" href="/">{helix.logo(30, uid="nav")}<span>twoHelixes</span></a>
+  <a class="brand" href="/">{helix.logo(28, uid="nav")}<span>twoHelixes</span></a>
   <nav class="main">{nav}</nav>
-  <a class="btn btn-primary" href="/app">Open app</a>
+  <span class="chip" id="header-badge" hidden></span>
+  <a class="btn btn-primary" href="/app" id="header-cta"
+     data-action="signin">Start free</a>
 </div></header>
 {body}
+{_overlays()}
 <footer class="site"><div class="shell">
   <span>twoHelixes — data analytics agents</span>
   <span><a href="/docs">Docs</a> · <a href="/pricing">Pricing</a> ·
         <a href="/app">App</a></span>
 </div></footer>
+<script type="module" src="/static/marketing.js"></script>
 </body></html>"""
 
 
@@ -262,20 +514,29 @@ def home(ctx: router.Context) -> router.Result:
     shapes it and picks the chart &mdash; showing every step, so you can check
     the answer instead of trusting it.</p>
     <div class="actions">
-      <a class="btn btn-primary" href="/app">Start free</a>
+      <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
       <a class="btn btn-ghost" href="#how">See how it works</a>
     </div>
     <p class="hero-note">{config.FREE_QUERIES_PER_USER} free queries when you
     sign in. No card required.</p>
   </div>
-  <figure class="figure">
-    {hero_chart}
-    <figcaption><b>&ldquo;how did revenue trend by region this year?&rdquo;</b>
-    &mdash; rendered by the live pipeline, not a screenshot.</figcaption>
-  </figure>
+  <div class="hero-art">
+    <div class="plate">
+      <img src="/static/art/hero-1344.webp"
+           srcset="/static/art/hero-768.webp 768w, /static/art/hero-1344.webp 1344w"
+           sizes="(max-width:899px) 100vw, 52vw"
+           alt="" width="1344" height="768" fetchpriority="high" decoding="async">
+    </div>
+    <figure class="figure">
+      {hero_chart}
+      <figcaption><b>&ldquo;how did revenue trend by region?&rdquo;</b>
+      &mdash; drawn by the live pipeline.</figcaption>
+    </figure>
+  </div>
 </div></div>
 
-<section class="shell" id="how" style="padding-top:1rem">
+<section class="band" id="how" style="margin-top:clamp(2rem,5vw,4.5rem)">
+ <div class="shell">
   <div class="stats">
     <div class="stat"><div class="n">5</div>
       <div class="l">visible stages per answer</div></div>
@@ -286,10 +547,12 @@ def home(ctx: router.Context) -> router.Result:
     <div class="stat"><div class="n">SVG</div>
       <div class="l">export with no headless browser</div></div>
   </div>
+ </div>
 </section>
 
 <section><div class="shell split">
   <div>
+    <p class="kicker">How it works</p>
     <h2>You see the reasoning, not a spinner</h2>
     <p class="lead-in">Each stage streams as it happens: what it looked for,
     which key it joined on, the Python it ran, why it chose that chart. When a
@@ -325,6 +588,7 @@ def home(ctx: router.Context) -> router.Result:
 </div></section>
 
 <section><div class="shell">
+  <p class="kicker">Chart quality</p>
   <h2>Charts that do not mislead</h2>
   <p class="lead-in">The rules are enforced in code, not left to taste. Every
   chart is audited against them before you see it &mdash; including the three
@@ -358,15 +622,25 @@ def home(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 
-<section><div class="shell">
-  <h2>Connect what you already have</h2>
-  <p class="lead-in">Warehouses, databases, documents, files and APIs &mdash;
-  behind one read-only interface. Generated SQL is checked before it reaches a
-  driver.</p>
-  <div class="chips">{chips}</div>
+<section><div class="shell split">
+  <div>
+    <p class="kicker">Connectors</p>
+    <h2>Connect what you already have</h2>
+    <p class="lead-in">Warehouses, databases, documents, files and APIs &mdash;
+    behind one read-only interface. Generated SQL is checked before it ever
+    reaches a driver.</p>
+    <div class="chips">{chips}</div>
+  </div>
+  <div class="plate bleed">
+    <img src="/static/art/connect-1344.webp"
+         srcset="/static/art/connect-768.webp 768w, /static/art/connect-1344.webp 1344w"
+         sizes="(max-width:939px) 100vw, 46vw"
+         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  </div>
 </div></section>
 
 <section><div class="shell">
+  <p class="kicker">In the product</p>
   <h2>Built for people who check the numbers</h2>
   <div class="grid">
     <div class="card"><h3>A real SQL editor</h3><p>Schema-aware completions that
@@ -384,11 +658,21 @@ def home(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 
-<section><div class="shell">
-  <h2>Ask your first question</h2>
-  <p class="lead-in">{config.FREE_QUERIES_PER_USER} free queries when you sign
-  in. Connecting a source takes about a minute.</p>
-  <a class="btn btn-primary" href="/app">Open twoHelixes</a>
+<section class="band"><div class="shell split">
+  <div class="plate bleed" style="order:2">
+    <img src="/static/art/data-1344.webp"
+         srcset="/static/art/data-768.webp 768w, /static/art/data-1344.webp 1344w"
+         sizes="(max-width:939px) 100vw, 46vw"
+         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  </div>
+  <div>
+    <p class="kicker">Get started</p>
+    <h2>Ask your first question</h2>
+    <p class="lead-in">{config.FREE_QUERIES_PER_USER} free queries when you
+    sign in, and about a minute to connect a source. Sample datasets are
+    already there if you just want to look around.</p>
+    <a class="btn btn-primary" href="/app" data-action="signin">Open twoHelixes</a>
+  </div>
 </div></section>
 </main>"""
 
@@ -444,6 +728,20 @@ def features(ctx: router.Context) -> router.Result:
     )
 
 
+def _plan_cta(plan: dict[str, Any]) -> str:
+    """Free plans sign in; paid plans open checkout without leaving the page."""
+    if plan["id"] == "free":
+        return ('<a class="btn btn-ghost" href="/app" data-action="signin">'
+                f'{html.escape(plan["cta"])}</a>')
+    if plan["id"] == "pro":
+        price_id = config.get("STRIPE_PRICE_PRO", "") or ""
+        return ('<button class="btn btn-primary" data-action="buy" '
+                f'data-price="{html.escape(price_id)}">'
+                f'{html.escape(plan["cta"])}</button>')
+    return ('<button class="btn btn-primary" data-action="buy" '
+            f'data-pack="pack_25">{html.escape(plan["cta"])}</button>')
+
+
 @router.get("/pricing")
 def pricing(ctx: router.Context) -> router.Result:
     plans_html = ""
@@ -456,13 +754,15 @@ def pricing(ctx: router.Context) -> router.Result:
   <div class="amount">{html.escape(plan['price'])}</div>
   <div class="cadence">{html.escape(plan['cadence'])}</div>
   <ul>{features_html}</ul>
-  <a class="btn btn-primary" href="/app">{html.escape(plan['cta'])}</a>
+  {_plan_cta(plan)}
 </div>"""
 
     packs_html = "".join(
-        f"<tr><td>{html.escape(p['label'])}</td>"
+        f"<tr><td><b>{html.escape(p['label'])}</b></td>"
         f"<td>{p['credits']:,} credits</td>"
-        f"<td>{html.escape(p['bonus'])}</td></tr>"
+        f"<td>{html.escape(p['bonus'])}</td>"
+        f'<td style="text-align:right"><button class="btn btn-ghost btn-small" '
+        f"data-action=\"buy\" data-pack=\"{html.escape(p['id'])}\">Buy</button></td></tr>"
         for p in CREDIT_PACKS
     )
 
@@ -483,7 +783,7 @@ def pricing(ctx: router.Context) -> router.Result:
   <p class="sub">Credits never expire and are shared across chat, dashboards,
   SQL generation and long-running agents.</p>
   <div class="scroll-x"><table class="packs">
-    <thead><tr><th>Pack</th><th>Credits</th><th>Bonus</th></tr></thead>
+    <thead><tr><th>Pack</th><th>Credits</th><th>Bonus</th><th></th></tr></thead>
     <tbody>{packs_html}</tbody>
   </table></div>
 

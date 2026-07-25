@@ -320,3 +320,139 @@ def test_svg_escapes_titles():
 def test_unsupported_form_raises_for_the_fallback():
     with pytest.raises(svg.Unsupported):
         svg.render({"data": [{"type": "sankey"}], "layout": {}})
+
+
+# -- column-role regressions -----------------------------------------------
+
+
+def test_width_is_not_a_date_column():
+    """`width` contains the substring "dt".
+
+    Substring hint matching once classified `sepal_width` as time, and
+    pandas confirmed it because `to_datetime` reads a float as an offset from
+    the epoch. Iris was charted as a time series.
+    """
+    frame = pd.DataFrame(
+        {
+            "sepal_width_cm": [3.5, 3.0, 3.2, 3.1],
+            "petal_depth_cm": [1.4, 1.5, 1.3, 1.6],
+            "species": ["a", "b", "a", "b"],
+        }
+    )
+    assert tools.column_role(frame, "sepal_width_cm") == "measure"
+    assert tools.column_role(frame, "petal_depth_cm") == "measure"
+    assert tools.find_time_column(frame) is None
+
+
+def test_numeric_columns_are_never_dates_even_when_named_like_one():
+    frame = pd.DataFrame({"year_value": [1.5, 2.5, 3.5], "n": [1, 2, 3]})
+    assert not tools.looks_like_dates(frame["year_value"])
+    assert tools.column_role(frame, "year_value") == "measure"
+
+
+def test_real_date_columns_still_detected():
+    frame = pd.DataFrame(
+        {
+            "order_date": pd.date_range("2024-01-01", periods=5),
+            "created_at": ["2024-01-01", "2024-01-02", "2024-01-03",
+                           "2024-01-04", "2024-01-05"],
+            "amount": [1, 2, 3, 4, 5],
+        }
+    )
+    assert tools.column_role(frame, "order_date") == "time"
+    assert tools.column_role(frame, "created_at") == "time"
+    assert tools.find_time_column(frame) == "order_date"
+
+
+# -- sample datasets -------------------------------------------------------
+
+
+def test_every_sample_builds_and_charts_cleanly():
+    """The samples are a new user's first experience; a broken one is fatal."""
+    from twohelixes.datasets import samples
+
+    built = samples.materialise()
+    assert len(built) == len(samples.SAMPLES)
+
+    for sample in samples.SAMPLES:
+        entry = built[sample.key]
+        assert "error" not in entry, f"{sample.key}: {entry.get('error')}"
+        assert entry["rows"] > 0, f"{sample.key} is empty"
+
+        frame = samples.frame(sample.key)
+        config = figures.validate_config(figures.heuristic_config(frame, ""), frame)
+        figure, _ = figures.build(frame, config)
+        figure = defaults.apply(figure, chart_type=config["chart_type"])
+        assert defaults.audit(figure) == [], f"{sample.key} chart has findings"
+
+
+def test_samples_are_queryable_with_sql():
+    from twohelixes.connectors.document_sources import FilesConnector
+    from twohelixes.datasets import samples
+
+    samples.materialise()
+    connector = FilesConnector({"root": str(samples.storage_dir())})
+    assert connector.connect(), connector.error
+
+    names = {t.name for t in connector.tables()}
+    for sample in samples.SAMPLES:
+        assert sample.key in names, f"{sample.key} is not a DuckDB view"
+        result = connector.execute(f'SELECT count(*) AS n FROM "{sample.key}"')
+        assert result.rows[0][0] > 0
+
+
+def test_sample_sql_is_read_only():
+    from twohelixes.connectors.base import UnsafeQuery
+    from twohelixes.connectors.document_sources import FilesConnector
+    from twohelixes.datasets import samples
+
+    connector = FilesConnector({"root": str(samples.storage_dir())})
+    connector.connect()
+    with pytest.raises(UnsafeQuery):
+        connector.execute("DROP VIEW iris")
+
+
+# -- R2 presigning ---------------------------------------------------------
+
+
+def test_presigned_url_shape(monkeypatch):
+    """Signature correctness needs a live bucket; shape can be checked here."""
+    from twohelixes.storage import r2
+
+    monkeypatch.setattr(r2, "credentials", lambda: ("AKIATEST", "secrettest"))
+    monkeypatch.setattr(r2, "endpoint", lambda: "https://acct.r2.cloudflarestorage.com")
+    monkeypatch.setattr(r2, "bucket", lambda: "twohelixesstatic")
+
+    url = r2.presign("uploads/u1/file.csv", "PUT", 900)
+    assert url.startswith("https://acct.r2.cloudflarestorage.com/twohelixesstatic/")
+    assert "X-Amz-Algorithm=AWS4-HMAC-SHA256" in url
+    assert "X-Amz-Signature=" in url
+    assert "X-Amz-Expires=900" in url
+
+
+def test_upload_keys_are_namespaced_per_user():
+    """A guessed key must not reach another account's object."""
+    from twohelixes.storage import r2
+
+    key = r2.object_key("user-abc", "../../etc/passwd")
+    assert key.startswith("uploads/user-abc/")
+    assert ".." not in key
+    assert "/etc/" not in key
+
+
+def test_upload_ticket_rejects_bad_types_and_sizes(monkeypatch):
+    from twohelixes.storage import r2
+
+    monkeypatch.setattr(r2, "credentials", lambda: ("AKIATEST", "secrettest"))
+    monkeypatch.setattr(r2, "endpoint", lambda: "https://acct.r2.cloudflarestorage.com")
+
+    with pytest.raises(r2.R2Error):
+        r2.upload_ticket("u1", "x.exe", "application/x-msdownload", 10)
+    with pytest.raises(r2.R2Error):
+        r2.upload_ticket("u1", "x.csv", "text/csv", 0)
+    with pytest.raises(r2.R2Error):
+        r2.upload_ticket("u1", "x.csv", "text/csv", r2.MAX_UPLOAD_BYTES + 1)
+
+    ticket = r2.upload_ticket("u1", "data.csv", "text/csv", 1024)
+    assert ticket["method"] == "PUT"
+    assert ticket["key"].startswith("uploads/u1/")

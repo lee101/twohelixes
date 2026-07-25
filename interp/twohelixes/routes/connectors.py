@@ -208,6 +208,179 @@ def _ensure_files_source(user_id: str, folder: Path) -> None:
         log.debug("files source not created: %s", exc)
 
 
+@router.post("/v1/uploads/presign")
+def presign_upload(ctx: router.Context) -> router.Result:
+    """Hand the browser a URL to PUT a file straight to R2.
+
+    The app server never sees the bytes. That is the only workable route for
+    a large file - the Mojo bridge carries UTF-8 strings, so a 200 MB Parquet
+    body cannot cross it - and it is cheaper besides.
+    """
+    identity = auth.require(ctx)
+    from twohelixes.storage import r2
+
+    if not r2.is_configured():
+        return router.error(
+            503,
+            "storage_unconfigured",
+            "Direct upload needs R2 credentials; use /v1/upload for small files.",
+        )
+
+    body = ctx.json
+    if not isinstance(body, dict):
+        return router.error(400, "invalid_body")
+
+    try:
+        ticket = r2.upload_ticket(
+            identity.user_id,
+            str(body.get("filename") or ""),
+            str(body.get("content_type") or ""),
+            int(body.get("size") or 0),
+        )
+    except r2.R2Error as exc:
+        return router.error(400, "upload_rejected", str(exc))
+
+    return router.json_result(ticket)
+
+
+@router.post("/v1/uploads/complete")
+def complete_upload(ctx: router.Context) -> router.Result:
+    """Ingest an object the browser already uploaded."""
+    identity = auth.require(ctx)
+    from twohelixes.storage import r2
+
+    key = str(ctx.field("key") or "")
+    # The key is namespaced by user id; refuse anything outside the caller's
+    # own prefix so a guessed key cannot pull someone else's object.
+    if not key.startswith(f"uploads/{identity.user_id}/"):
+        return router.error(403, "not_your_upload")
+
+    try:
+        meta = r2.head(key)
+        raw = r2.fetch(key)
+    except Exception as exc:  # noqa: BLE001
+        return router.error(400, "fetch_failed", str(exc))
+
+    user_dir = config.data_dir() / "uploads" / identity.user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(key).name
+    target = user_dir / name
+    target.write_bytes(raw)
+
+    frame = _read_any(target)
+    if frame is None:
+        target.unlink(missing_ok=True)
+        return router.error(400, "unreadable_file")
+
+    dataset_id = _register_dataset(identity, frame, name, target)
+    from twohelixes.interpreter import tools
+
+    return router.json_result(
+        {
+            "dataset_id": dataset_id,
+            "name": Path(name).stem,
+            "rows": int(len(frame)),
+            "columns": [str(c) for c in frame.columns],
+            "bytes": meta.get("size", len(raw)),
+            "profile": tools.profile(frame),
+            "preview": frame.head(20).to_dict("records"),
+        },
+        status=201,
+    )
+
+
+def _register_dataset(identity: Any, frame: Any, name: str, target: Path) -> str:
+    """Store a dataframe as Parquet where possible and record it."""
+    parquet_path = target.with_suffix(".parquet")
+    try:
+        frame.to_parquet(parquet_path)
+        storage = str(parquet_path)
+    except Exception:  # noqa: BLE001 - pyarrow may be absent
+        storage = str(target)
+
+    dataset_id = store.new_id()
+    store.execute(
+        "INSERT INTO datasets (id, user_id, source_id, name, description, columns, "
+        "row_count, storage, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            dataset_id,
+            identity.user_id,
+            None,
+            Path(name).stem,
+            f"Uploaded {name}",
+            store.dump_json([str(c) for c in frame.columns]),
+            int(len(frame)),
+            storage,
+            time.time(),
+        ),
+    )
+    _ensure_files_source(identity.user_id, target.parent)
+    return dataset_id
+
+
+@router.get("/v1/samples")
+def list_samples(ctx: router.Context) -> router.Result:
+    """Sample datasets, available before any source is connected.
+
+    A new account with nothing connected has nothing to ask about, which is
+    the fastest way to lose someone in the first minute.
+    """
+    from twohelixes.datasets import samples
+
+    return router.json_result({"samples": samples.catalogue()})
+
+
+@router.post("/v1/samples/{key}/attach")
+def attach_sample(ctx: router.Context) -> router.Result:
+    """Copy a sample into the caller's datasets so it behaves like their own."""
+    identity = auth.require(ctx)
+    from twohelixes.datasets import samples
+
+    key = ctx.params["key"]
+    if key not in samples.BY_KEY:
+        return router.error(404, "unknown_sample")
+
+    try:
+        frame = samples.frame(key)
+    except Exception as exc:  # noqa: BLE001
+        return router.error(500, "sample_unavailable", str(exc))
+
+    sample = samples.BY_KEY[key]
+    user_dir = config.data_dir() / "uploads" / identity.user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    target = user_dir / f"{key}.parquet"
+    frame.to_parquet(target)
+
+    dataset_id = store.new_id()
+    store.execute(
+        "INSERT INTO datasets (id, user_id, source_id, name, description, columns, "
+        "row_count, storage, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            dataset_id,
+            identity.user_id,
+            None,
+            sample.name,
+            sample.description,
+            store.dump_json([str(c) for c in frame.columns]),
+            int(len(frame)),
+            str(target),
+            time.time(),
+        ),
+    )
+    _ensure_files_source(identity.user_id, user_dir)
+
+    return router.json_result(
+        {
+            "dataset_id": dataset_id,
+            "name": sample.name,
+            "rows": int(len(frame)),
+            "columns": [str(c) for c in frame.columns],
+            "questions": sample.questions,
+        },
+        status=201,
+    )
+
+
 @router.get("/v1/datasets")
 def list_datasets(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
