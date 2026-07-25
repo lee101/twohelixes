@@ -41,6 +41,9 @@ VALID_TYPES = {
 
 # Above this many categories a pie is unreadable; above the bar limit the tail
 # is folded into "Other".
+# Forms with a dedicated builder in charts/forms.py.
+FORM_BUILDERS = frozenset({"sankey", "treemap", "funnel", "waterfall", "box"})
+
 MAX_PIE_SLICES = 6
 MAX_BAR_CATEGORIES = 24
 LONG_LABEL_CHARS = 14
@@ -367,6 +370,27 @@ def _traces(
     y = config.get("y")
     color = config.get("color")
 
+    # Dedicated forms first. Several of them read `color` and `y` with their
+    # own meaning - a sankey's target, a treemap's parent - so neither the
+    # wide-column path nor the colour-grouping path below may claim them.
+    if chart_type in FORM_BUILDERS:
+        from twohelixes.charts import forms
+
+        traces, notes = forms.build(chart_type, frame, config, mode)
+        warnings.extend(notes)
+        if traces:
+            return traces
+        warnings.append(f"Could not draw a {chart_type}; showing a bar chart.")
+        return [
+            {
+                "type": "bar",
+                "x": _column(frame, x),
+                "y": _column(frame, y),
+                "_series_index": 0,
+            }
+        ]
+
+
     # A y with several columns is what the transform stage leaves behind when
     # it pivots - one column per region, per plan, per whatever it grouped by.
     # That is its own trace-per-column shape, and it takes precedence over a
@@ -439,8 +463,6 @@ def _traces(
         ]
     if chart_type == "histogram":
         return [{"type": "histogram", "x": values_x or values_y, "_series_index": 0}]
-    if chart_type == "box":
-        return [{"type": "box", "y": values_y, "x": values_x, "_series_index": 0}]
     if chart_type == "heatmap":
         return _heatmap(frame, config, warnings)
     if chart_type == "candlestick":

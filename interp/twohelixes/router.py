@@ -197,6 +197,7 @@ def build() -> None:
         query,
         sql,
         static_files,
+        teams,
     )
 
     _built = True
