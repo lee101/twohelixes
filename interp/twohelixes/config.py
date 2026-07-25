@@ -58,6 +58,7 @@ CREDIT_COST = {
     "sql_generate": 1,
     "sql_autocomplete": 0,
     "deep_research": 150,
+    "notebook_minute": 2,
     "long_agent_minute": 10,
 }
 

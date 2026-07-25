@@ -191,6 +191,7 @@ def build() -> None:
         charts,
         connectors,
         dashboards,
+        notebooks,
         pages,
         query,
         sql,
