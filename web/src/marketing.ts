@@ -245,8 +245,54 @@ async function startCheckout(opts: { pack?: string; priceId?: string }): Promise
 // Wiring
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// Theme and small page affordances
+// --------------------------------------------------------------------------
+
+/** Same storage key the app uses, so the choice survives the boundary. */
+function wireTheme(): void {
+  const toggle = $<HTMLButtonElement>("#theme-toggle");
+  if (!toggle) return;
+  toggle.addEventListener("click", () => {
+    const stamped = document.documentElement.getAttribute("data-theme");
+    const dark = stamped
+      ? stamped === "dark"
+      : window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+    const next = dark ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("th-theme", next);
+    } catch {
+      /* private mode: the choice just does not persist */
+    }
+  });
+}
+
+/** Copy buttons on the API examples. A curl command exists to be pasted. */
+function wireCopy(): void {
+  for (const node of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+    node.addEventListener("click", async () => {
+      const code = node.closest(".codeblock")?.querySelector("code");
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code.textContent ?? "");
+        node.textContent = "Copied";
+        node.dataset.done = "1";
+      } catch {
+        node.textContent = "Press Ctrl+C";
+      }
+      setTimeout(() => {
+        node.textContent = "Copy";
+        delete node.dataset.done;
+      }, 1800);
+    });
+  }
+}
+
 function wire(): void {
   wireSignIn();
+  wireTheme();
+  wireCopy();
 
   document.addEventListener("click", (event) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action]");

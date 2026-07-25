@@ -117,6 +117,17 @@ BUILDERS = {
 }
 
 
+# Sized for the narrowest place each chart appears, not the widest.
+#
+# An SVG scales everything, text included. A 620px-wide render shown at 350px
+# on a phone puts the tick labels at 6px - the charts were unreadable on the
+# device most visitors arrive on. Rendering at roughly the mobile display width
+# and letting the desktop layout scale *up* is the trade that costs nothing:
+# upscaled text gets bigger, which is the harmless direction.
+HERO_SIZE = (420, 284)
+GALLERY_SIZE = (400, 276)
+
+
 def chart_svg(name: str, mode: str = "light", width: int = 640, height: int = 380) -> str:
     """Render one example chart, cached per (name, mode, size)."""
     key = f"{name}:{mode}:{width}x{height}"
@@ -162,5 +173,6 @@ def warm() -> None:
     """Pre-render every example at boot so no request pays for it."""
     for name in BUILDERS:
         for mode in ("light", "dark"):
-            chart_svg(name, mode)
+            size = HERO_SIZE if name == "revenue" else GALLERY_SIZE
+            chart_svg(name, mode, *size)
     log.info("showcase: %d chart variants cached", len(_cache))

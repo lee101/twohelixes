@@ -107,6 +107,22 @@ a{{color:var(--accent);text-decoration:none}}
 a:hover{{text-decoration:underline}}
 :focus-visible{{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}}
 
+.visually-hidden{{position:absolute;width:1px;height:1px;overflow:hidden;
+  clip-path:inset(50%);white-space:nowrap}}
+
+/* Keyboard users reach the content without tabbing the whole nav. */
+.skip{{position:absolute;left:-9999px;top:0}}
+.skip:focus{{left:var(--s3);top:var(--s2);z-index:200;padding:.5rem .8rem;
+  background:var(--panel);border:1px solid var(--border-strong);
+  border-radius:var(--r-sm);box-shadow:var(--sh-2);font-weight:600}}
+
+/* Body copy outside a card. Measure is capped here rather than at the call
+   site, because an uncapped paragraph on a 1440px page runs past 140
+   characters and the eye loses the line return. */
+p.sub{{color:var(--text-secondary);max-width:62ch;font-size:1rem;
+  line-height:1.6}}
+p.sub + p.sub{{margin-top:var(--s3)}}
+
 /* --- header ---------------------------------------------------------- */
 header.site{{position:sticky;top:0;z-index:40;backdrop-filter:blur(10px);
   background:color-mix(in srgb,var(--surface-1) 86%,transparent);
@@ -122,6 +138,32 @@ nav.main a{{color:var(--text-secondary);font-size:.92rem;font-weight:500;
   transition:color .15s}}
 nav.main a:hover{{color:var(--text-primary);text-decoration:none}}
 nav.main a[aria-current]{{color:var(--text-primary);font-weight:600}}
+
+/* The app has a theme toggle, so the marketing pages need one too - otherwise
+   a visitor who chose dark inside the product lands back on a light homepage.
+   Both write the same localStorage key. */
+.icon-btn{{display:inline-grid;place-items:center;width:34px;height:34px;
+  border-radius:var(--r-sm);border:1px solid var(--border);
+  background:var(--panel);color:var(--text-secondary);cursor:pointer;
+  padding:0;flex:0 0 auto;transition:border-color .15s,color .15s}}
+.icon-btn:hover{{border-color:var(--border-strong);color:var(--text-primary)}}
+.icon-btn svg{{width:17px;height:17px;stroke:currentColor;fill:none;
+  stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}}
+.icon-btn .i-sun{{display:none}}
+:root[data-theme="dark"] .icon-btn .i-sun{{display:block}}
+:root[data-theme="dark"] .icon-btn .i-moon{{display:none}}
+@media (prefers-color-scheme:dark){{
+  :root:not([data-theme="light"]) .icon-btn .i-sun{{display:block}}
+  :root:not([data-theme="light"]) .icon-btn .i-moon{{display:none}}
+}}
+
+/* --- page heads (features, pricing, docs) ---------------------------- */
+.page-head{{padding:clamp(1.75rem,4vw,3rem) 0 0}}
+.page-head h1{{font-size:clamp(1.95rem,4.4vw,2.9rem);letter-spacing:-.03em;
+  line-height:1.06;font-weight:700;max-width:21ch}}
+.page-head .kicker{{margin-bottom:.5rem}}
+.page-head p.sub{{margin-top:var(--s3);font-size:clamp(1rem,1.5vw,1.1rem);
+  max-width:54ch}}
 
 /* --- buttons --------------------------------------------------------- */
 .btn{{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;
@@ -149,6 +191,9 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
 @media(min-width:980px){{.grid.three{{grid-template-columns:repeat(3,1fr)}}}}
 .split{{display:grid;gap:var(--s6);grid-template-columns:1fr;align-items:center}}
 @media(min-width:940px){{.split{{grid-template-columns:1fr 1fr}}}}
+/* Centring a short paragraph against a tall list leaves it floating in the
+   middle of a column of air; these pair by their top edge instead. */
+.split.top{{align-items:start}}
 
 .card{{background:var(--panel);border:1px solid var(--border);
   border-radius:var(--r-lg);padding:var(--s5);box-shadow:var(--sh-1);
@@ -268,6 +313,45 @@ code,pre{{font-family:var(--mono);font-size:.86rem}}
 pre{{background:var(--panel);border:1px solid var(--border);
   border-radius:var(--r-md);padding:var(--s4);overflow-x:auto;
   box-shadow:var(--sh-1)}}
+:not(pre) > code{{background:var(--panel-2);border:1px solid var(--border);
+  border-radius:6px;padding:.08em .35em;font-size:.85em}}
+
+/* --- endpoint blocks ------------------------------------------------- */
+.endpoint{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);box-shadow:var(--sh-1);overflow:hidden;
+  display:flex;flex-direction:column;
+  transition:border-color .15s,box-shadow .2s}}
+.endpoint:hover{{border-color:var(--border-strong);box-shadow:var(--sh-2)}}
+.endpoint > header{{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;
+  padding:var(--s4) var(--s5) 0}}
+.endpoint h3{{font-size:1rem;font-weight:640;letter-spacing:-.01em;
+  padding:0 var(--s5);margin-top:.5rem}}
+.endpoint p{{color:var(--text-secondary);font-size:.91rem;max-width:62ch;
+  padding:0 var(--s5);margin-top:.35rem}}
+.method{{font-family:var(--mono);font-size:.7rem;font-weight:700;
+  letter-spacing:.04em;padding:.18rem .42rem;border-radius:6px;
+  background:var(--accent-soft);color:var(--accent);flex:0 0 auto}}
+.method.get{{background:color-mix(in srgb,var(--ok) 15%,transparent);
+  color:var(--ok)}}
+.endpoint .route{{font-family:var(--mono);font-size:.82rem;
+  color:var(--text-muted);word-break:break-all}}
+.codeblock{{position:relative;margin:var(--s3) var(--s5) var(--s5);
+  margin-top:auto;padding-top:var(--s3)}}
+/* A clipped curl command is worse than a wrapped one: the whole point of the
+   block is that it can be copied and read, and a horizontal scrollbar inside
+   a card hides the tail of the line from anyone skimming. */
+.codeblock pre{{margin:0;background:var(--panel-2);padding-right:5rem;
+  white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}}
+.copy{{position:absolute;top:.5rem;right:.5rem;font-size:.74rem;
+  font-weight:640;padding:.28rem .55rem;border-radius:var(--r-sm);
+  border:1px solid var(--border-strong);background:var(--panel);
+  color:var(--text-secondary);cursor:pointer;opacity:0;
+  transition:opacity .15s,color .15s}}
+.codeblock:hover .copy,.copy:focus-visible{{opacity:1}}
+.copy:hover{{color:var(--text-primary)}}
+.copy[data-done]{{opacity:1;color:var(--ok);border-color:var(--ok)}}
+/* No hover on a touch screen, so the control has to be permanently visible. */
+@media (hover:none){{.copy{{opacity:1}}}}
 .badge{{display:inline-block;padding:.25rem .58rem;border-radius:var(--r-full);
   background:color-mix(in srgb,var(--ok) 16%,transparent);
   color:var(--ok);font-size:.76rem;font-weight:650}}
@@ -275,7 +359,10 @@ pre{{background:var(--panel);border:1px solid var(--border);
 footer.site{{border-top:1px solid var(--border);padding:var(--s6) 0;
   color:var(--text-muted);font-size:.88rem;margin-top:var(--s5)}}
 footer.site .shell{{display:flex;gap:var(--s5);flex-wrap:wrap;
-  justify-content:space-between}}
+  justify-content:space-between;align-items:center}}
+footer.site nav{{display:flex;gap:1.15rem;flex-wrap:wrap}}
+footer.site a{{color:var(--text-secondary)}}
+footer.site a:hover{{color:var(--text-primary)}}
 
 /* --- overlay: sign-in and checkout, so neither costs a navigation ---- */
 .overlay{{position:fixed;inset:0;z-index:100;display:none;
@@ -354,9 +441,24 @@ footer.site .shell{{display:flex;gap:var(--s5);flex-wrap:wrap;
   .sheet .close{{top:.5rem;right:.5rem;font-size:1.6rem;padding:.3rem .5rem}}
   .field input{{font-size:16px}}  /* 16px stops iOS zooming the viewport */
 
+  .page-head{{padding:1.25rem 0 0}}
+  .page-head h1{{font-size:clamp(1.8rem,7.5vw,2.3rem);max-width:100%}}
+  .page-head p.sub{{font-size:1rem}}
+
+  .endpoint > header,.endpoint p,.endpoint h3{{padding-inline:1rem}}
+  .endpoint > header{{padding-top:1rem}}
+  .codeblock{{margin:.75rem 1rem 1rem}}
+  .codeblock pre{{padding:.85rem;padding-right:.85rem;font-size:.8rem}}
+  /* Overlaying the copy control would sit it on top of the command, so on a
+     phone it goes under the block at full tap width instead. */
+  .copy{{position:static;display:block;width:100%;margin-top:.4rem;
+    min-height:38px;opacity:1}}
+
   footer.site{{padding:1.5rem 0}}
-  footer.site .shell{{gap:.6rem}}
+  footer.site .shell{{gap:.6rem;justify-content:flex-start}}
+  footer.site nav{{gap:.9rem}}
   table.packs th,table.packs td{{padding:.5rem .45rem;font-size:.86rem}}
+  table.packs .btn-small{{min-height:38px}}
 }}
 
 @media(max-width:400px){{
@@ -392,8 +494,20 @@ header.site,main,footer.site,.overlay{{position:relative;z-index:1}}
   border:1px solid var(--border)}}
 .plate img{{width:100%;height:100%;object-fit:cover;display:block}}
 .plate.bleed{{aspect-ratio:16/9}}
-/* The plates are levelled to the page's bone white, so no fade is needed;
-   an overlay here only added haze. */
+/* In light mode the plates are levelled to the page's bone white, so no fade
+   is needed; an overlay there only added haze.
+
+   Dark mode is the opposite problem. The plates are studio shots on white, and
+   a white 16:9 slab on a #1a1a19 page is the brightest thing on the screen -
+   it out-shouts every chart. Dimming the whole image to stone grey and pushing
+   saturation back keeps the marble legible and the helix blue while letting
+   the plate sit *inside* the page instead of burning a hole in it. */
+@media (prefers-color-scheme:dark){{
+  :root:not([data-theme="light"]) .plate img{{
+    filter:brightness(.58) contrast(1.08) saturate(1.2)}}
+}}
+:root[data-theme="dark"] .plate img{{
+  filter:brightness(.58) contrast(1.08) saturate(1.2)}}
 
 .hero-art{{position:relative}}
 .hero-art .plate{{aspect-ratio:16/10}}
@@ -452,26 +566,58 @@ def _overlays() -> str:
 """
 
 
+# Applied before first paint, so a visitor who chose dark inside the app never
+# sees a white flash on the way back to a marketing page. Inline and blocking
+# on purpose: deferring it *is* the flash.
+_THEME_BOOT = (
+    "<script>try{var t=localStorage.getItem('th-theme');"
+    "if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>"
+)
+
+_THEME_TOGGLE = """
+<button class="icon-btn" id="theme-toggle" type="button"
+        aria-label="Switch between light and dark">
+  <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path
+    d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>
+  <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle
+    cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2
+    M19.2 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6
+    M6.9 17.1l-1.6 1.6"/></svg>
+</button>"""
+
+
 def _page(title: str, description: str, body: str, path: str = "/") -> str:
     nav = "".join(
         f'<a href="{href}"{" aria-current=\"page\"" if href == path else ""}>{label}</a>'
         for href, label in NAV
     )
+    site = config.site_url().rstrip("/")
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{html.escape(title)}</title>
 <meta name="description" content="{html.escape(description)}">
+<meta name="theme-color" content="#fcfcfb" media="(prefers-color-scheme:light)">
+<meta name="theme-color" content="#1a1a19" media="(prefers-color-scheme:dark)">
+<link rel="canonical" href="{site}{html.escape(path)}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{site}{html.escape(path)}">
+<meta property="og:site_name" content="twoHelixes">
 <meta property="og:title" content="{html.escape(title)}">
 <meta property="og:description" content="{html.escape(description)}">
+<meta property="og:image" content="{site}/static/art/hero-1344.webp">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+{_THEME_BOOT}
 <style>{_css()}</style>
 </head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}">
+<a class="skip" href="#content">Skip to content</a>
 <header class="site"><div class="shell">
   <a class="brand" href="/">{helix.logo(28, uid="nav")}<span>twoHelixes</span></a>
-  <nav class="main">{nav}</nav>
+  <nav class="main" aria-label="Main">{nav}</nav>
   <span class="chip" id="header-badge" hidden></span>
+  {_THEME_TOGGLE}
   <a class="btn btn-primary" href="/app" id="header-cta"
      data-action="signin">Start free</a>
 </div></header>
@@ -479,8 +625,10 @@ def _page(title: str, description: str, body: str, path: str = "/") -> str:
 {_overlays()}
 <footer class="site"><div class="shell">
   <span>twoHelixes — data analytics agents</span>
-  <span><a href="/docs">Docs</a> · <a href="/pricing">Pricing</a> ·
-        <a href="/app">App</a></span>
+  <nav aria-label="Footer">
+    <a href="/features">Features</a><a href="/pricing">Pricing</a>
+    <a href="/docs">Docs</a><a href="/app">App</a>
+  </nav>
 </div></footer>
 <script type="module" src="/static/marketing.js"></script>
 </body></html>"""
@@ -492,10 +640,10 @@ def home(ctx: router.Context) -> router.Result:
 
     # Every chart below is rendered by the same pipeline that serves customers.
     # If the chart defaults regress, this page changes with them.
-    hero_chart = showcase.chart_svg("revenue", mode, 720, 400)
-    channels = showcase.chart_svg("channels", mode, 620, 360)
-    latency = showcase.chart_svg("latency", mode, 620, 360)
-    retention = showcase.chart_svg("retention", mode, 620, 360)
+    hero_chart = showcase.chart_svg("revenue", mode, *showcase.HERO_SIZE)
+    channels = showcase.chart_svg("channels", mode, *showcase.GALLERY_SIZE)
+    latency = showcase.chart_svg("latency", mode, *showcase.GALLERY_SIZE)
+    retention = showcase.chart_svg("retention", mode, *showcase.GALLERY_SIZE)
 
     connectors = (
         "PostgreSQL", "MySQL", "SQL Server", "Snowflake", "BigQuery",
@@ -505,7 +653,7 @@ def home(ctx: router.Context) -> router.Result:
     chips = "".join(f'<span class="chip">{html.escape(c)}</span>' for c in connectors)
 
     body = f"""
-<main>
+<main id="content">
 <div class="hero"><div class="shell hero-layout">
   <div>
     <span class="eyebrow">Ask a question. Watch it work.</span>
@@ -687,44 +835,138 @@ def home(ctx: router.Context) -> router.Result:
     )
 
 
+STAGES = (
+    ("Finding the data", "Which tables and columns can answer this at all, and "
+     "how confident it is that they can."),
+    ("Joining", "The key it picked, the value overlap it measured, and whether "
+     "the row count survived - so a fan-out cannot hide."),
+    ("Shaping the data", "The Python it ran, in full. Resampling respects the "
+     "data's own granularity rather than snapping to months."),
+    ("Choosing the chart", "The form, and the forms it rejected. Naming the "
+     "rejected option is what makes the choice checkable."),
+    ("Applying defaults", "Palette, spacing, labels and a re-audit of the "
+     "finished figure. Anything that slipped through is printed beside it."),
+)
+
+CAPABILITIES = (
+    ("Code interpreter",
+     "pandas, polars, numpy, scipy, scikit-learn, statsmodels and plotly are "
+     "pre-imported at worker boot, so the first query is not the slow one. "
+     "Alongside them sit purpose-built tools: column-role inference, currency "
+     "coercion, overlap-ranked join keys, granularity-aware resampling, "
+     "outlier masks, trend fitting and forecasting."),
+    ("SQL editor",
+     "Completions answer from the schema synchronously, so typing never waits "
+     "on a model. Generation, per-source suggested questions, saved queries "
+     "and full history sit alongside. Every generated statement is checked "
+     "read-only before it reaches a driver."),
+    ("Charts you control",
+     "Change x, y, z, colour, chart type, aggregation and stacking by hand at "
+     "any time - no query spent. Or describe the change in words and let the "
+     "edit stage apply it. The reasoning trace stays attached to the chart."),
+    ("Long-running agents",
+     "Deep research runs hypothesis-test-revise loops inside the code "
+     "interpreter for minutes at a time, and reports only the findings it "
+     "actually produced output for."),
+    ("Export that stays sharp",
+     "A native SVG exporter draws bar, line, area, scatter and pie directly - "
+     "no headless browser, deterministic output, and markup a designer can "
+     "open and edit. PNG, CSV and JSON too."),
+    ("Notebooks and dashboards",
+     "Any answer exports to a marimo notebook you can keep running, or pins to "
+     "a dashboard with a share link that needs no account to read."),
+)
+
+
 @router.get("/features")
 def features(ctx: router.Context) -> router.Result:
-    body = """
-<main><section><div class="shell">
-  <h1 style="font-size:clamp(1.9rem,4.4vw,2.8rem);letter-spacing:-.02em;
-    margin-bottom:.6rem">Features</h1>
-  <p class="sub">Everything below is implemented, not planned.</p>
+    mode = ctx.q("mode", "light") or "light"
+    stages = "".join(
+        f'<li class="tstep"><div class="top"><i class="dot"></i>'
+        f'<span class="nm">{html.escape(name)}</span>'
+        f'<span class="ms">stage {i}</span></div>'
+        f'<p class="said">{html.escape(said)}</p></li>'
+        for i, (name, said) in enumerate(STAGES, 1)
+    )
+    cards = "".join(
+        f"<div class=\"card\"><h3>{html.escape(title)}</h3>"
+        f"<p>{html.escape(text)}</p></div>"
+        for title, text in CAPABILITIES
+    )
 
-  <h2 style="margin-top:2rem">The pipeline</h2>
-  <p class="sub">Five stages, each streaming its own reasoning. A stage that
-  fails degrades rather than aborting: a failed transform falls back to the
-  cleaned frame and tells you it did.</p>
+    body = f"""
+<main id="content">
+<section class="page-head"><div class="shell">
+  <p class="kicker">Features</p>
+  <h1>Everything here is implemented, not planned</h1>
+  <p class="sub">twoHelixes answers a question the way an analyst would, and
+  shows the work at each step so you can disagree with it.</p>
+</div></section>
 
-  <h2 style="margin-top:2rem">Code interpreter</h2>
-  <p class="sub">pandas, polars, numpy, scipy, scikit-learn, statsmodels and
-  plotly are pre-imported at worker boot, alongside purpose-built tools -
-  column-role inference, currency coercion, overlap-ranked join keys,
-  resampling that respects the data's own granularity, outlier masks,
-  trend fitting and forecasting.</p>
+<section><div class="shell split top">
+  <div>
+    <p class="kicker">The pipeline</p>
+    <h2>Five stages, each one visible</h2>
+    <p class="sub">A stage that fails degrades rather than aborting: a failed
+    transform falls back to the cleaned frame and says so, and you still get a
+    chart. Every stage can be stopped, edited or taken over by hand.</p>
+  </div>
+  <ul class="trace-demo">{stages}</ul>
+</div></section>
 
-  <h2 style="margin-top:2rem">SQL editor</h2>
-  <p class="sub">Completions answer from the schema synchronously so typing
-  never waits on a model. Generation, suggestion, saved queries and full
-  history sit alongside. Every generated statement is checked read-only before
-  it reaches a driver.</p>
+<section class="band"><div class="shell">
+  <p class="kicker">Chart quality</p>
+  <h2>The rules are in code, not in a style guide</h2>
+  <p class="lead-in">Hues are assigned in fixed order and never cycled, scatter
+  forms cap at three series, and no chart ever gets two y-scales. Both charts
+  below came off the same audited path your answers do.</p>
+  <div class="gallery">
+    <figure class="figure">{showcase.chart_svg("channels", mode,
+        *showcase.GALLERY_SIZE)}
+      <figcaption>The tail folds into <b>Other</b> rather than reusing a
+      colour or being silently dropped.</figcaption></figure>
+    <figure class="figure">{showcase.chart_svg("latency", mode,
+        *showcase.GALLERY_SIZE)}
+      <figcaption>Titled with <b>the finding</b>, not with the column
+      names.</figcaption></figure>
+  </div>
+</div></section>
 
-  <h2 style="margin-top:2rem">Charts you control</h2>
-  <p class="sub">Change x, y, z, colour, chart type, aggregation and stacking
-  by hand at any time, or describe the change in words and let the edit stage
-  apply it. The reasoning trace stays attached to the chart.</p>
+<section><div class="shell">
+  <p class="kicker">In the product</p>
+  <h2>What you get to use</h2>
+  <div class="grid three">{cards}</div>
+</div></section>
 
-  <h2 style="margin-top:2rem">Export</h2>
-  <p class="sub">A native SVG exporter renders bar, line, area, scatter and pie
-  directly - no headless browser, deterministic output, editable markup. PNG
-  and JSON export are there too.</p>
-</div></section></main>"""
+<section class="band"><div class="shell split">
+  <div>
+    <p class="kicker">Get started</p>
+    <h2>Ask your first question</h2>
+    <p class="sub">{config.FREE_QUERIES_PER_USER} free queries when you sign
+    in. Sample datasets are already loaded, so you can try it before connecting
+    anything.</p>
+    <div class="actions" style="margin-top:var(--s5);display:flex;gap:.65rem;
+      flex-wrap:wrap">
+      <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
+      <a class="btn btn-ghost" href="/pricing">See pricing</a>
+    </div>
+  </div>
+  <div class="plate bleed">
+    <img src="/static/art/data-1344.webp"
+         srcset="/static/art/data-768.webp 768w, /static/art/data-1344.webp 1344w"
+         sizes="(max-width:939px) 100vw, 46vw"
+         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  </div>
+</div></section>
+</main>"""
     return router.html(
-        _page("Features — twoHelixes", "What twoHelixes does.", body, "/features")
+        _page(
+            "Features — twoHelixes",
+            "The five-stage pipeline, the code interpreter, the SQL editor, "
+            "chart controls and export - all implemented, all visible.",
+            body,
+            "/features",
+        )
     )
 
 
@@ -766,80 +1008,151 @@ def pricing(ctx: router.Context) -> router.Result:
         for p in CREDIT_PACKS
     )
 
+    def _cost(value: int) -> str:
+        # A schema-only completion costs nothing because it never calls a
+        # model; "0 credits" reads like a rounding error, "Free" is the point.
+        if value == 0:
+            return '<span class="badge">Free</span>'
+        return f"{value} credit{'' if value == 1 else 's'}"
+
     costs_html = "".join(
-        f"<tr><td>{html.escape(k.replace('_', ' '))}</td><td>{v} credits</td></tr>"
+        f"<tr><td>{html.escape(k.replace('_', ' '))}</td><td>{_cost(int(v))}</td></tr>"
         for k, v in config.CREDIT_COST.items()
     )
 
     body = f"""
-<main><section><div class="shell">
-  <h1 style="font-size:clamp(1.9rem,4.4vw,2.8rem);letter-spacing:-.02em;
-    margin-bottom:.6rem">Pricing</h1>
-  <p class="sub">Start free. Pay only for what the agents actually run.
-  One credit is one US cent.</p>
-  <div class="price-grid">{plans_html}</div>
+<main id="content">
+<section class="page-head"><div class="shell">
+  <p class="kicker">Pricing</p>
+  <h1>Start free, pay for what runs</h1>
+  <p class="sub">One credit is one US cent, and nothing is charged until a
+  query succeeds &mdash; a failed pipeline does not spend your allowance.</p>
+</div></section>
 
-  <h2 style="margin-top:3rem">Credit packs</h2>
-  <p class="sub">Credits never expire and are shared across chat, dashboards,
-  SQL generation and long-running agents.</p>
+<section><div class="shell">
+  <div class="price-grid">{plans_html}</div>
+</div></section>
+
+<section class="band"><div class="shell">
+  <h2>Credit packs</h2>
+  <p class="lead-in">Credits never expire and are shared across chat,
+  dashboards, SQL generation and long-running agents.</p>
   <div class="scroll-x"><table class="packs">
-    <thead><tr><th>Pack</th><th>Credits</th><th>Bonus</th><th></th></tr></thead>
+    <thead><tr><th>Pack</th><th>Credits</th><th>Bonus</th>
+      <th><span class="visually-hidden">Buy</span></th></tr></thead>
     <tbody>{packs_html}</tbody>
   </table></div>
+</div></section>
 
-  <h2 style="margin-top:3rem">What things cost</h2>
+<section><div class="shell">
+  <h2>What things cost</h2>
+  <p class="lead-in">Every priced operation, in credits.</p>
   <div class="scroll-x"><table class="packs">
     <thead><tr><th>Operation</th><th>Cost</th></tr></thead>
     <tbody>{costs_html}</tbody>
   </table></div>
-  <p style="margin-top:1.2rem;color:var(--text-muted);font-size:.9rem">
-  Free accounts get {config.FREE_QUERIES_PER_USER} AI queries in total, under
-  per-minute and per-day limits. Paid credit spend is not rate limited.</p>
-</div></section></main>"""
+  <p class="sub" style="margin-top:var(--s5);color:var(--text-muted);
+    font-size:.9rem">Free accounts get {config.FREE_QUERIES_PER_USER} AI
+  queries in total, under per-minute and per-day limits. Paid credit spend is
+  not rate limited beyond a global per-account safety valve.</p>
+</div></section>
+</main>"""
     return router.html(
         _page("Pricing — twoHelixes", "Plans and credit pricing.", body, "/pricing")
     )
 
 
+ENDPOINTS = (
+    (
+        "POST", "/v1/query", "Ask a question",
+        "Runs the whole pipeline and returns the finished figure, the chart "
+        "config, the row count and every warning it raised on the way.",
+        'curl -X POST https://twohelixes.com/v1/query \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
+        '  -H "Content-Type: application/json" \\\n'
+        '  -d \'{"q":"revenue by region this quarter","source_id":"..."}\'',
+    ),
+    (
+        "POST", "/v1/query/stream", "Stream the reasoning",
+        "The same run as server-sent events, so you can show progress instead "
+        "of a spinner. Event names: stage, thought, warning, partial, result, "
+        "done.",
+        'curl -N -X POST https://twohelixes.com/v1/query/stream \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
+        '  -d \'{"q":"which regions are shrinking?"}\'',
+    ),
+    (
+        "POST", "/v1/sql/generate", "Generate SQL",
+        "Schema-aware SQL for a question. The statement is checked read-only "
+        "before it is returned, and again before any driver executes it.",
+        'curl -X POST https://twohelixes.com/v1/sql/generate \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
+        '  -d \'{"source_id":"...","question":"top customers by lifetime value"}\'',
+    ),
+    (
+        "GET", "/v1/chart/{id}/export", "Export a chart",
+        "SVG, PNG or CSV. SVG is drawn by our own exporter - deterministic, "
+        "no headless browser, and editable markup.",
+        'curl "https://twohelixes.com/v1/chart/$ID/export?format=svg&mode=dark" \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY"',
+    ),
+)
+
+
 @router.get("/docs")
 def docs(ctx: router.Context) -> router.Result:
-    body = """
-<main><section><div class="shell">
-  <h1 style="font-size:clamp(1.9rem,4.4vw,2.8rem);letter-spacing:-.02em;
-    margin-bottom:.6rem">API</h1>
-  <p class="sub">Every endpoint takes and returns JSON. Authenticate with a
-  bearer API key from the billing page, or with a session cookie.</p>
+    blocks = ""
+    for method, route, title, note, snippet in ENDPOINTS:
+        blocks += f"""
+<article class="endpoint">
+  <header><span class="method {method.lower()}">{method}</span>
+    <span class="route">{html.escape(route)}</span></header>
+  <h3>{html.escape(title)}</h3>
+  <p>{html.escape(note)}</p>
+  <div class="codeblock">
+    <pre><code>{html.escape(snippet)}</code></pre>
+    <button class="copy" type="button" data-copy>Copy</button>
+  </div>
+</article>"""
 
-  <h2>Ask a question</h2>
-<pre><code>curl -X POST https://twohelixes.com/v1/query \\
-  -H "Authorization: Bearer $TWOHELIXES_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"q":"revenue by region this quarter","source_id":"...","sql":"SELECT * FROM orders"}'</code></pre>
+    body = f"""
+<main id="content">
+<section class="page-head"><div class="shell">
+  <p class="kicker">API</p>
+  <h1>Every answer is one HTTP call away</h1>
+  <p class="sub">JSON in, JSON out. Authenticate with a bearer API key from the
+  billing page, or with a session cookie if you are calling from a browser
+  already signed in.</p>
+</div></section>
 
-  <h2 style="margin-top:2rem">Stream the reasoning</h2>
-<pre><code>curl -N -X POST https://twohelixes.com/v1/query/stream \\
-  -H "Authorization: Bearer $TWOHELIXES_KEY" \\
-  -d '{"q":"which regions are shrinking?"}'</code></pre>
-  <p class="sub">Server-sent events: <code>stage</code>, <code>thought</code>,
-  <code>warning</code>, <code>partial</code>, <code>result</code>,
-  <code>done</code>.</p>
+<section><div class="shell grid">{blocks}</div></section>
 
-  <h2 style="margin-top:2rem">Generate SQL</h2>
-<pre><code>curl -X POST https://twohelixes.com/v1/sql/generate \\
-  -H "Authorization: Bearer $TWOHELIXES_KEY" \\
-  -d '{"source_id":"...","question":"top customers by lifetime value"}'</code></pre>
-
-  <h2 style="margin-top:2rem">Export a chart</h2>
-<pre><code>curl "https://twohelixes.com/v1/chart/$ID/export?format=svg&amp;mode=dark" \\
-  -H "Authorization: Bearer $TWOHELIXES_KEY"</code></pre>
-
-  <h2 style="margin-top:2rem">Rate limits</h2>
-  <p class="sub">Free accounts are limited per minute, per hour and per day, and
-  to a lifetime allowance of AI queries. Requests paid for with API credits are
-  not rate limited beyond a global per-account safety valve.</p>
-</div></section></main>"""
+<section class="band"><div class="shell">
+  <h2>Rate limits</h2>
+  <p class="lead-in">Free accounts are limited per minute, per hour and per
+  day, and to a lifetime allowance of
+  {config.FREE_QUERIES_PER_USER} AI queries. Requests paid for with API credits
+  are not rate limited beyond a global per-account safety valve.</p>
+  <ul class="rules">
+    <li>Charging happens <b>after success</b> &mdash; a failed pipeline does
+    not spend anything.</li>
+    <li>Generated SQL is <b>checked read-only</b> before it reaches a
+    driver, on every path.</li>
+    <li>Every response carries the <b>warnings</b> the run produced, so a
+    degraded answer is never silently a clean one.</li>
+  </ul>
+  <a class="btn btn-primary" href="/app" data-action="signin"
+     style="margin-top:var(--s5)">Get an API key</a>
+</div></section>
+</main>"""
     return router.html(
-        _page("API docs — twoHelixes", "twoHelixes HTTP API.", body, "/docs")
+        _page(
+            "API docs — twoHelixes",
+            "The twoHelixes HTTP API: ask a question, stream the reasoning, "
+            "generate SQL and export a chart.",
+            body,
+            "/docs",
+        )
     )
 
 

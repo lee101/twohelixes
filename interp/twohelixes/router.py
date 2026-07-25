@@ -188,6 +188,7 @@ def build() -> None:
     from twohelixes.routes import (  # noqa: F401
         agents,
         billing,
+        builder,
         charts,
         connectors,
         dashboards,

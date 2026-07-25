@@ -8,24 +8,45 @@
 import { ApiError, api, stream, type ChartConfig, type PipelineResult, type User } from "./api";
 import { ChartView, button, el } from "./chart";
 import { logo, spinner } from "./helix";
+import { Builder } from "./builder";
 import { TraceView } from "./trace";
 
+interface Sample {
+  key: string;
+  name: string;
+  description: string;
+  questions: string[];
+  rows: number;
+}
+
+type View = "chat" | "builder";
+
 interface State {
+  view: View;
+  builder: Builder | null;
   user: User | null;
   lastResult: PipelineResult | null;
   lastQuestion: string;
   sources: { id: string; name: string; kind: string; supports_sql: boolean }[];
   activeSource: string | null;
   cancel: (() => void) | null;
+  samples: Sample[];
+  suggestions: string[];
+  ran: boolean;
 }
 
 const state: State = {
+  view: "chat",
+  builder: null,
   user: null,
   lastResult: null,
   lastQuestion: "",
   sources: [],
   activeSource: null,
   cancel: null,
+  samples: [],
+  suggestions: [],
+  ran: false,
 };
 
 const root = document.getElementById("root")!;
@@ -80,15 +101,34 @@ function header(): HTMLElement {
   return bar;
 }
 
+// Same mark and the same storage key as the marketing header, so the control
+// does not change shape when a visitor crosses into the product.
+const THEME_ICONS =
+  '<svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path' +
+  ' d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>' +
+  '<svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle' +
+  ' cx="12" cy="12" r="4.2"/><path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2' +
+  'M19.2 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6' +
+  'M6.9 17.1l-1.6 1.6"/></svg>';
+
 function themeToggle(): HTMLElement {
-  const node = button(prefersDark() ? "Light" : "Dark", () => {
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = "icon-btn theme-toggle";
+  node.setAttribute("aria-label", "Switch between light and dark");
+  node.innerHTML = THEME_ICONS;
+  node.addEventListener("click", () => {
     const next = prefersDark() ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
-    localStorage.setItem("th-theme", next);
+    try {
+      localStorage.setItem("th-theme", next);
+    } catch {
+      /* private mode: the choice just does not persist */
+    }
     render();
+    // Plotly bakes theme colours into the figure, so it has to be redrawn.
     if (state.lastResult) void chart.show(state.lastResult);
   });
-  node.classList.add("theme-toggle");
   return node;
 }
 
@@ -105,14 +145,118 @@ function main(): HTMLElement {
     return wrap;
   }
 
+  // The builder owns the whole width and its own state, so it is not rebuilt
+  // on every render - re-rendering it would discard the plan.
+  if (state.view === "builder" && state.builder) {
+    wrap.classList.add("app-main-wide");
+    wrap.append(state.builder.root);
+    return wrap;
+  }
+
   const left = el("div", "app-left");
-  left.append(askPanel(), trace.root);
+  left.append(askPanel());
+  if (state.suggestions.length) left.append(suggestionPanel());
+  // An empty "Reasoning" panel before the first run is a stub, not an
+  // affordance - there is nothing to reason about yet.
+  if (state.ran) left.append(trace.root);
 
   const right = el("div", "app-right");
-  right.append(chart.root);
+  // Before the first run there is no chart, and an empty panel is a dead end.
+  // The samples are the only thing a brand-new account can actually ask about.
+  right.append(state.ran || !state.samples.length ? chart.root : starterPanel());
 
   wrap.append(left, right);
   return wrap;
+}
+
+/**
+ * The first-run path. A new account has no source connected, so the picker
+ * reads "no sources yet" and the ask box has nothing to answer from - the
+ * fastest way to lose someone in their first minute. These are the sample
+ * datasets the marketing pages promise; one tap attaches one and fills the
+ * ask box with a question that suits it.
+ */
+function starterPanel(): HTMLElement {
+  const panel = el("section", "chart-view starter");
+  const heading = el("h2");
+  heading.textContent = "Start with a sample";
+  const lede = el("p", "starter-lede");
+  lede.textContent =
+    "Nothing connected yet. Load one of these and ask it something — or connect your own source from the picker above.";
+
+  const list = el("ul", "sample-list");
+  for (const sample of state.samples.slice(0, 6)) {
+    const item = el("li");
+    const node = el("button", "sample") as HTMLButtonElement;
+    node.type = "button";
+
+    const text = el("span");
+    const name = el("span", "sample-name");
+    name.textContent = sample.name;
+    const detail = el("p", "trace-detail");
+    detail.textContent = sample.description;
+    text.append(name, detail);
+
+    const meta = el("span", "sample-meta");
+    meta.textContent = `${sample.rows.toLocaleString()} rows`;
+
+    node.append(text, meta);
+    node.addEventListener("click", () => void attachSample(sample, node));
+    item.append(node);
+    list.append(item);
+  }
+
+  panel.append(heading, lede, list);
+  return panel;
+}
+
+async function attachSample(sample: Sample, node: HTMLButtonElement): Promise<void> {
+  node.disabled = true;
+  const meta = node.querySelector<HTMLElement>(".sample-meta");
+  if (meta) meta.textContent = "Loading…";
+  try {
+    await api.post(`/v1/samples/${sample.key}/attach`, {});
+    state.suggestions = sample.questions.slice(0, 4);
+    await loadSources();
+    const box = document.querySelector<HTMLTextAreaElement>(".ask-input");
+    if (box && !box.value) {
+      box.value = sample.questions[0] ?? "";
+      box.focus();
+    }
+  } catch (error) {
+    node.disabled = false;
+    if (meta) meta.textContent = "Failed";
+    showError({
+      code: (error as ApiError).code,
+      message: (error as Error).message,
+    });
+  }
+}
+
+function suggestionPanel(): HTMLElement {
+  const panel = el("section", "ask starter");
+  const heading = el("h2");
+  heading.textContent = "Try one of these";
+  const row = el("div", "suggestions");
+  for (const question of state.suggestions) {
+    const node = el("button", "suggestion") as HTMLButtonElement;
+    node.type = "button";
+    node.textContent = question;
+    node.addEventListener("click", () => void ask(question));
+    row.append(node);
+  }
+  panel.append(heading, row);
+  return panel;
+}
+
+async function loadSamples(): Promise<void> {
+  try {
+    const payload = await api.get<{ samples: Sample[] }>("/v1/samples");
+    state.samples = payload.samples ?? [];
+    render();
+  } catch {
+    /* the samples are an offer, not a requirement */
+  }
 }
 
 function signInPanel(): HTMLElement {
@@ -232,7 +376,13 @@ async function loadSources(): Promise<void> {
   try {
     const payload = await api.get<{ sources: State["sources"] }>("/v1/sources");
     state.sources = payload.sources ?? [];
+    if (!state.activeSource && state.sources.length === 1) {
+      // One source is not a choice. Pre-selecting it removes a step that only
+      // ever has one right answer.
+      state.activeSource = state.sources[0].id;
+    }
     render();
+    if (!state.sources.length && !state.samples.length) void loadSamples();
   } catch {
     /* a missing source list must not block asking */
   }
@@ -245,6 +395,7 @@ async function loadSources(): Promise<void> {
 function ask(question: string, edit = ""): void {
   if (!question) return;
   state.lastQuestion = question;
+  state.ran = true;
   state.cancel?.();
   trace.reset();
   render();
@@ -264,7 +415,7 @@ function ask(question: string, edit = ""): void {
 
     if (event === "result") {
       state.lastResult = data as PipelineResult;
-      void chart.show(state.lastResult);
+      void chart.show(state.lastResult).then(revealChart);
     } else if (event === "user") {
       state.user = data as User;
       root.replaceChild(header(), root.firstChild!);
@@ -311,6 +462,16 @@ async function applyConfig(config: ChartConfig): Promise<void> {
   }
 }
 
+/**
+ * On a phone the chart sits below the whole trace, so a finished run lands
+ * off-screen and looks like nothing happened. On desktop the chart is already
+ * beside the trace and moving the page would be rude.
+ */
+function revealChart(): void {
+  if (window.innerWidth >= 1080) return;
+  chart.root.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
 function showError(data: { code?: string; message?: string }): void {
   const banner = el("div", "banner banner-error");
   const text = el("span");
@@ -343,6 +504,11 @@ async function signOut(): Promise<void> {
   await api.signOut().catch(() => undefined);
   state.user = null;
   state.lastResult = null;
+  state.sources = [];
+  state.activeSource = null;
+  state.samples = [];
+  state.suggestions = [];
+  state.ran = false;
   trace.reset();
   render();
 }
@@ -367,6 +533,7 @@ if (storedTheme) document.documentElement.setAttribute("data-theme", storedTheme
 
 function askWith(question: string, extra: Record<string, unknown>): void {
   state.lastQuestion = question;
+  state.ran = true;
   state.cancel?.();
   trace.reset();
   render();
@@ -387,5 +554,34 @@ function askWith(question: string, extra: Record<string, unknown>): void {
     }
   });
 }
+
+/** Open the chart builder on a dataset or sample. */
+(window as unknown as Record<string, unknown>).__thBuilder = async (
+  source: Record<string, unknown>,
+) => {
+  await openBuilder(source as never);
+  return true;
+};
+
+/** Switch to the builder view on a data source. */
+async function openBuilder(source: Record<string, unknown>): Promise<Builder> {
+  const builder = new Builder();
+  state.builder = builder;
+  state.view = "builder";
+  // Stash the instance rather than returning it through evaluate(): a Builder
+  // is not structured-cloneable.
+  (window as unknown as Record<string, unknown>).__thBuilderInstance = builder;
+  render();
+  await builder.open(source as never);
+  return builder;
+}
+
+/** Replace the plan and re-preview. Used by the visual bench and e2e tests. */
+(window as unknown as Record<string, unknown>).__thSetPlan = async (plan: unknown) => {
+  const builder = (window as unknown as Record<string, any>).__thBuilderInstance;
+  if (!builder) return false;
+  await builder.setPlan(plan);
+  return true;
+};
 
 export { spinner };

@@ -120,11 +120,80 @@ def validate_config(
             out["chart_type"] = "line"
             _note(emit, "Many time buckets read better as a line.")
 
+    _refresh_stale_labels(out, frame, emit)
+
     out.setdefault("orientation", "h" if out["chart_type"] == "hbar" else "v")
     out.setdefault("stacked", False)
     out.setdefault("title", "")
     out.setdefault("agg", None)
     return out
+
+
+# Words that appear in generated titles and name a measure rather than prose.
+_MEASURE_WORDS = {
+    "units", "amount", "revenue", "count", "total", "value", "price", "cost",
+    "sessions", "kwh", "mrr", "sales", "quantity", "score", "rate", "sessions",
+}
+
+
+def _refresh_stale_labels(config: dict, frame, emit=None) -> None:
+    """Rewrite auto-generated labels that no longer match the data.
+
+    A transformation step can rename the measure - resampling `net_amount`
+    into `revenue`, say - and a title generated from the original frame then
+    describes a column that is no longer plotted. "Units over time" over a
+    revenue series is worse than no title, because it is confidently wrong.
+
+    Labels the user wrote are left alone: the builder sets `title_locked`
+    when someone edits the title by hand.
+    """
+    if config.get("title_locked"):
+        return
+
+    columns = {str(c) for c in frame.columns}
+    y = config.get("y")
+    measure = str(y[0] if isinstance(y, list) and y else (y or ""))
+    if not measure or measure not in columns:
+        return
+
+    friendly = tools.humanise(measure).lower()
+
+    y_title = str(config.get("y_title") or "")
+    if y_title and y_title.lower() != friendly:
+        if not any(tools.humanise(c).lower() == y_title.lower() for c in columns):
+            config["y_title"] = tools.humanise(measure)
+
+    x = config.get("x")
+    x_title = str(config.get("x_title") or "")
+    if x and str(x) in columns and x_title:
+        if not any(tools.humanise(c).lower() == x_title.lower() for c in columns):
+            config["x_title"] = tools.humanise(str(x))
+
+    title = str(config.get("title") or "")
+    if not title:
+        return
+    lowered = title.lower()
+    if friendly in lowered or measure.lower() in lowered:
+        return
+
+    stale = [
+        word
+        for word in (w.strip(",.:;()").lower() for w in title.replace("_", " ").split())
+        if word in _MEASURE_WORDS
+        and not any(tools.humanise(c).lower() == word for c in columns)
+    ]
+    if stale:
+        _note(emit, f"Title mentioned '{stale[0]}', which the plan removed.")
+        config["title"] = _auto_title(config, frame, measure)
+
+
+def _auto_title(config: dict, frame, measure: str) -> str:
+    x = config.get("x")
+    if x and str(x) in {str(c) for c in frame.columns}:
+        if tools.column_role(frame, str(x)) == "time":
+            return f"{tools.humanise(measure)} over time"
+        return f"{tools.humanise(measure)} by {tools.humanise(str(x))}"
+    return tools.humanise(measure)
 
 
 def _note(emit: Any, message: str) -> None:
@@ -236,13 +305,26 @@ def build(
     y = config.get("y")
     color = config.get("color")
 
+    # The chart stage may hand back y as a list - ["revenue"] for one measure,
+    # or one entry per column after a pivot. Everything downstream indexes the
+    # frame by a single name, and str(["revenue"]) is not a column, so a
+    # one-element list used to silently produce empty series: three correctly
+    # named traces with no data in them, drawn as a blank chart. Collapse the
+    # single-column case here so every path below sees a plain string.
+    single = _wide_columns(frame, y)
+    if len(single) == 1:
+        y = single[0]
+        config = {**config, "y": y}
+
     if chart_type == "stat":
         return _stat(frame, config), warnings
     if chart_type == "table":
         return _table(frame, config), warnings
 
     working = frame
-    if config.get("agg") and x and y and not color:
+    # A list-valued y means the frame is already pivoted, so it is already
+    # aggregated; summarise() would only fail on the list.
+    if config.get("agg") and x and isinstance(y, str) and not color:
         try:
             working = tools.summarise(frame, x, y, str(config["agg"]))
         except Exception as exc:  # noqa: BLE001
@@ -284,6 +366,14 @@ def _traces(
     x = config.get("x")
     y = config.get("y")
     color = config.get("color")
+
+    # A y with several columns is what the transform stage leaves behind when
+    # it pivots - one column per region, per plan, per whatever it grouped by.
+    # That is its own trace-per-column shape, and it takes precedence over a
+    # colour column, which `_grouped_traces` could not honour anyway.
+    wide = _wide_columns(frame, y)
+    if len(wide) > 1:
+        return _wide_traces(frame, config, chart_type, wide, warnings)
 
     if color and str(color) in {str(c) for c in frame.columns}:
         return _grouped_traces(frame, config, chart_type, mode, warnings)
@@ -365,6 +455,76 @@ def _traces(
             "_series_index": 0,
         }
     ]
+
+
+def _wide_columns(frame: Any, y: Any) -> list[str]:
+    """The y entries that are real columns, in the order they were asked for."""
+    if isinstance(y, str) or not isinstance(y, (list, tuple)):
+        return []
+    known = {str(c) for c in frame.columns}
+    return [str(name) for name in y if str(name) in known]
+
+
+def _wide_traces(
+    frame: Any,
+    config: dict[str, Any],
+    chart_type: str,
+    columns: list[str],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """One trace per y column, for an already-pivoted frame.
+
+    The same slot discipline as `_grouped_traces`: fixed order, capped at the
+    form's series limit, and the tail summed into 'Other' rather than reusing
+    a colour.
+    """
+    x = config.get("x")
+    limit = palette.max_series_for(chart_type)
+    values_x = _column(frame, x)
+
+    traces: list[dict[str, Any]] = []
+    for index, name in enumerate(columns[:limit]):
+        traces.append(
+            {
+                "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
+                "mode": "lines" if chart_type in ("line", "area") else None,
+                "fill": "tozeroy" if chart_type == "area" else None,
+                "x": values_x,
+                "y": _column(frame, name),
+                "name": tools.humanise(name),
+                "_series_index": index,
+            }
+        )
+
+    tail = columns[limit:]
+    if tail:
+        summed = frame[tail].sum(axis=1)
+        traces.append(
+            {
+                "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
+                "mode": "lines" if chart_type in ("line", "area") else None,
+                "x": values_x,
+                "y": summed.tolist(),
+                "name": palette.OTHER_LABEL,
+                "_series_index": limit,
+            }
+        )
+        warnings.append(
+            f"{len(columns)} measures; showing the first {limit} and folding "
+            f"{len(tail)} into '{palette.OTHER_LABEL}'."
+        )
+
+    if chart_type == "hbar":
+        # Horizontal bars read value along x and category up y.
+        for trace in traces:
+            trace["orientation"] = "h"
+            trace["x"], trace["y"] = trace["y"], trace["x"]
+
+    for trace in traces:
+        for key in ("mode", "fill"):
+            if trace.get(key) is None:
+                trace.pop(key, None)
+    return traces
 
 
 def _grouped_traces(

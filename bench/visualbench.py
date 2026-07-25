@@ -104,6 +104,21 @@ def main() -> int:
                         "() => document.documentElement.scrollWidth - "
                         "document.documentElement.clientWidth"
                     )
+
+                    # A broken <img> still screenshots as a tidy empty box, so
+                    # it survives a human skim of the captures. The art plates
+                    # were 404ing behind the app port for exactly this reason:
+                    # nginx serves /static/ in production, and pointing the
+                    # bench straight at the app silently drops every image.
+                    # `complete && naturalWidth === 0` is the failure case: a
+                    # lazy image that has not started yet reports complete
+                    # false, and counting those would flag every below-the-fold
+                    # plate on a phone.
+                    broken = page.evaluate(
+                        "() => [...document.images]"
+                        ".filter(i => i.complete && i.naturalWidth === 0)"
+                        ".map(i => i.currentSrc || i.src)"
+                    )
                     report.append(
                         {
                             "page": label,
@@ -111,6 +126,7 @@ def main() -> int:
                             "viewport": name,
                             "file": shot.name,
                             "h_overflow_px": overflow,
+                            "broken_images": broken,
                             "console_errors": list(errors),
                         }
                     )
@@ -129,11 +145,15 @@ def main() -> int:
     overflows = [r for r in report if isinstance(r.get("h_overflow_px"), int) and r["h_overflow_px"] > 1]
     console = [r for r in report if r.get("console_errors")]
     failures = [r for r in report if r.get("error")]
+    imgs = [r for r in report if r.get("broken_images")]
 
     print(f"captured {len([r for r in report if r.get('file')])} screenshots -> {OUT}")
     print(f"horizontal overflow: {len(overflows)}")
     for row in overflows:
         print(f"  {row['page']} {row['theme']} {row['viewport']}: {row['h_overflow_px']}px")
+    print(f"broken images: {len(imgs)}")
+    for row in imgs[:6]:
+        print(f"  {row['page']} {row['viewport']}: {row['broken_images'][:3]}")
     print(f"console errors: {len(console)}")
     for row in console[:6]:
         print(f"  {row['page']} {row['viewport']}: {row['console_errors'][:2]}")
@@ -141,7 +161,7 @@ def main() -> int:
     for row in failures[:6]:
         print(f"  {row['page']}: {str(row['error'])[:120]}")
 
-    return 1 if (overflows or failures) else 0
+    return 1 if (overflows or failures or imgs) else 0
 
 
 def _capture_query(browser, args) -> list[dict[str, object]]:
@@ -195,6 +215,9 @@ def _write_index(report: list[dict[str, object]]) -> None:
         flag = ""
         if isinstance(row.get("h_overflow_px"), int) and row["h_overflow_px"] > 1:
             flag = f"<b style='color:#e34948'>overflow {row['h_overflow_px']}px</b>"
+        if row.get("broken_images"):
+            flag += (f" <b style='color:#e34948'>"
+                     f"{len(row['broken_images'])} broken img</b>")
         cards.append(
             f"<figure style='margin:0'><figcaption style='font:12px system-ui;"
             f"padding:6px 0'>{row['page']} · {row['theme']} · {row['viewport']} {flag}"

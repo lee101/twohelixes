@@ -1,59 +1,14 @@
-/* App styles. Marketing pages carry their own inline CSS; this is the shell. */
-
-:root {
-  --surface-1: #fcfcfb;
-  --panel: #ffffff;
-  --border: #e8e7e3;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #7a7973;
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --status-warning: #eda100;
-  --status-critical: #e34948;
-  --radius: 14px;
-  --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --surface-1: #1a1a19;
-    --panel: #212120;
-    --border: #2e2e2c;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #8f8e85;
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --status-warning: #c98500;
-    --status-critical: #e66767;
-    color-scheme: dark;
-  }
-}
-
-:root[data-theme="dark"] {
-  --surface-1: #1a1a19;
-  --panel: #212120;
-  --border: #2e2e2c;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #8f8e85;
-  --series-1: #3987e5;
-  --series-2: #d95926;
-  --series-3: #199e70;
-  --status-warning: #c98500;
-  --status-critical: #e66767;
-  color-scheme: dark;
-}
-
-*,
-*::before,
-*::after { box-sizing: border-box; }
+/* App styles.
+ *
+ * Every page that loads this file also inlines the design system from
+ * `routes/pages.py::_css()` first, so the tokens (--surface-1, --panel,
+ * --border, --text-*, --series-*, --status-*, --s1..--s8, --r-*, --sh-*) and
+ * the shared components (.btn, .card, .chip, .field) are already defined.
+ * This file used to redeclare them and had drifted - a different --panel, a
+ * different --border, a 14px radius that is not on the scale - so the product
+ * and the marketing pages were quietly two design systems. It now only adds
+ * what is specific to the app.
+ */
 
 body {
   margin: 0;
@@ -67,54 +22,50 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.75rem clamp(1rem, 3vw, 2rem);
+  gap: var(--s3);
+  padding: 0.6rem clamp(1rem, 3vw, 2rem);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 20;
-  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
-  backdrop-filter: blur(8px);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  font-weight: 650;
-  color: var(--text-primary);
-  text-decoration: none;
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent);
+  backdrop-filter: blur(10px);
 }
 
 .app-header-right {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: var(--s2);
   flex-wrap: wrap;
 }
 
 .user-meta {
   font-size: 0.86rem;
   color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .app-main {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.25rem;
+  gap: var(--s4);
   padding: clamp(1rem, 3vw, 1.75rem);
   align-items: start;
 }
 
 @media (min-width: 1080px) {
   .app-main { grid-template-columns: minmax(340px, 27rem) 1fr; }
+  /* The chart is the answer; on a long trace it should stay in view rather
+     than scrolling away above the reasoning that produced it. */
+  .app-right { position: sticky; top: calc(58px + var(--s4)); }
 }
 
 .app-left,
 .app-right {
   display: grid;
-  gap: 1.25rem;
+  gap: var(--s4);
   min-width: 0;
 }
 
@@ -125,8 +76,9 @@ body {
 .chart-view {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.1rem;
+  border-radius: var(--r-lg);
+  padding: var(--s4);
+  box-shadow: var(--sh-1);
   min-width: 0;
 }
 
@@ -135,9 +87,9 @@ body {
   resize: vertical;
   font: inherit;
   font-size: 0.98rem;
-  padding: 0.75rem 0.85rem;
-  border-radius: 10px;
-  border: 1px solid var(--border);
+  padding: 0.7rem 0.8rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--surface-1);
   color: var(--text-primary);
 }
@@ -146,50 +98,100 @@ body {
 .signin-input:focus-visible,
 .control-input:focus-visible,
 .chart-edit-input:focus-visible {
-  outline: 2px solid var(--series-1);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
 .ask-row {
   display: flex;
-  gap: 0.6rem;
-  margin-top: 0.7rem;
+  gap: var(--s2);
+  margin-top: var(--s3);
   flex-wrap: wrap;
   align-items: center;
 }
 
-/* -- buttons ------------------------------------------------------------ */
+/* -- first run ----------------------------------------------------------
+   A new account has nothing connected, so the ask box on its own is a dead
+   end: the picker says "no sources yet" and there is nothing to ask about.
+   These are the sample datasets the marketing pages promise, one tap to
+   load, each with real questions to start from. */
 
-.btn {
-  display: inline-flex;
+.starter { display: grid; gap: var(--s3); }
+.starter h2 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 650;
+  margin: 0;
+}
+
+.starter-lede { margin: 0; color: var(--text-secondary); font-size: 0.9rem; }
+
+.sample-list {
+  display: grid;
+  gap: var(--s2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sample {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.4rem;
-  padding: 0.55rem 0.95rem;
-  border-radius: 10px;
+  gap: var(--s3);
+  width: 100%;
+  text-align: left;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: inherit;
   font: inherit;
-  font-size: 0.92rem;
-  font-weight: 600;
-  border: 1px solid transparent;
   cursor: pointer;
-  text-decoration: none;
+  transition: border-color 0.15s, transform 0.15s;
 }
 
-.btn-primary { background: var(--series-1); color: #fff; }
-.btn-ghost {
-  border-color: var(--border);
-  background: transparent;
-  color: var(--text-primary);
+.sample:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.sample:disabled { opacity: 0.6; cursor: progress; transform: none; }
+.sample-name { font-weight: 620; font-size: 0.92rem; }
+.sample-meta {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.btn-small { padding: 0.35rem 0.65rem; font-size: 0.85rem; }
-.btn:disabled { opacity: 0.55; cursor: default; }
 
-/* `hidden` must beat the flex display above, or hidden buttons still show. */
+.suggestions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.suggestion {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--r-full);
+  padding: 0.35rem 0.7rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, color 0.15s;
+}
+.suggestion:hover { border-color: var(--accent); color: var(--text-primary); }
+
+/* -- buttons ------------------------------------------------------------
+   .btn and its variants come from the design system. `hidden` must beat the
+   inline-flex there, or a hidden button still shows. */
+
 [hidden] { display: none !important; }
 
 /* -- trace -------------------------------------------------------------- */
 
-.trace-header { margin-bottom: 0.6rem; }
+.trace-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
 .trace-title {
   font-size: 0.78rem;
   text-transform: uppercase;
@@ -199,29 +201,46 @@ body {
   font-weight: 650;
 }
 
+/* The list scrolls inside the panel on a tall run. Without the masks the
+   clipped edge cuts a line of text in half and reads as a rendering bug
+   rather than as "there is more above". */
+.trace-scroll {
+  position: relative;
+  --fade: 14px;
+}
 .trace-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 0.5rem;
-  max-height: 60vh;
+  gap: var(--s2);
+  max-height: min(62vh, 44rem);
   overflow-y: auto;
+  scrollbar-width: thin;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade),
+    #000 calc(100% - var(--fade)),
+    transparent 100%
+  );
 }
+.trace-list.is-top { --fade: 0px; }
 
 .trace-stage {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-sm);
   overflow: hidden;
 }
 
 .trace-stage-head {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.55rem 0.7rem;
+  gap: var(--s2);
+  padding: 0.5rem 0.65rem;
   cursor: pointer;
-  background: color-mix(in srgb, var(--surface-1) 60%, transparent);
+  min-height: 40px;
+  background: var(--panel-2);
 }
 
 .trace-stage-label { font-size: 0.92rem; font-weight: 600; }
@@ -232,15 +251,17 @@ body {
   color: var(--text-muted);
   display: flex;
   align-items: center;
+  font-variant-numeric: tabular-nums;
 }
 
-.trace-stage.is-running .trace-stage-label { color: var(--series-1); }
+.trace-stage.is-running { border-color: var(--accent-ring); }
+.trace-stage.is-running .trace-stage-label { color: var(--accent); }
 .trace-stage.is-collapsed .trace-stage-body { display: none; }
 
 .trace-stage-body {
-  padding: 0 0.7rem 0.6rem;
+  padding: 0.5rem 0.65rem 0.6rem;
   display: grid;
-  gap: 0.4rem;
+  gap: 0.35rem;
 }
 
 .trace-thought,
@@ -263,7 +284,7 @@ body {
   font-size: 0.79rem;
   background: var(--surface-1);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   padding: 0.6rem;
   margin: 0;
   overflow-x: auto;
@@ -278,16 +299,20 @@ body {
 
 .chart-plot {
   width: 100%;
-  min-height: 340px;
-  height: clamp(340px, 46vh, 560px);
+  min-height: 320px;
+  height: clamp(320px, 46vh, 560px);
 }
 
-.chart-meta { font-size: 0.82rem; color: var(--text-muted); }
+.chart-meta {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
 
 .chart-notes {
   display: grid;
   gap: 0.35rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: var(--s2);
 }
 
 .note { margin: 0; font-size: 0.85rem; color: var(--text-secondary); }
@@ -296,18 +321,18 @@ body {
 
 .chart-actions {
   display: flex;
-  gap: 0.4rem;
+  gap: var(--s1);
   flex-wrap: wrap;
   margin-top: 0.2rem;
 }
 
 .chart-controls {
   display: flex;
-  gap: 0.7rem;
+  gap: var(--s3);
   flex-wrap: wrap;
   align-items: flex-end;
-  margin-top: 0.9rem;
-  padding-top: 0.9rem;
+  margin-top: var(--s3);
+  padding-top: var(--s3);
   border-top: 1px solid var(--border);
 }
 
@@ -315,7 +340,7 @@ body {
 .control-toggle {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: var(--s1);
   padding-bottom: 0.45rem;
 }
 
@@ -331,8 +356,8 @@ body {
   font: inherit;
   font-size: 0.88rem;
   padding: 0.4rem 0.5rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--surface-1);
   color: var(--text-primary);
   min-width: 8rem;
@@ -340,7 +365,7 @@ body {
 
 .chart-edit {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--s2);
   flex: 1 1 18rem;
   min-width: 0;
 }
@@ -351,8 +376,8 @@ body {
   font: inherit;
   font-size: 0.88rem;
   padding: 0.45rem 0.6rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--surface-1);
   color: var(--text-primary);
 }
@@ -362,22 +387,27 @@ body {
 .signin {
   max-width: 34rem;
   margin: clamp(2rem, 10vh, 6rem) auto;
-  padding: 0 1.25rem;
+  padding: 0 var(--s4);
   display: grid;
-  gap: 0.9rem;
+  gap: var(--s3);
 }
 
-.signin h1 { font-size: clamp(1.5rem, 4vw, 2rem); margin: 0; letter-spacing: -0.015em; }
-.signin-lede { color: var(--text-secondary); margin: 0; }
-.signin-form { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.signin h1 {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  margin: 0;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+}
+.signin-lede { color: var(--text-secondary); margin: 0; max-width: 46ch; }
+.signin-form { display: flex; gap: var(--s2); flex-wrap: wrap; }
 
 .signin-input {
   flex: 1 1 15rem;
   min-width: 0;
   font: inherit;
   padding: 0.6rem 0.75rem;
-  border-radius: 10px;
-  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
   background: var(--panel);
   color: var(--text-primary);
 }
@@ -387,7 +417,7 @@ body {
 .banner {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--s3);
   flex-wrap: wrap;
   padding: 0.7rem clamp(1rem, 3vw, 2rem);
   font-size: 0.9rem;
@@ -403,3 +433,254 @@ body {
 
 /* Wide content must scroll inside itself, never the page. */
 .scroll-x { overflow-x: auto; }
+
+/* -- phone --------------------------------------------------------------
+   Below 720px every tap target clears 44px, the panels lose a little padding
+   to buy vertical room, and the trace stops competing with the chart for
+   screen height. */
+
+@media (max-width: 719px) {
+  .app-header { padding: 0.5rem 0.9rem; gap: var(--s2); }
+  .app-header-right { gap: var(--s1); }
+  .user-meta { font-size: 0.8rem; }
+
+  .app-main { padding: 0.85rem; gap: 0.85rem; }
+  .ask,
+  .trace,
+  .chart-view { padding: 0.85rem; border-radius: var(--r-md); }
+
+  /* 16px stops iOS zooming the viewport when the field takes focus. */
+  .ask-input,
+  .signin-input,
+  .chart-edit-input { font-size: 16px; }
+  .ask-row .btn { min-height: 44px; }
+  .control-input { min-height: 40px; font-size: 16px; }
+  .btn-small { min-height: 36px; }
+  .sample { min-height: 48px; }
+  .suggestion { min-height: 36px; }
+
+  /* A phone cannot show the trace and the chart at once. The trace gets a
+     third of the screen and scrolls; the chart keeps the rest. */
+  .trace-list { max-height: 34vh; }
+  .chart-plot { height: clamp(260px, 42vh, 420px); min-height: 260px; }
+
+  .chart-controls { gap: var(--s2); }
+  .control { flex: 1 1 8.5rem; }
+  .control-input { width: 100%; min-width: 0; }
+  .chart-edit { flex: 1 1 100%; }
+
+  .app-main { padding-bottom: calc(0.85rem + env(safe-area-inset-bottom)); }
+}
+
+/* ---------------------------------------------------------------------
+   Chart builder. Three columns: the columns you have, the chart, the plan.
+   The plan is the object the agent and the person share, so it gets equal
+   billing with the chart rather than hiding in a drawer.
+   --------------------------------------------------------------------- */
+.builder {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+  align-items: start;
+}
+@media (min-width: 1100px) {
+  .builder { grid-template-columns: 13rem 1fr 20rem; }
+}
+
+.builder-rail,
+.builder-side {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem;
+  min-width: 0;
+}
+.builder-centre {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem;
+  min-width: 0;
+}
+
+.builder-heading {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  font-weight: 660;
+  margin: 0 0 0.55rem;
+}
+
+/* -- columns ---------------------------------------------------------- */
+
+.field-list { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.field {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.34rem 0.5rem;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: grab;
+  font-size: 0.86rem;
+  user-select: none;
+}
+.field:hover { background: var(--surface-1); border-color: var(--border); }
+.field.is-dragging { opacity: 0.4; }
+.field-icon {
+  width: 1.15rem;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.field-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Role is carried by an icon and a tooltip as well as the tint, so it is
+   never colour alone. */
+.field-time .field-icon { color: var(--series-1); }
+.field-measure .field-icon { color: var(--series-3); }
+.field-category .field-icon { color: var(--series-2); }
+
+/* -- shelves ---------------------------------------------------------- */
+
+.shelves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-bottom: 0.7rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+.shelf { display: grid; gap: 0.2rem; min-width: 7rem; }
+.shelf-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 640;
+}
+.shelf-slot {
+  min-height: 2rem;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  padding: 0.25rem 0.35rem;
+  display: flex;
+  align-items: center;
+  font-size: 0.84rem;
+}
+.shelf-slot.is-empty { color: var(--text-muted); font-size: 0.78rem; }
+.shelf-slot.is-over { border-color: var(--series-1); background: var(--surface-1); }
+.shelf-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.35rem;
+  max-width: 100%;
+}
+.shelf-clear {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 0.1rem;
+  line-height: 1;
+}
+.shelf-clear:hover { color: var(--status-critical); }
+
+/* -- the plan --------------------------------------------------------- */
+
+.builder-undo { display: flex; gap: 0.35rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+.step-list { display: grid; gap: 0.45rem; margin: 0 0 0.7rem; padding: 0; list-style: none; }
+.step-empty { color: var(--text-muted); font-size: 0.84rem; line-height: 1.45; }
+
+.step {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel);
+}
+.step.is-disabled { opacity: 0.5; }
+/* A left edge marks who wrote the step, so provenance is visible without
+   reading the badge. */
+.step-agent { border-left: 3px solid var(--series-1); }
+.step-human { border-left: 3px solid var(--series-3); }
+
+.step-head { display: flex; align-items: center; gap: 0.4rem; }
+.step-badge {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.25rem;
+  flex: 0 0 auto;
+}
+.step-title { font-size: 0.85rem; line-height: 1.35; }
+.step-note { font-size: 0.78rem; color: var(--text-muted); margin: 0.2rem 0 0; }
+.step-actions { margin-left: auto; display: flex; gap: 0.1rem; flex: 0 0 auto; }
+.step-icon {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.25rem;
+  border-radius: 4px;
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+}
+.step-icon:hover:not(:disabled) { background: var(--surface-1); color: var(--text-primary); }
+.step-icon:disabled { opacity: 0.3; cursor: default; }
+
+.step-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+.step-params .control-input { min-width: 5.5rem; font-size: 0.8rem; padding: 0.25rem 0.35rem; }
+.step-params .control-label { font-size: 0.64rem; }
+
+.step-menu {
+  display: grid;
+  gap: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 0.4rem;
+  background: var(--surface-1);
+}
+.step-menu-item { justify-content: flex-start; text-align: left; }
+
+.builder-ask { display: flex; gap: 0.35rem; margin-bottom: 0.5rem; }
+.builder-ask .chart-edit-input { font-size: 0.84rem; }
+.builder-exports { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+
+.builder-status {
+  margin-top: 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  min-height: 1.2rem;
+  line-height: 1.4;
+}
+.builder-status.is-warn { color: var(--status-warning); }
+.builder-code { margin-top: 0.6rem; max-height: 16rem; }
+
+@media (max-width: 1099px) {
+  /* On a narrow screen the plan matters more than the column rail, so it
+     comes first and the rail becomes a horizontal strip. */
+  .builder-rail { order: 3; }
+  .field-list { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .field { flex: 0 0 auto; }
+  .builder-side { order: 2; }
+  .builder-centre { order: 1; }
+}
+
+/* The builder needs the full width; the chat view is a two-column reading
+   layout and the grid would squash the three builder panes. */
+.app-main-wide { grid-template-columns: 1fr !important; }

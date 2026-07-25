@@ -231,6 +231,77 @@ def test_bar_tail_folds_rather_than_truncating():
     assert any("Other" in w for w in warnings)
 
 
+@pytest.fixture
+def pivoted_frame() -> pd.DataFrame:
+    """What the transform stage leaves behind when it pivots by a category."""
+    return pd.DataFrame(
+        {
+            "order_date": pd.to_datetime(["2024-01-15", "2024-02-15", "2024-03-15"]),
+            "East": [400, 650, 980],
+            "North": [1200, 1500, 1800],
+            "South": [900, 850, 700],
+        }
+    )
+
+
+def test_pivoted_frame_draws_one_series_per_column(pivoted_frame):
+    """A list-valued y used to index the frame by str(list) and draw nothing."""
+    for chart_type in ("line", "bar", "area", "hbar"):
+        figure, _ = figures.build(
+            pivoted_frame,
+            {
+                "chart_type": chart_type,
+                "x": "order_date",
+                "y": ["East", "North", "South"],
+            },
+        )
+        traces = figure["data"]
+        assert len(traces) == 3, chart_type
+        assert [t["name"] for t in traces] == ["East", "North", "South"]
+        # Slots are pinned in the order asked for, never cycled.
+        assert [t["_series_index"] for t in traces] == [0, 1, 2]
+        values = "x" if chart_type == "hbar" else "y"
+        assert all(len(t[values]) == 3 for t in traces), chart_type
+
+
+def test_pivoted_tail_folds_into_other():
+    frame = pd.DataFrame({"day": range(4)} | {f"m{i}": [i] * 4 for i in range(12)})
+    figure, warnings = figures.build(
+        frame,
+        {"chart_type": "line", "x": "day", "y": [f"m{i}" for i in range(12)]},
+    )
+    names = [t["name"] for t in figure["data"]]
+    assert len(names) == palette.MAX_SERIES + 1
+    assert names[-1] == palette.OTHER_LABEL
+    assert any("Other" in w for w in warnings)
+
+
+def test_single_element_y_list_keeps_its_name(pivoted_frame):
+    figure, _ = figures.build(
+        pivoted_frame, {"chart_type": "line", "x": "order_date", "y": ["North"]}
+    )
+    assert figure["data"][0]["name"] == "North"
+    assert len(figure["data"][0]["y"]) == 3
+
+
+def test_single_element_y_list_still_groups_by_colour(timeseries_frame):
+    """The shape that drew a blank chart: y=["revenue"] alongside a colour.
+
+    Every group got its x values and a correctly spelled name, and an empty y,
+    because str(["revenue"]) is not a column. Three labelled lines with no data
+    in them look like a rendering failure, not a data one.
+    """
+    figure, _ = figures.build(
+        timeseries_frame,
+        {"chart_type": "line", "x": "order_date", "y": ["revenue"], "color": "region"},
+    )
+    traces = figure["data"]
+    assert len(traces) == 3
+    assert all(len(t["y"]) == len(t["x"]) > 0 for t in traces)
+    # The axis title comes off the same y, so it must be normalised too.
+    assert figure["layout"]["yaxis"]["title"]["text"] == "Revenue"
+
+
 # -- column roles ----------------------------------------------------------
 
 
@@ -456,3 +527,228 @@ def test_upload_ticket_rejects_bad_types_and_sizes(monkeypatch):
     ticket = r2.upload_ticket("u1", "data.csv", "text/csv", 1024)
     assert ticket["method"] == "PUT"
     assert ticket["key"].startswith("uploads/u1/")
+
+
+# -- transformation plans --------------------------------------------------
+
+
+def _orders():
+    from twohelixes.datasets import samples
+
+    samples.materialise()
+    return samples.frame("orders")
+
+
+def test_plan_runs_and_matches_hand_written_pandas():
+    """The plan is the shared object, so it must do exactly what it says."""
+    from twohelixes.pipeline import transform
+
+    frame = _orders()
+    steps = transform.normalise([
+        {"type": "filter", "params": {"column": "refunded", "op": "eq", "value": False}},
+        {"type": "aggregate", "params": {
+            "by": ["region"],
+            "metrics": [{"column": "net_amount", "agg": "sum", "as": "revenue"}],
+        }},
+        {"type": "sort", "params": {"column": "revenue", "desc": True}},
+    ])
+    out, notes = transform.apply(frame, steps)
+
+    expected = (
+        frame[frame["refunded"] == False]  # noqa: E712 - matching the step exactly
+        .groupby(["region"], dropna=False)
+        .agg({"net_amount": "sum"})
+        .reset_index()
+        .rename(columns={"net_amount": "revenue"})
+        .sort_values("revenue", ascending=False)
+    )
+    assert list(out["region"]) == list(expected["region"])
+    assert out["revenue"].round(2).tolist() == expected["revenue"].round(2).tolist()
+    assert len(notes) == 3
+
+
+def test_disabled_step_is_skipped_without_being_lost():
+    """Disabling is how a user tests 'what if this step were not here'."""
+    from twohelixes.pipeline import transform
+
+    frame = _orders()
+    steps = transform.normalise([
+        {"type": "filter", "params": {"column": "refunded", "op": "eq", "value": False},
+         "enabled": False},
+    ])
+    out, notes = transform.apply(frame, steps)
+    assert len(out) == len(frame)
+    assert "skipped" in notes[0]
+    assert len(steps) == 1  # still in the plan
+
+
+def test_validation_rejects_an_unknown_column_before_running():
+    from twohelixes.pipeline import transform
+
+    steps = transform.normalise([
+        {"type": "filter", "params": {"column": "nonexistent", "op": "eq", "value": 1}},
+    ])
+    problems = transform.validate(steps, ["region", "net_amount"])
+    assert problems and "nonexistent" in problems[0]["error"]
+
+
+def test_unknown_step_type_is_refused():
+    from twohelixes.pipeline import transform
+
+    with pytest.raises(transform.TransformError):
+        transform.normalise([{"type": "drop_table", "params": {}}])
+
+
+def test_derive_expressions_reject_code():
+    """`expr` is the only free text in a plan, and it comes from a model."""
+    from twohelixes.pipeline import transform
+
+    for hostile in (
+        "__import__('os').system('ls')",
+        "eval('1+1')",
+        "lambda: 1",
+        "df.__class__",
+    ):
+        steps = transform.normalise([
+            {"type": "derive", "params": {"as": "x", "expr": hostile}},
+        ])
+        problems = transform.validate(steps, ["a", "b"])
+        assert problems, f"expression was allowed: {hostile}"
+
+
+def test_derive_allows_ordinary_arithmetic():
+    from twohelixes.pipeline import transform
+
+    frame = _orders()
+    steps = transform.normalise([
+        {"type": "derive", "params": {"as": "margin", "expr": "amount - discount"}},
+    ])
+    assert transform.validate(steps, [str(c) for c in frame.columns]) == []
+    out, _ = transform.apply(frame, steps)
+    assert "margin" in out.columns
+    assert out["margin"].round(2).tolist() == (
+        frame["amount"] - frame["discount"]
+    ).round(2).tolist()
+
+
+def test_rendered_python_reproduces_the_plan():
+    """The notebook runs the rendered source, so it must match the executed plan."""
+    from twohelixes.pipeline import transform
+
+    frame = _orders()
+    steps = transform.normalise([
+        {"type": "filter", "params": {"column": "region", "op": "eq", "value": "APAC"}},
+        {"type": "aggregate", "params": {
+            "by": ["channel"],
+            "metrics": [{"column": "net_amount", "agg": "sum", "as": "revenue"}],
+        }},
+    ])
+    direct, _ = transform.apply(frame, steps)
+
+    source = transform.to_python(steps, frame_name="df")
+    scope: dict = {"df": frame}
+    import pandas as pd
+
+    scope["pd"] = pd
+    exec(compile(source, "<plan>", "exec"), scope, scope)  # noqa: S102
+    rendered = scope["result"]
+
+    assert list(rendered.columns) == list(direct.columns)
+    assert len(rendered) == len(direct)
+    assert rendered["revenue"].round(2).tolist() == direct["revenue"].round(2).tolist()
+
+
+def test_every_step_type_describes_itself():
+    """The description is what the user reads instead of the params blob."""
+    from twohelixes.pipeline import transform
+
+    samples = {
+        "filter": {"column": "a", "op": "gt", "value": 1},
+        "aggregate": {"by": ["a"], "metrics": [{"column": "b", "agg": "sum"}]},
+        "derive": {"as": "c", "expr": "a + b"},
+        "sort": {"column": "a", "desc": True},
+        "limit": {"n": 10},
+        "select": {"columns": ["a"]},
+        "rename": {"map": {"a": "b"}},
+        "dropna": {"columns": ["a"]},
+        "resample": {"time_column": "t", "grain": "month",
+                     "metrics": [{"column": "b", "agg": "sum"}]},
+        "top_n": {"category": "a", "measure": "b", "n": 5},
+        "pivot": {"index": "a", "columns": "b", "values": "c"},
+    }
+    for step_type, params in samples.items():
+        step = transform.Step(type=step_type, params=params, id="s1")
+        text = transform.describe(step)
+        assert text and text != step_type, f"{step_type} has no description"
+
+
+def test_plan_length_is_capped():
+    from twohelixes.pipeline import transform
+
+    too_many = [{"type": "limit", "params": {"n": 5}}] * (transform.MAX_STEPS + 1)
+    with pytest.raises(transform.TransformError):
+        transform.normalise(too_many)
+
+
+def test_stale_title_is_refreshed_when_the_plan_renames_the_measure():
+    """A title naming a dropped column is confidently wrong.
+
+    Seen in the builder: resampling `net_amount` into `revenue` left the
+    heuristic title "Units over time" over a revenue series.
+    """
+    from twohelixes.datasets import samples
+    from twohelixes.pipeline import transform
+
+    samples.materialise()
+    frame = samples.frame("orders")
+    initial = figures.heuristic_config(frame, "")
+    assert "units" in initial["title"].lower()
+
+    steps = transform.normalise([
+        {"type": "resample", "params": {
+            "time_column": "order_date", "grain": "month", "by": ["region"],
+            "metrics": [{"column": "net_amount", "agg": "sum", "as": "revenue"}],
+        }},
+    ])
+    shaped, _ = transform.apply(frame, steps)
+
+    config = {**initial, "y": "revenue"}
+    refreshed = figures.validate_config(config, shaped)
+    assert "revenue" in refreshed["title"].lower()
+    assert "units" not in refreshed["title"].lower()
+    assert refreshed["y_title"].lower() == "revenue"
+
+
+def test_a_user_written_title_is_never_overwritten():
+    from twohelixes.datasets import samples
+    from twohelixes.pipeline import transform
+
+    samples.materialise()
+    frame = samples.frame("orders")
+    steps = transform.normalise([
+        {"type": "resample", "params": {
+            "time_column": "order_date", "grain": "month",
+            "metrics": [{"column": "net_amount", "agg": "sum", "as": "revenue"}],
+        }},
+    ])
+    shaped, _ = transform.apply(frame, steps)
+
+    config = {
+        "chart_type": "line", "x": "order_date", "y": "revenue",
+        "title": "Units of anything I like", "title_locked": True,
+    }
+    assert figures.validate_config(config, shaped)["title"] == "Units of anything I like"
+
+
+def test_correct_titles_are_left_alone():
+    """Refreshing must not churn a title that already names the measure."""
+    frame = pd.DataFrame(
+        {"month": pd.date_range("2024-01-01", periods=6, freq="ME"),
+         "revenue": [1, 2, 3, 4, 5, 6]}
+    )
+    config = {
+        "chart_type": "line", "x": "month", "y": "revenue",
+        "title": "Revenue grew every month", "y_title": "Revenue",
+    }
+    out = figures.validate_config(config, frame)
+    assert out["title"] == "Revenue grew every month"

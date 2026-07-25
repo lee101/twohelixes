@@ -7,7 +7,7 @@
  * chart stays auditable.
  */
 
-import { el } from "./chart";
+import { el, formatDuration } from "./chart";
 import { spinner } from "./helix";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -29,6 +29,7 @@ interface StageNode {
 export class TraceView {
   readonly root: HTMLElement;
   private readonly list: HTMLElement;
+  private readonly count: HTMLElement;
   private readonly stages = new Map<string, StageNode>();
   private active: StageNode | null = null;
 
@@ -37,16 +38,31 @@ export class TraceView {
     const header = el("header", "trace-header");
     const title = el("h2", "trace-title");
     title.textContent = "Reasoning";
-    header.append(title);
+    this.count = el("span", "trace-detail");
+    header.append(title, this.count);
 
-    this.list = el("ol", "trace-list");
-    this.root.append(header, this.list);
+    const scroll = el("div", "trace-scroll");
+    this.list = el("ol", "trace-list is-top");
+    // The list is a live region: on a phone the panel is often scrolled out of
+    // sight, and a screen reader should still hear the run progress.
+    this.list.setAttribute("aria-live", "polite");
+    this.list.setAttribute("aria-relevant", "additions");
+    // The top mask exists to signal "there is more above". At the top there is
+    // nothing above, and fading the first stage out then looks like a bug.
+    this.list.addEventListener("scroll", () => {
+      this.list.classList.toggle("is-top", this.list.scrollTop < 4);
+    });
+
+    scroll.append(this.list);
+    this.root.append(header, scroll);
   }
 
   reset(): void {
     this.stages.clear();
     this.active = null;
     this.list.replaceChildren();
+    this.list.classList.add("is-top");
+    this.count.textContent = "";
   }
 
   handle(event: string, data: any): void {
@@ -122,6 +138,7 @@ export class TraceView {
     const node: StageNode = { root, body, status, startedAt: performance.now() };
     this.stages.set(name, node);
     this.active = node;
+    this.count.textContent = `${this.stages.size} stages`;
     root.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
@@ -131,9 +148,8 @@ export class TraceView {
 
     node.root.classList.remove("is-running");
     node.root.classList.add("is-done");
-    const ms = Math.round(performance.now() - node.startedAt);
     node.status.replaceChildren();
-    node.status.textContent = `${ms} ms`;
+    node.status.textContent = formatDuration(performance.now() - node.startedAt);
 
     const detail = summarise(data);
     if (detail) {

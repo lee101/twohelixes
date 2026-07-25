@@ -47,9 +47,62 @@ export async function renderFigure(
   figure: PlotlyFigure,
 ): Promise<void> {
   const Plotly = await loadPlotly();
-  const layout = { ...figure.layout, autosize: true };
+  const layout = fitTitle({ ...figure.layout, autosize: true }, host.clientWidth);
   const config = { ...(figure.config ?? {}), responsive: true, displaylogo: false };
   await Plotly.react(host, figure.data as any, layout as any, config as any);
+}
+
+/**
+ * Wrap a title that will not fit the plot.
+ *
+ * Plotly clips titles rather than wrapping them, and our titles state the
+ * finding ("Revenue increased across all regions in Q1 2024") rather than the
+ * column names, so they are long by design. On a phone that means the sentence
+ * loses its last few words - exactly the words carrying the point. The server
+ * cannot fix this because it does not know the viewport width.
+ */
+function fitTitle(layout: Record<string, any>, width: number): Record<string, any> {
+  const title = layout.title;
+  const text: string = typeof title === "string" ? title : (title?.text ?? "");
+  if (!text || !width || text.includes("<br>")) return layout;
+
+  const size: number = (typeof title === "object" && title?.font?.size) || 16;
+  const margin = layout.margin ?? {};
+  const usable = width - (margin.l ?? 56) - (margin.r ?? 24);
+  // Inter at 600 weight averages a little over half the point size per glyph.
+  const perLine = Math.max(16, Math.floor(usable / (size * 0.53)));
+  if (text.length <= perLine) return layout;
+
+  const lines: string[] = [];
+  let current = "";
+  for (const word of text.split(" ")) {
+    if (current && (current + " " + word).length > perLine) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = current ? `${current} ${word}` : word;
+    }
+  }
+  if (current) lines.push(current);
+  if (lines.length < 2) return layout;
+
+  // The title and the legend both live in the top margin, and the legend is
+  // anchored to the plot. Simply growing the margin slides the legend down
+  // into the second title line, so the title gets pinned to the top of the
+  // container and the margin is sized for both.
+  const legendRoom = layout.showlegend ? 26 : 6;
+  return {
+    ...layout,
+    title: {
+      ...(typeof title === "object" ? title : {}),
+      text: lines.join("<br>"),
+      yref: "container",
+      y: 1,
+      yanchor: "top",
+      pad: { ...(title?.pad ?? {}), t: 12 },
+    },
+    margin: { ...margin, t: 12 + lines.length * (size + 4) + legendRoom },
+  };
 }
 
 export interface ChartViewOptions {
@@ -89,7 +142,7 @@ export class ChartView {
 
     const meta = el("div", "chart-meta");
     meta.textContent =
-      `${result.row_count.toLocaleString()} rows · ${result.elapsed_ms} ms`;
+      `${result.row_count.toLocaleString()} rows · ${formatDuration(result.elapsed_ms)}`;
     this.notes.append(meta);
 
     for (const warning of result.warnings ?? []) {
@@ -210,6 +263,19 @@ export class ChartView {
 // --------------------------------------------------------------------------
 // Small DOM helpers
 // --------------------------------------------------------------------------
+
+/**
+ * Durations read as time, not as a raw millisecond count. A deep-research run
+ * printing "184213 ms" makes the reader do the arithmetic; the agents here run
+ * for minutes, so this is not a rare case.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
 
 export function el(tag: string, className = ""): HTMLElement {
   const node = document.createElement(tag);

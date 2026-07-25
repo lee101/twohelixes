@@ -168,6 +168,20 @@ Constraints every plate obeys:
 Art is atmosphere, never information. It sits behind or beside content and
 never competes with a chart. Any page can drop every plate and still work.
 
+**Dark mode dims the plates.** They are studio shots on white, and a white
+16:9 slab on a `#1a1a19` page is the brightest thing on the screen — it
+out-shouts every chart on it. `.plate img` takes
+`brightness(.58) contrast(1.08) saturate(1.2)` in dark, which reads the marble
+as stone under low light and keeps the helix blue. Light mode needs no
+treatment: the plates are already levelled to the page's bone white, and an
+overlay there only added haze.
+
+**Plates are served by nginx, never by the app.** The Python bridge carries
+UTF-8 strings, so a WebP cannot cross it; `static_files.py` returns 501 rather
+than emitting a corrupt body. Point a browser straight at the app port and
+every plate is missing — which is why `visualbench` now fails on broken images
+and why it should be run against the nginx front, not `:7474`.
+
 ---
 
 ## 8. Charts in the page
@@ -186,6 +200,19 @@ which buys three things:
   charts and are audited. A regression in chart defaults visibly changes the
   homepage — which is the point.
 
+**Charts are rendered at their narrowest display size, not their widest.** An
+SVG scales its text along with everything else, so a 620px render shown at
+350px on a phone puts the 11px tick labels at 6px — unreadable on the device
+most visitors arrive on. `showcase.HERO_SIZE` and `GALLERY_SIZE` are sized for
+the phone; desktop scales *up*, which is the harmless direction. `Box.fit` in
+`svg.py` makes the exporter's margins proportional below ~520px so a 68px
+gutter is not a sixth of the canvas.
+
+**Titles wrap, never clip.** Titles state the finding rather than the column
+names, so they are long by design. The SVG exporter wraps them and pushes the
+plot down; in the app, `fitTitle` in `chart.ts` does the same for Plotly, which
+clips instead of wrapping and cannot know the viewport from the server.
+
 ---
 
 ## 9. Component rules worth stating
@@ -200,6 +227,21 @@ primary in a viewport region.
 **Overlays.** Sign-in and checkout are sheets over a blurred scrim, not pages.
 A visitor deciding to buy on the pricing page stays on the pricing page.
 Escape and backdrop-click both dismiss; focus returns to the trigger.
+
+**Theme toggle.** One control, one storage key (`th-theme`), on both the
+marketing header and the app header, with the same mark. Marketing pages apply
+the stored value in a blocking inline script in `<head>` — deferring it *is*
+the white flash. Without this, a visitor who chose dark inside the product got
+a light homepage on the way back out.
+
+**One design system, not two.** `web/src/app.css` loads *after* the inlined
+`_css()` on every page that uses it, and must not redeclare a token. It used to
+carry its own `--panel`, `--border` and a 14px radius that is not on the scale,
+so the product and the marketing pages had quietly diverged.
+
+**Body copy outside a card wears `p.sub`**, which caps the measure at 62ch and
+sets secondary ink. Features, pricing and docs used the class before the rule
+existed, so their paragraphs ran full-ink at 140 characters wide.
 
 **Figures.** Chart in a `--panel` frame with `sh-2` and a muted caption. The
 caption states what the chart demonstrates, not what it contains.
@@ -226,7 +268,11 @@ caption states what the chart demonstrates, not what it contains.
 2. Do headings use the tracking for their size?
 3. Is any text wearing a series colour?
 4. Does it work in dark mode — *checked*, not assumed?
-5. Does `visualbench` report zero horizontal overflow at 390px?
+5. Does `visualbench` report zero horizontal overflow **and zero broken
+   images** at 390px, run against the nginx front rather than the app port?
 6. Do the charts pass `defaults.audit()`?
-7. Is grain over any chart, control or paragraph? (It must not be.)
-8. Does the page still read with every image removed?
+7. Are the chart tick labels still ~11px at 390px, or has the render size
+   drifted back up?
+8. Is grain over any chart, control or paragraph? (It must not be.)
+9. Is every tap target at least 44px on a phone?
+10. Does the page still read with every image removed?

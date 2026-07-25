@@ -65,6 +65,29 @@ class Box:
     bottom: float = 56
     left: float = 68
 
+    @classmethod
+    def fit(cls, width: float, height: float) -> "Box":
+        """Margins proportional to the canvas, clamped to the large-chart values.
+
+        Fixed margins are fine at 900x520 and ruinous below ~450px wide, where
+        a 68px gutter is a sixth of the canvas: the plot ends up smaller than
+        its own chrome. That case is not hypothetical - a phone renders a
+        marketing figure at about 350 CSS pixels, and rendering the SVG at that
+        intrinsic size (rather than scaling a 620px one down) is the only way
+        the 11px tick labels stay 11px. Above ~520px wide nothing changes.
+        """
+        return cls(
+            width=width,
+            height=height,
+            top=min(56.0, max(40.0, height * 0.15)),
+            right=min(28.0, max(12.0, width * 0.04)),
+            # The floor is not cosmetic: the category labels sit 18px under the
+            # plot and the axis title 38px under it, so anything below ~50
+            # stacks the two on top of each other.
+            bottom=min(56.0, max(50.0, height * 0.14)),
+            left=min(68.0, max(40.0, width * 0.13)),
+        )
+
     @property
     def plot_width(self) -> float:
         return max(1.0, self.width - self.left - self.right)
@@ -99,7 +122,7 @@ def render(
         raise Unsupported(kind)
 
     face = _themed(palette.surface(mode), mode, theme_vars)
-    box = Box(float(width), float(height))
+    box = Box.fit(float(width), float(height))
     if not _title(layout):
         box.top = 24
 
@@ -114,10 +137,23 @@ def render(
 
     title = _title(layout)
     if title:
-        parts.append(
-            f'<text x="{box.left - 12}" y="30" font-size="16" font-weight="600" '
-            f'fill="{face.text_primary}">{html.escape(title)}</text>'
-        )
+        # Sits above the plot, not on a fixed baseline: with a proportional top
+        # margin a 30px baseline would collide with the gridlines on a short
+        # canvas. Titles state the finding rather than the column names, so
+        # they are long by design and have to wrap rather than run off the
+        # canvas edge.
+        left = box.left - 12
+        lines = _wrap(title, max(1, int((width - left - 8) / (16 * 0.53))))
+        baseline = max(18.0, box.top - 26)
+        for offset, line in enumerate(lines):
+            parts.append(
+                f'<text x="{left:.1f}" y="{baseline + offset * 19:.1f}" '
+                f'font-size="16" font-weight="600" '
+                f'fill="{face.text_primary}">{html.escape(line)}</text>'
+            )
+        if len(lines) > 1:
+            # Push the plot down so the extra lines have somewhere to live.
+            box.top += (len(lines) - 1) * 19
 
     if theme_vars:
         traces = [dict(t) for t in traces]
@@ -149,6 +185,23 @@ def _kind(trace: dict[str, Any]) -> str:
         mode = str(trace.get("mode") or "lines")
         return "scatter" if "markers" in mode and "lines" not in mode else "line"
     return kind
+
+
+def _wrap(text: str, per_line: int) -> list[str]:
+    """Greedy word wrap. Never splits a word: a broken word reads as a bug."""
+    if len(text) <= per_line:
+        return [text]
+    lines: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        if current and len(current) + 1 + len(word) > per_line:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        lines.append(current)
+    return lines or [text]
 
 
 def _title(layout: dict[str, Any]) -> str:
@@ -291,8 +344,11 @@ def _cartesian(
 
     axis_label = _axis_title(layout, "xaxis")
     if axis_label:
+        # Anchored to the plot rather than the canvas bottom, so it keeps its
+        # distance from the category labels whatever the bottom margin is.
         parts.append(
-            f'<text x="{box.left + box.plot_width / 2:.1f}" y="{box.height - 12}" '
+            f'<text x="{box.left + box.plot_width / 2:.1f}" '
+            f'y="{box.top + box.plot_height + 38:.1f}" '
             f'font-size="12" fill="{face.text_secondary}" text-anchor="middle">'
             f"{html.escape(axis_label)}</text>"
         )
@@ -481,7 +537,9 @@ def _category_labels(
 def _legend(traces: list[dict[str, Any]], box: Box, face: palette.Surface) -> list[str]:
     parts: list[str] = []
     x = box.left
-    y = box.top - 14
+    # Between the title and the plot. Both ends move with the top margin, so
+    # this is expressed relative to it rather than as a constant.
+    y = box.top - 10
     for index, trace in enumerate(traces):
         name = str(trace.get("name") or "")
         if not name:
