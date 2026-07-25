@@ -1,0 +1,37 @@
+[Unit]
+Description=twoHelixes analytics agent (Mojo server)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=administrator
+Group=administrator
+WorkingDirectory=/nvme0n1-disk/code/twohelixes
+
+Environment=TWOHELIXES_PORT=7474
+Environment=TWOHELIXES_WORKERS=4
+Environment=TWOHELIXES_PROD=1
+Environment=TWOHELIXES_SITE_URL=https://twohelixes.com
+Environment=TWOHELIXES_INTERP=/nvme0n1-disk/code/twohelixes/interp
+# The AOT Mojo binary embeds CPython 3.12, so it needs askfelix's 3.12 venv.
+# Pointing this at the 3.13 venv makes numpy fail to load and every chart
+# request degrade to the no-data path.
+Environment=TWOHELIXES_SITE_PACKAGES=/nvme0n1-disk/code/askfelix/.venv/lib/python3.12/site-packages
+
+ExecStart=/nvme0n1-disk/code/twohelixes/build/twohelixes-server
+
+Restart=always
+RestartSec=3
+# The worker processes are forked children; kill the whole group on stop.
+KillMode=control-group
+TimeoutStopSec=20
+
+StandardOutput=append:/nvme0n1-disk/code/twohelixes/var/server.log
+StandardError=append:/nvme0n1-disk/code/twohelixes/var/server.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

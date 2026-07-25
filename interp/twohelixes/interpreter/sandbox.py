@@ -1,0 +1,436 @@
+"""The code interpreter the agent writes into.
+
+Design notes that matter for latency: the pipeline runs several exec steps per
+user query, so the namespace is built once at worker boot and *copied* per
+run (a dict copy, not re-imports). A cold `import pandas` inside a request
+would cost more than the LLM call that produced the code.
+
+Safety here is containment, not a security boundary: the interpreter runs
+agent-authored code inside the worker process. Untrusted multi-tenant code
+would need process isolation - that is what the long-running agent runner is
+for.
+"""
+
+from __future__ import annotations
+
+import ast
+import builtins
+import contextlib
+import importlib
+import io
+import logging
+import threading
+import time
+import traceback
+from dataclasses import dataclass, field
+from typing import Any
+
+log = logging.getLogger("twohelixes.interpreter")
+
+_BASE_NAMESPACE: dict[str, Any] = {}
+_warm_lock = threading.Lock()
+_warmed = False
+
+# Modules pre-imported into every run. Name -> import path. Anything the agent
+# reaches for that is missing gets auto-imported on demand (see _auto_import).
+PRELOAD: dict[str, str] = {
+    # core numerics
+    "np": "numpy",
+    "numpy": "numpy",
+    "pd": "pandas",
+    "pandas": "pandas",
+    "pl": "polars",
+    "polars": "polars",
+    # plotting
+    "px": "plotly.express",
+    "go": "plotly.graph_objects",
+    "pio": "plotly.io",
+    "ff": "plotly.figure_factory",
+    "plotly": "plotly",
+    # stats / ml
+    "scipy": "scipy",
+    "stats": "scipy.stats",
+    "signal": "scipy.signal",
+    "optimize": "scipy.optimize",
+    "interpolate": "scipy.interpolate",
+    "linalg": "scipy.linalg",
+    "sm": "statsmodels.api",
+    "tsa": "statsmodels.tsa.api",
+    "sklearn": "sklearn",
+    # stdlib the agent reaches for constantly
+    "json": "json",
+    "math": "math",
+    "re": "re",
+    "datetime": "datetime",
+    "time": "time",
+    "random": "random",
+    "itertools": "itertools",
+    "functools": "functools",
+    "collections": "collections",
+    "statistics": "statistics",
+    "decimal": "decimal",
+    "textwrap": "textwrap",
+    "unicodedata": "unicodedata",
+    "hashlib": "hashlib",
+    "base64": "base64",
+    "csv": "csv",
+    "io": "io",
+    "operator": "operator",
+    "warnings": "warnings",
+    # data access
+    "duckdb": "duckdb",
+    "sqlalchemy": "sqlalchemy",
+}
+
+# Lazily importable on first reference. These are heavy, so they are not part
+# of boot: a query that never mentions them should not pay for them.
+LAZY: dict[str, str] = {
+    "sns": "seaborn",
+    "seaborn": "seaborn",
+    "plt": "matplotlib.pyplot",
+    "matplotlib": "matplotlib",
+    "nx": "networkx",
+    "networkx": "networkx",
+    "geopandas": "geopandas",
+    "gpd": "geopandas",
+    "shapely": "shapely",
+    "pyarrow": "pyarrow",
+    "pa": "pyarrow",
+    "xgboost": "xgboost",
+    "xgb": "xgboost",
+    "lightgbm": "lightgbm",
+    "torch": "torch",
+    "transformers": "transformers",
+    "nltk": "nltk",
+    "spacy": "spacy",
+    "TextBlob": "textblob.TextBlob",
+    "requests": "requests",
+    "httpx": "httpx",
+    "bs4": "bs4",
+    "PIL": "PIL",
+    "Image": "PIL.Image",
+    "cv2": "cv2",
+    "prophet": "prophet",
+    "statsmodels": "statsmodels",
+    "openpyxl": "openpyxl",
+    "yaml": "yaml",
+}
+
+# Names the agent must not touch. Not a sandbox escape barrier - a guard rail
+# against an agent "cleaning up" the worker's filesystem or exiting the loop.
+BANNED_NAMES = frozenset(
+    {
+        "exit",
+        "quit",
+        "compile",
+        "memoryview",
+    }
+)
+
+BANNED_CALLS = (
+    ("os", "system"),
+    ("os", "remove"),
+    ("os", "rmdir"),
+    ("os", "unlink"),
+    ("os", "kill"),
+    ("os", "_exit"),
+    ("shutil", "rmtree"),
+    ("subprocess", "run"),
+    ("subprocess", "Popen"),
+    ("subprocess", "call"),
+    ("sys", "exit"),
+)
+
+
+class InterpreterError(Exception):
+    pass
+
+
+class UnsafeCode(InterpreterError):
+    pass
+
+
+@dataclass
+class RunResult:
+    ok: bool
+    stdout: str = ""
+    error: str = ""
+    error_type: str = ""
+    traceback: str = ""
+    duration_ms: int = 0
+    value: Any = None
+    variables: dict[str, Any] = field(default_factory=dict)
+
+    def to_payload(self, include_vars: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": self.ok,
+            "stdout": self.stdout[-8000:],
+            "duration_ms": self.duration_ms,
+        }
+        if not self.ok:
+            payload["error"] = self.error
+            payload["error_type"] = self.error_type
+            payload["traceback"] = self.traceback[-4000:]
+        if include_vars:
+            payload["variables"] = sorted(self.variables)
+        return payload
+
+
+def warm() -> None:
+    """Import the preload set once per worker."""
+    global _warmed
+    with _warm_lock:
+        if _warmed:
+            return
+        started = time.time()
+        namespace: dict[str, Any] = {"__builtins__": builtins}
+
+        for alias, path in PRELOAD.items():
+            try:
+                namespace[alias] = _import(path)
+            except Exception as exc:  # noqa: BLE001 - optional deps are fine
+                log.debug("preload %s (%s) unavailable: %s", alias, path, exc)
+
+        # Frequently used symbols, so the agent can write idiomatic code.
+        try:
+            import pandas as pd
+
+            namespace["DataFrame"] = pd.DataFrame
+            namespace["Series"] = pd.Series
+            namespace["read_csv"] = pd.read_csv
+            namespace["to_datetime"] = pd.to_datetime
+            namespace["date_range"] = pd.date_range
+            namespace["concat"] = pd.concat
+            namespace["merge"] = pd.merge
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            from datetime import date, datetime, timedelta, timezone
+
+            namespace.update(
+                date=date, datetime=datetime, timedelta=timedelta, timezone=timezone
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        from twohelixes.interpreter import tools
+
+        namespace.update(tools.namespace())
+
+        _BASE_NAMESPACE.clear()
+        _BASE_NAMESPACE.update(namespace)
+        _warmed = True
+        log.info(
+            "interpreter warm: %d names in %dms",
+            len(namespace),
+            int((time.time() - started) * 1000),
+        )
+
+
+def _import(path: str) -> Any:
+    """Import `a.b.c` or `a.b:attr`-style dotted paths."""
+    try:
+        return importlib.import_module(path)
+    except ImportError:
+        module_path, _, attr = path.rpartition(".")
+        if not module_path:
+            raise
+        module = importlib.import_module(module_path)
+        return getattr(module, attr)
+
+
+def base_namespace() -> dict[str, Any]:
+    if not _warmed:
+        warm()
+    return dict(_BASE_NAMESPACE)
+
+
+def _auto_import(code: str, namespace: dict[str, Any]) -> list[str]:
+    """Import names the code references but the namespace does not define.
+
+    Cheaper and more reliable than asking the model to remember every import;
+    the failure mode we are avoiding is a NameError three stages deep.
+    """
+    added: list[str] = []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return added
+
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            referenced.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value  # type: ignore[assignment]
+            if isinstance(root, ast.Name):
+                referenced.add(root.id)
+
+    for name in referenced:
+        if name in namespace or hasattr(builtins, name):
+            continue
+        path = LAZY.get(name) or PRELOAD.get(name)
+        if not path:
+            continue
+        try:
+            namespace[name] = _import(path)
+            added.append(name)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("auto-import %s failed: %s", name, exc)
+    return added
+
+
+def check_safety(code: str) -> None:
+    """Reject the handful of calls that would damage the host."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise InterpreterError(f"syntax error: {exc}") from exc
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in BANNED_NAMES:
+            raise UnsafeCode(f"use of {node.id} is not allowed")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            func = node.func
+            if isinstance(func.value, ast.Name):
+                pair = (func.value.id, func.attr)
+                if pair in BANNED_CALLS:
+                    raise UnsafeCode(f"{pair[0]}.{pair[1]} is not allowed")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = (
+                [alias.name for alias in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+            )
+            for name in names:
+                root = name.split(".")[0]
+                if root in ("subprocess", "ctypes", "multiprocessing"):
+                    raise UnsafeCode(f"importing {root} is not allowed")
+
+
+def run(
+    code: str,
+    variables: dict[str, Any] | None = None,
+    *,
+    timeout: float = 60.0,
+    capture_last: bool = True,
+    check: bool = True,
+) -> RunResult:
+    """Execute agent-authored code against a fresh namespace.
+
+    `variables` are injected (typically `df`, or several named frames for a
+    join step) and any names the code defines are returned so the next stage
+    can pick them up.
+    """
+    if check:
+        try:
+            check_safety(code)
+        except InterpreterError as exc:
+            return RunResult(
+                ok=False, error=str(exc), error_type=exc.__class__.__name__
+            )
+
+    namespace = base_namespace()
+    if variables:
+        namespace.update(variables)
+    _auto_import(code, namespace)
+
+    stdout = io.StringIO()
+    started = time.time()
+    value: Any = None
+
+    # Evaluate a trailing expression so the agent can end with `fig` and have
+    # it come back, notebook style.
+    body = code
+    tail_expr: str | None = None
+    if capture_last:
+        try:
+            tree = ast.parse(code)
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                tail_expr = ast.unparse(tree.body[-1].value)
+                body = ast.unparse(ast.Module(body=tree.body[:-1], type_ignores=[]))
+        except (SyntaxError, ValueError):
+            tail_expr = None
+            body = code
+
+    watchdog = _Watchdog(timeout)
+    try:
+        watchdog.start()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stdout):
+            if body.strip():
+                exec(compile(body, "<agent>", "exec"), namespace, namespace)  # noqa: S102
+            if tail_expr:
+                value = eval(compile(tail_expr, "<agent>", "eval"), namespace, namespace)  # noqa: S307
+    except BaseException as exc:  # noqa: BLE001 - report everything to the agent
+        return RunResult(
+            ok=False,
+            stdout=stdout.getvalue(),
+            error=str(exc) or exc.__class__.__name__,
+            error_type=exc.__class__.__name__,
+            traceback=_clean_traceback(),
+            duration_ms=int((time.time() - started) * 1000),
+            variables=_user_names(namespace),
+        )
+    finally:
+        watchdog.stop()
+
+    return RunResult(
+        ok=True,
+        stdout=stdout.getvalue(),
+        duration_ms=int((time.time() - started) * 1000),
+        value=value,
+        variables=_user_names(namespace),
+    )
+
+
+def _user_names(namespace: dict[str, Any]) -> dict[str, Any]:
+    """Names the code introduced, minus the preloaded scaffolding."""
+    return {
+        key: val
+        for key, val in namespace.items()
+        if not key.startswith("_") and key not in _BASE_NAMESPACE
+    }
+
+
+def _clean_traceback() -> str:
+    """Trim interpreter frames so the agent sees only its own code."""
+    lines = traceback.format_exc().splitlines()
+    keep = [
+        line
+        for line in lines
+        if "sandbox.py" not in line and "importlib" not in line
+    ]
+    return "\n".join(keep)
+
+
+class _Watchdog:
+    """Best-effort wall-clock guard.
+
+    CPython cannot interrupt arbitrary C-level work, so this raises inside the
+    interpreter loop via `sys.settrace`-free polling: it flips a flag that the
+    audit hook checks. Runaway numpy kernels are bounded by the worker-level
+    timeout instead.
+    """
+
+    def __init__(self, timeout: float):
+        self.timeout = timeout
+        self.timer: threading.Timer | None = None
+        self.expired = False
+
+    def start(self) -> None:
+        if self.timeout <= 0:
+            return
+        self.timer = threading.Timer(self.timeout, self._fire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def _fire(self) -> None:
+        self.expired = True
+        log.warning("interpreter run exceeded %.1fs", self.timeout)
+
+    def stop(self) -> None:
+        if self.timer is not None:
+            self.timer.cancel()

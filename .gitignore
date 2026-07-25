@@ -1,0 +1,36 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Build output
+build/
+static/
+web/node_modules/
+web/bun.lockb
+
+# Visual benchmark output - regenerated every run, never reviewed in a diff
+visualbench/
+
+# Scratch
+probe/
+*.mojopkg
+
+# Runtime state
+var/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

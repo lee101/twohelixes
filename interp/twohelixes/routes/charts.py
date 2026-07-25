@@ -1,0 +1,128 @@
+"""Export and the brand mark endpoints."""
+
+from __future__ import annotations
+
+import base64
+
+from twohelixes import auth, router, store
+from twohelixes.charts import helix, palette, svg
+
+
+@router.get("/v1/chart/{chart_id}/export")
+def export_chart(ctx: router.Context) -> router.Result:
+    identity = auth.require(ctx)
+    row = store.one(
+        "SELECT spec, title FROM charts WHERE id = ? AND user_id = ?",
+        (ctx.params["chart_id"], identity.user_id),
+    )
+    if row is None:
+        return router.error(404, "not_found")
+
+    figure = store.load_json(row["spec"], {})
+    fmt = (ctx.q("format") or "svg").lower()
+    if fmt not in ("svg", "png", "json"):
+        return router.error(400, "unsupported_format")
+
+    if fmt == "json":
+        return router.json_result(figure)
+
+    try:
+        payload, content_type = svg.export(
+            figure,
+            fmt=fmt,
+            width=ctx.q_int("width", 900),
+            height=ctx.q_int("height", 520),
+            mode=ctx.q("mode", "light") or "light",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return router.error(500, "export_failed", str(exc))
+
+    name = "".join(c for c in str(row["title"]) if c.isalnum() or c in " -_").strip()
+    disposition = f'attachment; filename="{name or "chart"}.{fmt}"'
+
+    if fmt == "png":
+        # PNG crosses the Mojo boundary as a string, so it travels base64.
+        return router.Result(
+            status=200,
+            body={"format": "png", "base64": base64.b64encode(payload).decode()},
+        )
+
+    return router.Result(
+        status=200,
+        body=payload.decode(),
+        content_type=content_type,
+        headers={"Content-Disposition": disposition},
+    )
+
+
+@router.post("/v1/export")
+def export_inline(ctx: router.Context) -> router.Result:
+    """Export a figure the client already holds, without saving it first."""
+    figure = ctx.field("figure")
+    if not isinstance(figure, dict):
+        return router.error(400, "missing_figure")
+
+    try:
+        payload, content_type = svg.export(
+            figure,
+            fmt=str(ctx.field("format") or "svg"),
+            width=int(ctx.field("width") or 900),
+            height=int(ctx.field("height") or 520),
+            mode=str(ctx.field("mode") or "light"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return router.error(500, "export_failed", str(exc))
+
+    if content_type == "image/png":
+        return router.json_result(
+            {"format": "png", "base64": base64.b64encode(payload).decode()}
+        )
+    return router.Result(status=200, body=payload.decode(), content_type=content_type)
+
+
+@router.get("/brand/helix.svg")
+def brand_logo(ctx: router.Context) -> router.Result:
+    return router.Result(
+        status=200,
+        body=helix.logo(ctx.q_int("size", 64), ctx.q("mode", "light") or "light"),
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/brand/spinner.svg")
+def brand_spinner(ctx: router.Context) -> router.Result:
+    return router.Result(
+        status=200,
+        body=helix.spinner(ctx.q_int("size", 48), ctx.q("mode", "light") or "light"),
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/favicon.svg")
+def favicon(ctx: router.Context) -> router.Result:
+    return router.Result(
+        status=200,
+        body=helix.favicon(),
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@router.get("/v1/theme")
+def theme(ctx: router.Context) -> router.Result:
+    """The validated palette, so the client never invents a hue."""
+    return router.json_result(
+        {
+            "light": palette.as_css_variables("light"),
+            "dark": palette.as_css_variables("dark"),
+            "categorical": {
+                "light": list(palette.CATEGORICAL_LIGHT),
+                "dark": list(palette.CATEGORICAL_DARK),
+            },
+            "max_series": palette.MAX_SERIES,
+            "all_pairs_max_series": palette.ALL_PAIRS_MAX_SERIES,
+            "other_label": palette.OTHER_LABEL,
+        }
+    )

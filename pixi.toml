@@ -1,0 +1,12 @@
+[workspace]
+authors = ["Lee Penkman <leepenkman@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "twohelixes"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+mojo = "==1.0.0b3.dev2026072406"
+python = "3.13.*"

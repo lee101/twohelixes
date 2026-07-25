@@ -1,0 +1,405 @@
+/* App styles. Marketing pages carry their own inline CSS; this is the shell. */
+
+:root {
+  --surface-1: #fcfcfb;
+  --panel: #ffffff;
+  --border: #e8e7e3;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7973;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --status-warning: #eda100;
+  --status-critical: #e34948;
+  --radius: 14px;
+  --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-1: #1a1a19;
+    --panel: #212120;
+    --border: #2e2e2c;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e85;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --status-warning: #c98500;
+    --status-critical: #e66767;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --surface-1: #1a1a19;
+  --panel: #212120;
+  --border: #2e2e2c;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e85;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --status-warning: #c98500;
+  --status-critical: #e66767;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem clamp(1rem, 3vw, 2rem);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 650;
+  color: var(--text-primary);
+  text-decoration: none;
+}
+
+.app-header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.user-meta {
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+
+.app-main {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.25rem;
+  padding: clamp(1rem, 3vw, 1.75rem);
+  align-items: start;
+}
+
+@media (min-width: 1080px) {
+  .app-main { grid-template-columns: minmax(340px, 27rem) 1fr; }
+}
+
+.app-left,
+.app-right {
+  display: grid;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+/* -- ask ---------------------------------------------------------------- */
+
+.ask,
+.trace,
+.chart-view {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem;
+  min-width: 0;
+}
+
+.ask-input {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 0.98rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+.ask-input:focus-visible,
+.signin-input:focus-visible,
+.control-input:focus-visible,
+.chart-edit-input:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+
+.ask-row {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* -- buttons ------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.95rem;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-primary { background: var(--series-1); color: #fff; }
+.btn-ghost {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text-primary);
+}
+.btn-small { padding: 0.35rem 0.65rem; font-size: 0.85rem; }
+.btn:disabled { opacity: 0.55; cursor: default; }
+
+/* `hidden` must beat the flex display above, or hidden buttons still show. */
+[hidden] { display: none !important; }
+
+/* -- trace -------------------------------------------------------------- */
+
+.trace-header { margin-bottom: 0.6rem; }
+.trace-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 0;
+  font-weight: 650;
+}
+
+.trace-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.trace-stage {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.trace-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--surface-1) 60%, transparent);
+}
+
+.trace-stage-label { font-size: 0.92rem; font-weight: 600; }
+
+.trace-stage-status {
+  margin-left: auto;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+}
+
+.trace-stage.is-running .trace-stage-label { color: var(--series-1); }
+.trace-stage.is-collapsed .trace-stage-body { display: none; }
+
+.trace-stage-body {
+  padding: 0 0.7rem 0.6rem;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.trace-thought,
+.trace-detail,
+.trace-line {
+  margin: 0;
+  font-size: 0.89rem;
+  color: var(--text-secondary);
+}
+
+.trace-detail { color: var(--text-muted); font-size: 0.82rem; }
+.trace-warn { color: var(--status-warning); }
+.trace-error { color: var(--status-critical); }
+.trace-finding { color: var(--text-primary); font-weight: 550; }
+.trace-note { font-size: 0.85rem; color: var(--text-muted); }
+
+.trace-code,
+.trace-output {
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+  margin: 0;
+  overflow-x: auto;
+  max-height: 15rem;
+}
+
+.trace-output.is-error { color: var(--status-critical); }
+
+.th-spinner { display: inline-flex; }
+
+/* -- chart -------------------------------------------------------------- */
+
+.chart-plot {
+  width: 100%;
+  min-height: 340px;
+  height: clamp(340px, 46vh, 560px);
+}
+
+.chart-meta { font-size: 0.82rem; color: var(--text-muted); }
+
+.chart-notes {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.note { margin: 0; font-size: 0.85rem; color: var(--text-secondary); }
+.note-warn { color: var(--status-warning); }
+.note-audit { color: var(--status-critical); }
+
+.chart-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.2rem;
+}
+
+.chart-controls {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.control { display: grid; gap: 0.22rem; }
+.control-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-bottom: 0.45rem;
+}
+
+.control-label {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.control-input {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  min-width: 8rem;
+}
+
+.chart-edit {
+  display: flex;
+  gap: 0.5rem;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+.chart-edit-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+/* -- sign in ------------------------------------------------------------ */
+
+.signin {
+  max-width: 34rem;
+  margin: clamp(2rem, 10vh, 6rem) auto;
+  padding: 0 1.25rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.signin h1 { font-size: clamp(1.5rem, 4vw, 2rem); margin: 0; letter-spacing: -0.015em; }
+.signin-lede { color: var(--text-secondary); margin: 0; }
+.signin-form { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+.signin-input {
+  flex: 1 1 15rem;
+  min-width: 0;
+  font: inherit;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-primary);
+}
+
+/* -- banners ------------------------------------------------------------ */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.7rem clamp(1rem, 3vw, 2rem);
+  font-size: 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.banner-error {
+  background: color-mix(in srgb, var(--status-critical) 12%, transparent);
+  color: var(--text-primary);
+}
+
+.boot-splash { display: grid; place-items: center; min-height: 100vh; }
+
+/* Wide content must scroll inside itself, never the page. */
+.scroll-x { overflow-x: auto; }
