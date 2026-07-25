@@ -9,6 +9,7 @@ import { ApiError, api, stream, type ChartConfig, type PipelineResult, type User
 import { ChartView, button, el } from "./chart";
 import { logo, spinner } from "./helix";
 import { Builder } from "./builder";
+import { DashboardView } from "./dashboard";
 import { TraceView } from "./trace";
 
 interface Sample {
@@ -19,11 +20,12 @@ interface Sample {
   rows: number;
 }
 
-type View = "chat" | "builder";
+type View = "chat" | "builder" | "dashboard";
 
 interface State {
   view: View;
   builder: Builder | null;
+  dashboard: DashboardView | null;
   user: User | null;
   lastResult: PipelineResult | null;
   lastQuestion: string;
@@ -38,6 +40,7 @@ interface State {
 const state: State = {
   view: "chat",
   builder: null,
+  dashboard: null,
   user: null,
   lastResult: null,
   lastQuestion: "",
@@ -145,11 +148,16 @@ function main(): HTMLElement {
     return wrap;
   }
 
-  // The builder owns the whole width and its own state, so it is not rebuilt
-  // on every render - re-rendering it would discard the plan.
+  // These views own their width and their own state, so they are appended
+  // rather than rebuilt - re-rendering would discard the plan or the layout.
   if (state.view === "builder" && state.builder) {
     wrap.classList.add("app-main-wide");
     wrap.append(state.builder.root);
+    return wrap;
+  }
+  if (state.view === "dashboard" && state.dashboard) {
+    wrap.classList.add("app-main-wide");
+    wrap.append(state.dashboard.root);
     return wrap;
   }
 
@@ -583,5 +591,26 @@ async function openBuilder(source: Record<string, unknown>): Promise<Builder> {
   await builder.setPlan(plan);
   return true;
 };
+
+/** Open a dashboard by id, or a shared one by token. */
+(window as unknown as Record<string, unknown>).__thDashboard = async (
+  idOrToken: string,
+  shared = false,
+) => {
+  await openDashboard(idOrToken, shared);
+  return true;
+};
+
+async function openDashboard(idOrToken: string, shared = false): Promise<DashboardView> {
+  const view = new DashboardView({ readOnly: shared });
+  state.dashboard = view;
+  state.builder = null;
+  state.view = "dashboard";
+  (window as unknown as Record<string, unknown>).__thDashboardInstance = view;
+  render();
+  if (shared) await view.openShared(idOrToken);
+  else await view.open(idOrToken);
+  return view;
+}
 
 export { spinner };

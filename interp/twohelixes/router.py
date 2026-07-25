@@ -270,7 +270,19 @@ def handle(
 
     handler, params = found
     ctx.params = params
-    result = handler(ctx)
+
+    try:
+        result = handler(ctx)
+    except Exception as exc:  # noqa: BLE001
+        from twohelixes import auth
+
+        # A missing session is a 401, not a server error. Without this every
+        # unauthenticated call to a protected route returned 500 with a stack
+        # trace in the detail.
+        if isinstance(exc, auth.Unauthorized):
+            return error(401, "signin_required", "Sign in to continue.").render()
+        raise
+
     if not isinstance(result, Result):
         result = json_result(result)
     return result.render()

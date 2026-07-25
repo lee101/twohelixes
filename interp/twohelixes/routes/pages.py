@@ -1167,7 +1167,7 @@ def app_shell(ctx: router.Context) -> router.Result:
 <title>twoHelixes</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>{_css()}</style>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/styles.css">
 </head><body>
 <div id="root" data-boot="{int(time.time())}">
   <div class="boot-splash" style="display:grid;place-items:center;min-height:100vh">
@@ -1201,7 +1201,7 @@ def shared_page(ctx: router.Context) -> router.Result:
 <title>{title} — twoHelixes</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>{_css()}</style>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/styles.css">
 </head><body>
 <div id="root" data-share="{html.escape(ctx.params['token'])}">
   <div style="display:grid;place-items:center;min-height:100vh">

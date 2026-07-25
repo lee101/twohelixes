@@ -9,13 +9,13 @@
 
 import { api, type ChartConfig, type PipelineResult, type PlotlyFigure } from "./api";
 
-type Plotly = typeof import("plotly.js-basic-dist-min");
+type Plotly = typeof import("./plotly").default;
 let plotlyPromise: Promise<Plotly> | null = null;
 
-/** Plotly is ~1 MB; load it only when a chart is actually rendered. */
+/** Plotly is large; load it only when a chart is actually rendered. */
 function loadPlotly(): Promise<Plotly> {
   if (!plotlyPromise) {
-    plotlyPromise = import("plotly.js-basic-dist-min").then((m) => (m.default ?? m) as Plotly);
+    plotlyPromise = import("./plotly").then((m) => m.default as Plotly);
   }
   return plotlyPromise;
 }
@@ -47,6 +47,20 @@ export async function renderFigure(
   figure: PlotlyFigure,
 ): Promise<void> {
   const Plotly = await loadPlotly();
+  const { SUPPORTED_TRACES } = await import("./plotly");
+
+  // Plotly ignores an unregistered trace type without erroring, which reads
+  // as "the chart is broken" rather than "this build cannot draw that".
+  const unknown = [
+    ...new Set(
+      (figure.data ?? [])
+        .map((t) => String((t as any).type ?? "scatter"))
+        .filter((t) => !SUPPORTED_TRACES.has(t)),
+    ),
+  ];
+  if (unknown.length) {
+    console.warn("twoHelixes: unregistered trace type(s)", unknown);
+  }
   const layout = fitTitle({ ...figure.layout, autosize: true }, host.clientWidth);
   const config = { ...(figure.config ?? {}), responsive: true, displaylogo: false };
   await Plotly.react(host, figure.data as any, layout as any, config as any);

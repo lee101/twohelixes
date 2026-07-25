@@ -752,3 +752,56 @@ def test_correct_titles_are_left_alone():
     }
     out = figures.validate_config(config, frame)
     assert out["title"] == "Revenue grew every month"
+
+
+def test_dense_bars_drop_the_spacer_instead_of_vanishing():
+    """A 2px surface stroke erases sub-pixel bars.
+
+    Seen on a dashboard: a bar chart over 11k unaggregated rows rendered as
+    an empty plot with axes and gridlines, because every mark was thinner
+    than its own background-coloured border.
+    """
+    frame = pd.DataFrame({
+        "channel": [f"c{i % 6}" for i in range(5000)],
+        "value": [float(i) for i in range(5000)],
+    })
+    figure, _ = figures.build(frame, {"chart_type": "bar", "x": "channel", "y": "value"})
+    figure = defaults.apply(figure, chart_type="bar")
+    marker = figure["data"][0]["marker"]
+    assert marker["line"]["width"] == 0
+    assert marker["cornerradius"] == 0
+
+
+def test_ordinary_bars_keep_the_spacer():
+    frame = pd.DataFrame({"c": list("abcde"), "v": [1.0, 2, 3, 4, 5]})
+    figure, _ = figures.build(frame, {"chart_type": "bar", "x": "c", "y": "v"})
+    figure = defaults.apply(figure, chart_type="bar")
+    marker = figure["data"][0]["marker"]
+    assert marker["line"]["width"] == defaults.SPACER
+    assert marker["cornerradius"] == defaults.BAR_CORNER_RADIUS
+
+
+def test_audit_flags_unaggregated_bars():
+    frame = pd.DataFrame({
+        "c": [f"c{i % 4}" for i in range(900)],
+        "v": [float(i) for i in range(900)],
+    })
+    figure, _ = figures.build(frame, {"chart_type": "bar", "x": "c", "y": "v"})
+    figure = defaults.apply(figure, chart_type="bar")
+    assert any(f["code"] == "unaggregated_bars" for f in defaults.audit(figure))
+
+
+def test_audit_catches_a_spacer_that_would_erase_bars():
+    """Guard the fix directly: a dense bar chart that kept its stroke."""
+    figure = {
+        "data": [{
+            "type": "bar",
+            "x": [f"c{i}" for i in range(200)],
+            "y": [float(i) for i in range(200)],
+            "marker": {"line": {"width": 2, "color": "#fff"}},
+            "_series_index": 0,
+        }],
+        "layout": {},
+    }
+    findings = defaults.audit(figure)
+    assert any(f["code"] == "spacer_erases_dense_bars" for f in findings)

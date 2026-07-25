@@ -25,6 +25,8 @@ LINE_WIDTH = 2
 MARKER_MIN_SIZE = 8
 AREA_FILL_OPACITY = 0.10
 SPACER = 2  # surface-coloured gap between adjacent fills
+# Past this many bars the spacer erases the marks rather than separating them.
+DENSE_BAR_LIMIT = 60
 GRID_WIDTH = 1
 
 # Direct-label every series only while the chart stays readable.
@@ -282,9 +284,19 @@ def _style_marks(traces: list[dict[str, Any]], mode: str, chart_type: str) -> No
             marker = dict(trace.get("marker") or {})
             marker["color"] = color
             marker["cornerradius"] = BAR_CORNER_RADIUS
-            # A surface-coloured hairline is the 2px spacer between adjacent
-            # or stacked fills; without it segments melt into one block.
-            marker["line"] = {"color": face.background, "width": SPACER}
+            # The surface-coloured hairline separates adjacent fills. Once
+            # bars go sub-pixel it stops separating and starts erasing: a 2px
+            # stroke in the background colour covers the whole mark and a
+            # dense bar chart renders as an empty plot with axes. There is
+            # nothing to separate at that density anyway.
+            bar_count = len(trace.get("x") or trace.get("y") or [])
+            dense = bar_count > DENSE_BAR_LIMIT
+            marker["line"] = {
+                "color": face.background,
+                "width": 0 if dense else SPACER,
+            }
+            if dense:
+                marker["cornerradius"] = 0
             trace["marker"] = marker
             trace.setdefault("width", None)
 
@@ -474,6 +486,23 @@ def audit(figure: dict[str, Any], mode: str = "light") -> list[dict[str, str]]:
                 "detail": f"{len(coloured)} series on a {chart_type}; limit is {limit}.",
             }
         )
+
+    for trace in traces:
+        if str(trace.get("type")) != "bar":
+            continue
+        count = len(trace.get("x") or trace.get("y") or [])
+        stroke = ((trace.get("marker") or {}).get("line") or {}).get("width", 0)
+        if count > DENSE_BAR_LIMIT and stroke:
+            findings.append({
+                "code": "spacer_erases_dense_bars",
+                "detail": f"{count} bars with a {stroke}px spacer render blank.",
+            })
+        if count > 400:
+            findings.append({
+                "code": "unaggregated_bars",
+                "detail": f"{count} bars; aggregate before charting.",
+            })
+            break
 
     if len(traces) == 1 and str(traces[0].get("type")) == "bar":
         xs = traces[0].get("x") or []
