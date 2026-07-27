@@ -25,6 +25,8 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
+from twohelixes.interpreter import accel
+
 log = logging.getLogger("twohelixes.interpreter")
 
 _BASE_NAMESPACE: dict[str, Any] = {}
@@ -160,6 +162,7 @@ class RunResult:
     duration_ms: int = 0
     value: Any = None
     variables: dict[str, Any] = field(default_factory=dict)
+    accel: dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self, include_vars: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -173,6 +176,8 @@ class RunResult:
             payload["traceback"] = self.traceback[-4000:]
         if include_vars:
             payload["variables"] = sorted(self.variables)
+        if self.accel:
+            payload["accel"] = self.accel
         return payload
 
 
@@ -214,9 +219,10 @@ def warm() -> None:
         except Exception:  # noqa: BLE001
             pass
 
-        from twohelixes.interpreter import tools
+        from twohelixes.interpreter import accel, tools
 
         namespace.update(tools.namespace())
+        namespace.update(accel.namespace())
 
         _BASE_NAMESPACE.clear()
         _BASE_NAMESPACE.update(namespace)
@@ -343,24 +349,38 @@ def run(
     value: Any = None
 
     # Evaluate a trailing expression so the agent can end with `fig` and have
-    # it come back, notebook style.
+    # it come back, notebook style. The body stays an AST rather than being
+    # unparsed back to text, because `accel` rewrites it before it is compiled.
+    body_tree: ast.Module | None = None
     body = code
     tail_expr: str | None = None
-    if capture_last:
+    try:
+        tree = ast.parse(code)
+        if capture_last and tree.body and isinstance(tree.body[-1], ast.Expr):
+            tail_expr = ast.unparse(tree.body[-1].value)
+            body_tree = ast.Module(body=tree.body[:-1], type_ignores=[])
+        else:
+            body_tree = tree
+    except (SyntaxError, ValueError):
+        body_tree = None
+        tail_expr = None
+        body = code
+
+    accelerated: list[str] = []
+    if body_tree is not None:
         try:
-            tree = ast.parse(code)
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                tail_expr = ast.unparse(tree.body[-1].value)
-                body = ast.unparse(ast.Module(body=tree.body[:-1], type_ignores=[]))
-        except (SyntaxError, ValueError):
-            tail_expr = None
-            body = code
+            accelerated = accel.accelerate(body_tree)
+        except Exception as exc:  # noqa: BLE001 - acceleration is never required
+            log.debug("acceleration pass failed: %s", exc)
 
     watchdog = _Watchdog(timeout)
     try:
         watchdog.start()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stdout):
-            if body.strip():
+            if body_tree is not None:
+                if body_tree.body:
+                    exec(compile(body_tree, "<agent>", "exec"), namespace, namespace)  # noqa: S102
+            elif body.strip():
                 exec(compile(body, "<agent>", "exec"), namespace, namespace)  # noqa: S102
             if tail_expr:
                 value = eval(compile(tail_expr, "<agent>", "eval"), namespace, namespace)  # noqa: S307
@@ -377,13 +397,23 @@ def run(
     finally:
         watchdog.stop()
 
+    names = _user_names(namespace)
     return RunResult(
         ok=True,
         stdout=stdout.getvalue(),
         duration_ms=int((time.time() - started) * 1000),
         value=value,
-        variables=_user_names(namespace),
+        variables=names,
+        accel=_accel_stats(names, accelerated),
     )
+
+
+def _accel_stats(names: dict[str, Any], accelerated: list[str]) -> dict[str, Any]:
+    if not accelerated:
+        return {}
+    summary = accel.stats(names)
+    summary["mojo_candidates"] = accelerated
+    return summary
 
 
 def _user_names(namespace: dict[str, Any]) -> dict[str, Any]:
@@ -406,19 +436,29 @@ def _clean_traceback() -> str:
     return "\n".join(keep)
 
 
+class Timeout(InterpreterError):
+    """Raised into the running thread when a run outlives its budget."""
+
+
 class _Watchdog:
     """Best-effort wall-clock guard.
 
-    CPython cannot interrupt arbitrary C-level work, so this raises inside the
-    interpreter loop via `sys.settrace`-free polling: it flips a flag that the
-    audit hook checks. Runaway numpy kernels are bounded by the worker-level
-    timeout instead.
+    An earlier version only set a flag, and nothing read it - so an agent loop
+    that never terminated held the request open indefinitely and the user got
+    no chart at all. This raises `Timeout` into the executing thread instead,
+    which unwinds at the next bytecode boundary and lets the transform stage
+    fall back to the cleaned frame.
+
+    It still cannot interrupt a single long C kernel (a numpy call runs to
+    completion with the GIL held), so the worker-level timeout remains the
+    outer bound.
     """
 
     def __init__(self, timeout: float):
         self.timeout = timeout
         self.timer: threading.Timer | None = None
         self.expired = False
+        self.thread_id = threading.get_ident()
 
     def start(self) -> None:
         if self.timeout <= 0:
@@ -429,8 +469,22 @@ class _Watchdog:
 
     def _fire(self) -> None:
         self.expired = True
-        log.warning("interpreter run exceeded %.1fs", self.timeout)
+        log.warning("interpreter run exceeded %.1fs; interrupting", self.timeout)
+        import ctypes
+
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(self.thread_id), ctypes.py_object(Timeout)
+        )
 
     def stop(self) -> None:
         if self.timer is not None:
             self.timer.cancel()
+        if self.expired:
+            # The exception may not have landed yet - if it arrives after the
+            # run returns it would surface in unrelated code. Clear it.
+            import ctypes
+
+            # An empty py_object is the NULL that clears a pending exception.
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(self.thread_id), ctypes.py_object()
+            )
