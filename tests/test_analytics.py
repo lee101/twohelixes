@@ -1,0 +1,205 @@
+"""Analytics ingest and reporting, exercised through the real router.
+
+The ingest path is the one that has to be unbreakable: it runs on someone
+else's page, so a rejected batch is data we never get back. These tests push
+the shapes a browser actually sends - a sendBeacon body with no content type, a
+Segment-style call, a GA-style query string - plus the malformed ones, and
+assert that bad input is dropped rather than fatal.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+from typing import Any
+
+import pytest
+
+os.environ.setdefault("TWOHELIXES_DATA_DIR", tempfile.mkdtemp(prefix="th-analytics-"))
+
+from twohelixes import router, store  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def fresh_db(tmp_path: Any, monkeypatch: Any) -> Any:
+    monkeypatch.setenv("TWOHELIXES_DATA_DIR", str(tmp_path))
+    store.close()
+    store._initialised = False
+    store.init()
+    router.build()
+    yield
+    # Leave the module-level store as we found it: the next test module has its
+    # own data dir, and an already-"initialised" store would skip creating it.
+    store.close()
+    store._initialised = False
+
+
+def dispatch(
+    method: str,
+    path: str,
+    query: str = "",
+    body: str = "",
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    header_blob = json.dumps(headers or {"user-agent": "Mozilla/5.0 (Macintosh) Chrome/120"})
+    status, ctype, _extra, payload = router.handle(method, path, query, body, header_blob)
+    parsed: Any = payload
+    if payload and ctype.startswith("application/json"):
+        parsed = json.loads(payload)
+    return int(status), parsed
+
+
+def collect(events: list[dict[str, Any]], site_id: str = "netwrck.com") -> int:
+    status, _ = dispatch(
+        "POST", "/v1/collect", body=json.dumps({"site_id": site_id, "events": events})
+    )
+    return status
+
+
+def rows(site_id: str = "netwrck.com") -> list[dict[str, Any]]:
+    return store.rows_to_dicts(
+        store.query("SELECT * FROM analytics_events WHERE site_id = ? ORDER BY ts", (site_id,))
+    )
+
+
+def test_a_beacon_batch_is_stored() -> None:
+    now = time.time() * 1000
+    assert (
+        collect(
+            [
+                {"event": "page_view", "client_id": "c1", "session_id": "s1", "ts": now,
+                 "page_location": "https://netwrck.com/ai-chat/Aria?utm_source=x",
+                 "page_title": "Aria", "referrer": "https://google.com/search"},
+                {"event": "signup_started", "client_id": "c1", "session_id": "s1", "ts": now,
+                 "props": {"plan": "free"}},
+            ]
+        )
+        == 204
+    )
+
+    stored = rows()
+    assert [r["event_name"] for r in stored] == ["page_view", "signup_started"]
+    assert stored[0]["page_path"] == "/ai-chat/Aria"
+    assert stored[0]["referrer_host"] == "google.com"
+    assert stored[0]["browser"] == "Chrome"
+    assert stored[0]["device"] == "desktop"
+    assert json.loads(stored[1]["props"])["plan"] == "free"
+    # The raw IP is never stored, only a salted hash.
+    assert stored[0]["ip_hash"]
+    assert "0.0.0.0" not in (stored[0]["ip_hash"] or "")
+
+
+def test_malformed_events_are_dropped_not_fatal() -> None:
+    status, _ = dispatch("POST", "/v1/collect", body="{not json")
+    assert status == 204
+
+    assert collect([{"event": "no_client"}, "a string", {"client_id": "c2"}]) == 204
+    assert rows() == []
+
+    # A good event alongside bad ones still lands.
+    assert collect([{"bad": True}, {"event": "ok", "client_id": "c3"}]) == 204
+    assert [r["event_name"] for r in rows()] == ["ok"]
+
+
+def test_bots_are_not_counted() -> None:
+    status, _ = dispatch(
+        "POST",
+        "/v1/collect",
+        body=json.dumps({"site_id": "netwrck.com", "events": [{"event": "page_view", "client_id": "bot"}]}),
+        headers={"user-agent": "Googlebot/2.1 (+http://www.google.com/bot.html)"},
+    )
+    assert status == 204
+    assert rows() == []
+
+
+def test_segment_shape_and_identify_stitching() -> None:
+    assert (
+        collect(
+            [
+                {"type": "page", "anonymousId": "seg1", "properties": {"title": "Home"}},
+                {"type": "track", "event": "Order Completed", "anonymousId": "seg1",
+                 "properties": {"revenue": 42}},
+                {"type": "identify", "anonymousId": "seg1", "userId": "user_9",
+                 "traits": {"email": "a@b.c"}},
+            ]
+        )
+        == 204
+    )
+    stored = rows()
+    assert [r["event_name"] for r in stored] == ["page_view", "Order Completed", "identify"]
+
+    identity = store.row_to_dict(
+        store.one("SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+                  ("netwrck.com", "seg1"))
+    )
+    assert identity is not None
+    assert identity["user_id"] == "user_9"
+    assert json.loads(identity["traits"])["email"] == "a@b.c"
+
+
+def test_ga_style_pixel_returns_a_gif_and_records() -> None:
+    status, body = dispatch(
+        "GET",
+        "/v1/collect",
+        query="tid=netwrck.com&cid=pixel1&en=page_view&dl=https%3A%2F%2Fnetwrck.com%2F&dt=Home",
+    )
+    assert status == 200
+    assert body.startswith("GIF89a")
+    stored = rows()
+    assert len(stored) == 1
+    assert stored[0]["client_id"] == "pixel1"
+    assert stored[0]["page_path"] == "/"
+
+
+def test_sessions_are_derived_when_the_client_omits_one() -> None:
+    collect([{"event": "page_view", "client_id": "c9"}])
+    collect([{"event": "page_view", "client_id": "c9"}])
+    stored = rows()
+    assert len({r["session_id"] for r in stored}) == 1, "same visit should share a session"
+
+
+def test_summary_and_timeseries_report_what_was_ingested() -> None:
+    now = time.time() * 1000
+    collect(
+        [
+            {"event": "page_view", "client_id": "a", "session_id": "s1", "ts": now,
+             "page_location": "https://netwrck.com/", "referrer": "https://x.com/"},
+            {"event": "page_view", "client_id": "b", "session_id": "s2", "ts": now,
+             "page_location": "https://netwrck.com/tools"},
+            {"event": "signup_started", "client_id": "b", "session_id": "s2", "ts": now,
+             "engagement_ms": 4000},
+        ]
+    )
+
+    status, summary = dispatch("GET", "/v1/analytics/summary", query="site_id=netwrck.com&days=1")
+    assert status == 200
+    assert summary["totals"]["events"] == 3
+    assert summary["totals"]["users"] == 2
+    assert summary["totals"]["sessions"] == 2
+    assert summary["totals"]["page_views"] == 2
+    assert summary["totals"]["engagement_ms"] == 4000
+    paths = {row["key"] for row in summary["top_pages"]}
+    assert {"/", "/tools"} <= paths
+
+    status, series = dispatch("GET", "/v1/analytics/timeseries", query="site_id=netwrck.com&days=1")
+    assert status == 200
+    assert sum(point["events"] for point in series["series"]) == 3
+
+    status, export = dispatch("GET", "/v1/analytics/export", query="site_id=netwrck.com&days=1")
+    assert status == 200
+    assert export["batch"][0]["type"] == "page"
+    assert export["batch"][0]["context"]["page"]["path"] == "/"
+
+
+def test_summary_requires_a_site() -> None:
+    status, body = dispatch("GET", "/v1/analytics/summary")
+    assert status == 400
+    assert body["error"] == "site_id_required"
+
+
+def test_client_clock_skew_is_clamped() -> None:
+    collect([{"event": "page_view", "client_id": "skew", "ts": 1_000_000}])
+    stored = rows()
+    assert abs(stored[0]["ts"] - time.time()) < 60

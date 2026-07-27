@@ -187,14 +187,17 @@ def build() -> None:
         return
     from twohelixes.routes import (  # noqa: F401
         agents,
+        analytics,
         billing,
         builder,
         charts,
         connectors,
         dashboards,
+        datasets,
         notebooks,
         pages,
         query,
+        seo,
         sql,
         static_files,
         teams,
