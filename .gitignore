@@ -8,8 +8,9 @@ static/
 web/node_modules/
 web/bun.lockb
 
-# Visual benchmark output - regenerated every run, never reviewed in a diff
+# Benchmark output - regenerated every run, never reviewed in a diff
 visualbench/
+chartbench/
 
 # Scratch
 probe/
@@ -27,6 +28,15 @@ var/
 .env.*
 !.env.example
 secrets/
+
+# Python environments - this repo's own, built by scripts/setup-venvs.sh
+.venv/
+.venv-*/
+*.egg-info/
+
+# Embedding weights: 16 MB of int8 model copied out of ../gobed by
+# scripts/setup-venvs.sh. Fetched, never committed.
+models/
 
 # Python
 __pycache__/

@@ -219,6 +219,34 @@ def test_heuristic_config_needs_no_model(timeseries_frame):
     assert config["y"] != "order_id"
 
 
+def test_heuristic_config_chooses_map_for_coordinates():
+    frame = pd.DataFrame({
+        "lat": [40.7, 48.9],
+        "lng": [-74.0, 2.3],
+        "sales": [12.0, 18.0],
+    })
+    config = figures.heuristic_config(frame, "")
+    assert config["chart_type"] == "map"
+    assert config["y"] == "sales"
+
+
+def test_unmappable_map_downgrades_to_bar_with_warning():
+    class Capture:
+        def __init__(self):
+            self.warnings = []
+
+        def warn(self, message):
+            self.warnings.append(message)
+
+    frame = pd.DataFrame({"category": ["a", "b"], "value": [1, 2]})
+    emit = Capture()
+    config = figures.validate_config(
+        {"chart_type": "map", "x": "category", "y": "value"}, frame, emit
+    )
+    assert config["chart_type"] == "bar"
+    assert any("country" in warning and "bar" in warning for warning in emit.warnings)
+
+
 def test_bar_tail_folds_rather_than_truncating():
     frame = pd.DataFrame(
         {"category": [f"c{i}" for i in range(60)], "value": range(60)}
@@ -719,6 +747,56 @@ def test_stale_title_is_refreshed_when_the_plan_renames_the_measure():
     assert refreshed["y_title"].lower() == "revenue"
 
 
+def test_stale_title_is_refreshed_when_the_grouping_changes():
+    """Changing the x channel changes what the chart is about.
+
+    Found on a dashboard tile: moving a bar chart from `region` to `channel`
+    left it captioned "Net Amount by Region" over a chart of channels, on the
+    tile and everywhere else the chart is listed.
+    """
+    from twohelixes.datasets import samples
+
+    samples.materialise()
+    frame = samples.frame("orders")
+
+    # A saved chart always carries a title; this is the one the builder wrote.
+    config = figures.validate_config(
+        {
+            "chart_type": "bar",
+            "x": "region",
+            "y": "net_amount",
+            "agg": "sum",
+            "title": "Net Amount by Region",
+        },
+        frame,
+    )
+    assert "region" in config["title"].lower()
+
+    moved = figures.validate_config({**config, "x": "channel"}, frame)
+    assert "channel" in moved["title"].lower()
+    assert "region" not in moved["title"].lower()
+
+
+def test_a_title_naming_something_that_is_not_a_column_is_left_alone():
+    """"by segment leader" is prose, not a stale label."""
+    from twohelixes.datasets import samples
+
+    samples.materialise()
+    frame = samples.frame("orders")
+    written = "Net amount by segment leader"
+    config = figures.validate_config(
+        {
+            "chart_type": "bar",
+            "x": "channel",
+            "y": "net_amount",
+            "agg": "sum",
+            "title": written,
+        },
+        frame,
+    )
+    assert config["title"] == written
+
+
 def test_a_user_written_title_is_never_overwritten():
     from twohelixes.datasets import samples
     from twohelixes.pipeline import transform
@@ -805,3 +883,111 @@ def test_audit_catches_a_spacer_that_would_erase_bars():
     }
     findings = defaults.audit(figure)
     assert any(f["code"] == "spacer_erases_dense_bars" for f in findings)
+
+# -- layout regressions the chart benchmark found ---------------------------
+
+
+def test_axis_styling_survives_a_builder_supplied_title():
+    """The builder sets `{"yaxis": {"title": ...}}` on nearly every chart.
+
+    That used to replace the whole styled axis, so every chart in the product
+    rendered with Plotly's default grid, tick font and no automargin - which is
+    what clipped long category labels.
+    """
+    spec = {
+        "data": [{"type": "bar", "x": ["Organic"], "y": [1], "_series_index": 0}],
+        "layout": {"yaxis": {"title": {"text": "Signups"}}},
+    }
+    figure = defaults.apply(spec, mode="light", chart_type="bar")
+    yaxis = figure["layout"]["yaxis"]
+    assert yaxis["title"]["text"] == "Signups"
+    assert yaxis["automargin"] is True
+    assert yaxis["gridcolor"] == palette.surface("light").grid
+    assert yaxis["tickfont"]["size"] == 11
+
+
+def test_a_legend_reserves_its_own_row():
+    """The legend sits in the title's band and Plotly does not make room."""
+    spec = {
+        "data": [
+            {"type": "bar", "x": ["a"], "y": [1], "name": "North", "_series_index": 0},
+            {"type": "bar", "x": ["a"], "y": [2], "name": "South", "_series_index": 1},
+        ],
+        "layout": {"title": {"text": "A finding"}},
+    }
+    figure = defaults.apply(spec, mode="light", chart_type="bar")
+    assert figure["layout"]["showlegend"] is True
+    assert figure["layout"]["margin"]["t"] >= 56 + defaults.LEGEND_ROW
+
+
+def test_an_axis_title_gets_a_row_and_an_unlabelled_axis_does_not():
+    with_title = defaults.apply(
+        {"data": [{"type": "bar", "x": ["a"], "y": [1]}],
+         "layout": {"xaxis": {"title": {"text": "Channel"}}}},
+        mode="light", chart_type="bar",
+    )
+    without = defaults.apply(
+        {"data": [{"type": "bar", "x": ["a"], "y": [1]}], "layout": {}},
+        mode="light", chart_type="bar",
+    )
+    assert with_title["layout"]["margin"]["b"] == defaults.X_TITLE_ROW
+    assert without["layout"]["margin"]["b"] < defaults.X_TITLE_ROW
+
+
+def test_horizontal_bars_label_the_axis_they_actually_draw():
+    frame = pd.DataFrame(
+        {"channel": ["Organic search", "Paid search"], "signups": [4820, 3140]}
+    )
+    spec, _ = figures.build(
+        frame, {"chart_type": "hbar", "x": "channel", "y": "signups", "title": "t"}
+    )
+    # The traces swap the channels, so the titles have to swap with them.
+    assert spec["layout"]["xaxis"]["title"]["text"] == "Signups"
+    assert spec["layout"]["yaxis"]["title"]["text"] == "Channel"
+
+
+def test_a_grouped_scatter_does_not_join_its_points():
+    """Plotly's default mode is lines+markers; a scatter that joins its points
+    in data order draws a trend the data does not contain."""
+    frame = pd.DataFrame(
+        {"revenue": [2.0, 4.0, 3.0, 6.0], "growth": [18, 11, 27, 8],
+         "segment": ["A", "A", "B", "B"]}
+    )
+    spec, _ = figures.build(
+        frame,
+        {"chart_type": "scatter", "x": "revenue", "y": "growth", "color": "segment"},
+    )
+    assert [t["mode"] for t in spec["data"]] == ["markers", "markers"]
+
+
+def test_a_table_is_readable_in_dark_mode():
+    """Plotly's table defaults are white cells with grey text."""
+    spec = {
+        "data": [{
+            "type": "table",
+            "header": {"values": ["channel"]},
+            "cells": {"values": [["Organic"]]},
+            "_series_index": 0,
+        }],
+        "layout": {},
+    }
+    figure = defaults.apply(spec, mode="dark", chart_type="table")
+    face = palette.surface("dark")
+    trace = figure["data"][0]
+    assert trace["cells"]["fill"]["color"] == face.background
+    assert trace["cells"]["font"]["color"] == face.text_secondary
+    assert trace["header"]["font"]["color"] == face.text_primary
+
+
+def test_a_candlestick_drops_the_range_slider():
+    """A second chart in the same box is not affordable on a 340px card."""
+    spec = {
+        "data": [{
+            "type": "candlestick", "x": ["2024-01-01"], "open": [1], "high": [2],
+            "low": [0.5], "close": [1.5], "_series_index": 0,
+        }],
+        "layout": {},
+    }
+    figure = defaults.apply(spec, mode="light", chart_type="candlestick")
+    assert figure["layout"]["xaxis"]["rangeslider"] == {"visible": False}
+

@@ -59,6 +59,23 @@ if [ -f "$HOME/.secretbashrc" ]; then
   set -u -e
 fi
 
+# --- environments ----------------------------------------------------------
+
+# This repo owns its Python now. The server runs on .venv (3.12, because the
+# AOT binary embeds CPython 3.12) and the tests on .venv-13; setup-venvs.sh
+# also copies the 16 MB int8 embedding model out of ../gobed, which the
+# question classifier uses and which is deliberately not in git.
+say "Checking environments"
+[ -x "$ROOT/.venv/bin/python" ] || die "no .venv - run ./scripts/setup-venvs.sh"
+[ -x "$ROOT/.venv-13/bin/python" ] || die "no .venv-13 - run ./scripts/setup-venvs.sh"
+if [ ! -f "$ROOT/models/embed/modelint8_512dim.safetensors" ]; then
+  warn "no embedding model - fetching it"
+  run "$ROOT/scripts/setup-venvs.sh" --runtime >/dev/null 2>&1 || \
+    warn "could not fetch the model; the classifier stays on its lexical rules"
+fi
+printf '    %-10s %s\n' "runtime" "$("$ROOT/.venv/bin/python" -V 2>&1)"
+printf '    %-10s %s\n' "tests" "$("$ROOT/.venv-13/bin/python" -V 2>&1)"
+
 # --- build -----------------------------------------------------------------
 
 say "Building frontend"
@@ -80,8 +97,21 @@ fi
 
 say "Running tests"
 if [ "$DRY_RUN" = 0 ]; then
-  PYTHONPATH="interp:${TWOHELIXES_SITE_PACKAGES_TEST:-/nvme0n1-disk/code/askfelix/.venv-14/lib/python3.13/site-packages}" \
-    pixi run python -m pytest tests -q || die "tests failed; not deploying"
+  PYTHONPATH=interp "$ROOT/.venv-13/bin/python" -m pytest tests -q \
+    || die "tests failed; not deploying"
+
+  # The same suite again against Postgres, plus the SQL typecheck - which only
+  # exists there, because Postgres is the type checker: every statement in the
+  # tree is PREPAREd against the real schema, so a renamed column fails here
+  # rather than in a request. Skipped, loudly, if the test database is absent.
+  if [ -n "${TWOHELIXES_PG_TEST_DSN:-}" ]; then
+    say "Typechecking SQL against Postgres"
+    TWOHELIXES_PG_DSN="$TWOHELIXES_PG_TEST_DSN" \
+      PYTHONPATH=interp "$ROOT/.venv-13/bin/python" -m pytest tests -q \
+      || die "the Postgres suite failed; not deploying"
+  else
+    warn "TWOHELIXES_PG_TEST_DSN not set - SQL is not being typechecked"
+  fi
 else
   echo "    [dry-run] pytest tests -q"
 fi
@@ -167,16 +197,31 @@ fi
 say "Verifying"
 if [ "$DRY_RUN" = 0 ]; then
   fail=0
-  for path in / /pricing /features /docs /app /healthz; do
+  # The dataset pages and the crawl surface are verified too: they are the
+  # largest bodies the server produces and the ones a crawler hits first, so a
+  # deploy that breaks them breaks the part nobody is watching.
+  for path in / /pricing /features /docs /app /healthz \
+              /datasets /datasets/orders /robots.txt /sitemap.xml; do
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "${PUBLIC_URL}${path}" || echo 000)
     printf '    %-10s %s\n' "$path" "$code"
     [ "$code" = 200 ] || fail=1
   done
 
+  # Whether the *server's* embedded interpreter found pybed, which is not the
+  # same question as whether ./.venv/bin/python can import it: the binary adds
+  # site-packages with sys.path.insert and never runs a `.pth`, so an editable
+  # install is invisible to it and to nothing else. This is checked here
+  # because that is exactly where it was missed.
+  if grep -q "semantic column matching ready" var/server.log 2>/dev/null; then
+    printf '    %-10s %s\n' "embedder" "ready"
+  else
+    warn "the server did not load the embedding model - the classifier is on its lexical rules only"
+  fi
+
   ctype=$(curl -s -o /dev/null -w '%{content_type}' -m 20 \
-    "${PUBLIC_URL}/static/art/hero-1344.webp" || true)
+    "${PUBLIC_URL}/static/art/og-1200.png" || true)
   printf '    %-10s %s\n' "art" "${ctype:-missing}"
-  case "$ctype" in image/webp*) ;; *) warn "art is not being served as image/webp"; fail=1 ;; esac
+  case "$ctype" in image/png*) ;; *) warn "the social card is not being served as image/png"; fail=1 ;; esac
 
   [ "$fail" = 0 ] || die "verification failed"
 fi

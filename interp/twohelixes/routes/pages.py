@@ -8,6 +8,7 @@ the credit pack prices come from config, so a pricing change is one constant.
 from __future__ import annotations
 
 import html
+import json
 import time
 from typing import Any
 
@@ -19,6 +20,7 @@ from twohelixes.routes.billing import CREDIT_PACKS, PLANS
 NAV = (
     ("/", "Home"),
     ("/features", "Features"),
+    ("/datasets", "Datasets"),
     ("/pricing", "Pricing"),
     ("/docs", "Docs"),
 )
@@ -49,10 +51,17 @@ button{{font:inherit;color:inherit}}
   --panel-2:#f7f7f5;
   --border:#e6e5e1;
   --border-strong:#d5d4cf;
-  --accent:var(--series-1);
-  --accent-soft:color-mix(in srgb,var(--series-1) 10%,transparent);
-  --accent-ring:color-mix(in srgb,var(--series-1) 35%,transparent);
-  --ok:var(--series-3);
+  /* One accent for the whole product, and it is the brand hue - which is the
+     same colour as the first chart series, so the page and the chart in it
+     belong to each other. Nothing outside data and status carries a second
+     hue: an earlier version used the green series for bullets, badges and GET
+     methods, which made a two-colour site out of a one-colour brand. */
+  --accent:var(--brand);
+  --accent-strong:var(--brand-deep);
+  --accent-soft:color-mix(in srgb,var(--brand) 10%,transparent);
+  --accent-ring:color-mix(in srgb,var(--brand) 35%,transparent);
+  /* Reserved for real status. Not chrome. */
+  --ok:var(--status-good);
 
   /* One spacing scale, used everywhere. */
   --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem;
@@ -79,9 +88,10 @@ button{{font:inherit;color:inherit}}
     --panel-2:#252523;
     --border:#302f2d;
     --border-strong:#3d3c39;
-    --accent:var(--series-1);
-    --accent-soft:color-mix(in srgb,var(--series-1) 16%,transparent);
-    --accent-ring:color-mix(in srgb,var(--series-1) 45%,transparent);
+    --accent:var(--brand);
+    --accent-strong:var(--brand-light);
+    --accent-soft:color-mix(in srgb,var(--brand) 16%,transparent);
+    --accent-ring:color-mix(in srgb,var(--brand) 45%,transparent);
     --sh-1:0 1px 2px rgba(0,0,0,.4);
     --sh-2:0 2px 6px rgba(0,0,0,.45), 0 8px 20px rgba(0,0,0,.35);
     --sh-3:0 10px 30px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
@@ -92,8 +102,9 @@ button{{font:inherit;color:inherit}}
   {dark_vars};
   --panel:#1f1f1e; --panel-2:#252523;
   --border:#302f2d; --border-strong:#3d3c39;
-  --accent-soft:color-mix(in srgb,var(--series-1) 16%,transparent);
-  --accent-ring:color-mix(in srgb,var(--series-1) 45%,transparent);
+  --accent-strong:var(--brand-light);
+  --accent-soft:color-mix(in srgb,var(--brand) 16%,transparent);
+  --accent-ring:color-mix(in srgb,var(--brand) 45%,transparent);
   --sh-1:0 1px 2px rgba(0,0,0,.4);
   --sh-2:0 2px 6px rgba(0,0,0,.45), 0 8px 20px rgba(0,0,0,.35);
   --sh-3:0 10px 30px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
@@ -250,7 +261,7 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
 .tstep .ms{{margin-left:auto;color:var(--text-muted);font-size:.76rem;
   font-variant-numeric:tabular-nums}}
 .tstep .said{{color:var(--text-secondary);font-size:.845rem;line-height:1.45}}
-.tstep .dot{{width:6px;height:6px;border-radius:50%;background:var(--ok);
+.tstep .dot{{width:6px;height:6px;border-radius:50%;background:var(--accent);
   flex:0 0 auto}}
 .tstep.now{{border-color:var(--accent-ring);background:var(--accent-soft)}}
 .tstep.now .dot{{background:var(--accent)}}
@@ -272,7 +283,10 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
 
 /* --- pricing --------------------------------------------------------- */
 .price-grid{{display:grid;gap:var(--s4);grid-template-columns:1fr}}
-@media(min-width:860px){{.price-grid{{grid-template-columns:repeat(3,1fr)}}}}
+@media(min-width:700px){{.price-grid{{grid-template-columns:repeat(2,1fr)}}}}
+/* Four plans in a three-column grid strands the fourth on a row of its own,
+   which reads as an afterthought rather than a tier. */
+@media(min-width:1080px){{.price-grid{{grid-template-columns:repeat(4,1fr)}}}}
 .plan{{background:var(--panel);border:1px solid var(--border);
   border-radius:var(--r-lg);padding:var(--s5);display:flex;
   flex-direction:column;box-shadow:var(--sh-1);position:relative;
@@ -284,6 +298,10 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
   font-weight:660;padding:.18rem .55rem;border-radius:var(--r-full);
   letter-spacing:.02em}}
 .plan h3{{font-size:1rem;font-weight:640}}
+.plan-blurb{{color:var(--text-secondary);font-size:.88rem;margin-top:.45rem;
+  line-height:1.45}}
+.plan-rate{{margin-top:.5rem;font-size:.82rem;font-weight:620;
+  color:var(--accent)}}
 .plan .amount{{font-size:2.1rem;font-weight:700;letter-spacing:-.03em;
   margin-top:.35rem;line-height:1.05}}
 .plan .cadence{{color:var(--text-muted);font-size:.85rem}}
@@ -291,7 +309,7 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
 .plan li{{font-size:.91rem;color:var(--text-secondary);padding-left:1.4rem;
   position:relative;line-height:1.45}}
 .plan li::before{{content:"";position:absolute;left:0;top:.5em;width:7px;
-  height:7px;border-radius:2px;background:var(--ok)}}
+  height:7px;border-radius:2px;background:var(--accent)}}
 .plan .btn{{margin-top:auto;width:100%}}
 
 table.packs{{width:100%;border-collapse:collapse;margin-top:var(--s3)}}
@@ -306,8 +324,64 @@ table.packs tbody tr:hover{{background:var(--panel-2)}}
 .rules li{{position:relative;padding-left:1.45rem;font-size:.91rem;
   color:var(--text-secondary);line-height:1.5}}
 .rules li::before{{content:"";position:absolute;left:0;top:.5em;width:7px;
-  height:7px;border-radius:2px;background:var(--ok)}}
+  height:7px;border-radius:2px;background:var(--accent)}}
 .rules li b{{color:var(--text-primary);font-weight:620}}
+
+/* --- data tables and openable traces ---------------------------------
+   Used by the dataset pages, where the point is that the numbers behind a
+   chart are one click away rather than a claim. */
+table.data{{width:100%;border-collapse:collapse;font-family:var(--mono);
+  font-size:.8rem}}
+table.data th,table.data td{{text-align:left;padding:.4rem .6rem;
+  border-bottom:1px solid var(--border);white-space:nowrap}}
+table.data th{{color:var(--text-muted);font-weight:620;font-size:.7rem;
+  text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;
+  background:var(--panel)}}
+table.data td.num{{text-align:right;font-variant-numeric:tabular-nums}}
+table.data tbody tr:hover{{background:var(--panel-2)}}
+
+details.trace{{border:1px solid var(--border);border-radius:var(--r-md);
+  background:var(--panel);margin-top:var(--s4)}}
+details.trace > summary{{cursor:pointer;padding:.7rem var(--s4);
+  font-size:.88rem;font-weight:620;list-style:none;display:flex;
+  align-items:center;gap:.5rem}}
+details.trace > summary::-webkit-details-marker{{display:none}}
+details.trace > summary::after{{content:"Show";margin-left:auto;
+  font-weight:600;font-size:.78rem;color:var(--accent)}}
+details.trace[open] > summary::after{{content:"Hide"}}
+details.trace > summary::before{{content:"";width:6px;height:6px;
+  border-radius:50%;background:var(--accent);flex:0 0 auto}}
+details.trace > summary:hover{{background:var(--panel-2)}}
+details.trace .body{{padding:0 var(--s4) var(--s4);display:grid;gap:.5rem}}
+
+.ds-grid{{display:grid;gap:var(--s5);grid-template-columns:1fr;
+  margin-top:var(--s5)}}
+.ds-card{{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:var(--s4);display:flex;
+  flex-direction:column;gap:.6rem}}
+.ds-card:hover{{border-color:var(--border-strong);box-shadow:var(--sh-2)}}
+.ds-card h3{{font-size:1.02rem;font-weight:640;letter-spacing:-.015em}}
+.ds-card h3 a{{color:var(--text-primary)}}
+.ds-card p{{color:var(--text-secondary);font-size:.9rem}}
+.ds-card .figure{{margin:0}}
+.ds-meta{{display:flex;gap:.9rem;flex-wrap:wrap;color:var(--text-muted);
+  font-size:.78rem;font-family:var(--mono)}}
+.ds-questions{{display:grid;gap:.3rem;margin-top:auto}}
+.ds-questions a{{font-size:.87rem;color:var(--text-secondary);
+  padding:.28rem 0;border-top:1px solid var(--border)}}
+.ds-questions a:hover{{color:var(--accent)}}
+.example{{margin-top:var(--s6)}}
+.example h3{{font-size:1.15rem;letter-spacing:-.02em;font-weight:650}}
+.example > p{{color:var(--text-secondary);font-size:.93rem;
+  max-width:64ch;margin-top:.3rem}}
+.example .figure{{margin-top:var(--s4)}}
+.example-actions{{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:var(--s3)}}
+@media(min-width:720px){{
+  .ds-grid{{grid-template-columns:repeat(2,1fr)}}
+}}
+@media(min-width:1040px){{
+  .ds-grid{{grid-template-columns:repeat(3,1fr)}}
+}}
 
 code,pre{{font-family:var(--mono);font-size:.86rem}}
 pre{{background:var(--panel);border:1px solid var(--border);
@@ -331,8 +405,9 @@ pre{{background:var(--panel);border:1px solid var(--border);
 .method{{font-family:var(--mono);font-size:.7rem;font-weight:700;
   letter-spacing:.04em;padding:.18rem .42rem;border-radius:6px;
   background:var(--accent-soft);color:var(--accent);flex:0 0 auto}}
-.method.get{{background:color-mix(in srgb,var(--ok) 15%,transparent);
-  color:var(--ok)}}
+/* GET and POST differ by weight of the same hue, not by hue. */
+.method.get{{background:transparent;color:var(--text-muted);
+  border:1px solid var(--border-strong)}}
 .endpoint .route{{font-family:var(--mono);font-size:.82rem;
   color:var(--text-muted);word-break:break-all}}
 .codeblock{{position:relative;margin:var(--s3) var(--s5) var(--s5);
@@ -349,12 +424,12 @@ pre{{background:var(--panel);border:1px solid var(--border);
   transition:opacity .15s,color .15s}}
 .codeblock:hover .copy,.copy:focus-visible{{opacity:1}}
 .copy:hover{{color:var(--text-primary)}}
-.copy[data-done]{{opacity:1;color:var(--ok);border-color:var(--ok)}}
+.copy[data-done]{{opacity:1;color:var(--accent);border-color:var(--accent)}}
 /* No hover on a touch screen, so the control has to be permanently visible. */
 @media (hover:none){{.copy{{opacity:1}}}}
 .badge{{display:inline-block;padding:.25rem .58rem;border-radius:var(--r-full);
-  background:color-mix(in srgb,var(--ok) 16%,transparent);
-  color:var(--ok);font-size:.76rem;font-weight:650}}
+  background:var(--accent-soft);color:var(--accent);font-size:.76rem;
+  font-weight:650}}
 
 footer.site{{border-top:1px solid var(--border);padding:var(--s6) 0;
   color:var(--text-muted);font-size:.88rem;margin-top:var(--s5)}}
@@ -391,7 +466,7 @@ footer.site a:hover{{color:var(--text-primary)}}
 .field input:focus-visible{{outline:2px solid var(--accent);outline-offset:1px}}
 .form-note{{color:var(--text-muted);font-size:.82rem;margin-top:var(--s3);
   line-height:1.45}}
-.form-error{{color:var(--series-8);font-size:.86rem;margin-top:var(--s2)}}
+.form-error{{color:var(--status-critical);font-size:.86rem;margin-top:var(--s2)}}
 #checkout-mount{{min-height:20rem}}
 
 /* --- mobile: compact, thumb-reachable, no wasted vertical -------------
@@ -486,36 +561,60 @@ body::before{{
     mix-blend-mode:screen;opacity:.05}}
 }}
 :root[data-theme="dark"] body::before{{mix-blend-mode:screen;opacity:.05}}
-header.site,main,footer.site,.overlay{{position:relative;z-index:1}}
+/* Not `.overlay`: it is already z-index 100, and `position:relative` here
+   overrode its `position:fixed` - the sign-in and checkout sheets were laid
+   out in the flow of the page instead of over it, so on a phone the sheet
+   sat mid-scroll rather than docked to the bottom. */
+header.site,main,footer.site{{position:relative;z-index:1}}
 
-/* --- art plates ------------------------------------------------------ */
-.plate{{position:relative;border-radius:var(--r-lg);overflow:hidden;
-  background:var(--surface-1);box-shadow:var(--sh-1);
-  border:1px solid var(--border)}}
-.plate img{{width:100%;height:100%;object-fit:cover;display:block}}
-.plate.bleed{{aspect-ratio:16/9}}
-/* In light mode the plates are levelled to the page's bone white, so no fade
-   is needed; an overlay there only added haze.
+/* --- stage: the generated panels that replaced the photographic plates ---
+   The old hero was a studio photograph of a marble column: a wide white slab
+   with the subject in one corner, which had to be dimmed in dark mode, went
+   soft on a 3x phone screen, and said nothing about the product. Everything
+   here is drawn instead - one brand wash, the real mark, and real output from
+   the live pipeline - so it is sharp at any density, correct in both themes,
+   and cannot 404. */
+.stage{{position:relative;overflow:hidden;border-radius:var(--r-lg);
+  border:1px solid var(--border);box-shadow:var(--sh-2);
+  padding:clamp(.85rem,2.2vw,1.35rem);
+  background:
+    radial-gradient(115% 105% at 88% -10%,
+      color-mix(in srgb,var(--brand) 20%,transparent) 0%,transparent 62%),
+    radial-gradient(90% 80% at 0% 100%,
+      color-mix(in srgb,var(--brand-light) 16%,transparent) 0%,transparent 58%),
+    var(--panel-2)}}
+/* The mark, oversized and cropped, as the only decoration. Behind everything
+   and inert: it is texture, not a second logo. */
+.stage-mark{{position:absolute;left:-16%;top:-22%;width:min(58%,20rem);
+  opacity:.16;pointer-events:none;z-index:0}}
+.stage-mark svg{{width:100%;height:auto}}
+.stage > *:not(.stage-mark){{position:relative;z-index:1}}
+.stage .figure{{box-shadow:var(--sh-3)}}
+.stage-caption{{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;
+  margin-top:.7rem;color:var(--text-secondary);font-size:.85rem}}
+.stage-caption b{{color:var(--text-primary);font-weight:620}}
+.stage-caption .ms{{color:var(--text-muted);font-variant-numeric:tabular-nums;
+  margin-left:auto}}
+.askline{{display:flex;align-items:center;gap:.5rem;margin-bottom:.7rem;
+  padding:.5rem .7rem;border-radius:var(--r-sm);background:var(--panel);
+  border:1px solid var(--border);box-shadow:var(--sh-1);
+  font-size:.92rem;color:var(--text-primary)}}
+.askline .tag{{font-size:.66rem;font-weight:680;letter-spacing:.07em;
+  text-transform:uppercase;color:var(--accent);flex:0 0 auto}}
+.askline .q{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 
-   Dark mode is the opposite problem. The plates are studio shots on white, and
-   a white 16:9 slab on a #1a1a19 page is the brightest thing on the screen -
-   it out-shouts every chart. Dimming the whole image to stone grey and pushing
-   saturation back keeps the marble legible and the helix blue while letting
-   the plate sit *inside* the page instead of burning a hole in it. */
-@media (prefers-color-scheme:dark){{
-  :root:not([data-theme="light"]) .plate img{{
-    filter:brightness(.58) contrast(1.08) saturate(1.2)}}
-}}
-:root[data-theme="dark"] .plate img{{
-  filter:brightness(.58) contrast(1.08) saturate(1.2)}}
-
-.hero-art{{position:relative}}
-.hero-art .plate{{aspect-ratio:16/10}}
-.hero-art .figure{{position:absolute;right:-2%;bottom:-14%;width:min(74%,26rem);
-  box-shadow:var(--sh-3)}}
-@media(max-width:899px){{
-  .hero-art .figure{{position:static;width:100%;margin-top:var(--s4)}}
-}}
+/* A panel of chips or small print over the same wash, for the sections that
+   used the other two photographs. */
+.stage.list{{display:grid;gap:var(--s3);align-content:center;
+  min-height:15rem}}
+.stage-row{{display:flex;align-items:center;gap:.6rem;padding:.55rem .7rem;
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--r-sm);box-shadow:var(--sh-1);font-size:.9rem}}
+.stage-row .nm{{font-weight:600}}
+.stage-row .meta{{margin-left:auto;color:var(--text-muted);font-size:.8rem;
+  font-variant-numeric:tabular-nums}}
+.stage-row .dot{{width:7px;height:7px;border-radius:50%;flex:0 0 auto;
+  background:var(--accent)}}
 
 .band{{background:var(--panel-2);border-block:1px solid var(--border)}}
 .kicker{{font-size:.74rem;font-weight:660;letter-spacing:.09em;
@@ -586,7 +685,29 @@ _THEME_TOGGLE = """
 </button>"""
 
 
-def _page(title: str, description: str, body: str, path: str = "/") -> str:
+def _analytics_snippet() -> str:
+    write_key = config.get("TWOHELIXES_ANALYTICS_WRITE_KEY") or ""
+    if not write_key:
+        return ""
+    tracker_config = json.dumps(
+        {"siteId": write_key, "endpoint": "/v1/collect"},
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    return (
+        f"<script>window.__thConfig={tracker_config};</script>"
+        '<script async src="/static/th.js"></script>'
+    )
+
+
+def _page(
+    title: str, description: str, body: str, path: str = "/", head: str = ""
+) -> str:
+    """One page frame for every marketing page.
+
+    `head` carries per-page markup - structured data, a page-specific og:image
+    - rather than each page rebuilding the frame to add one tag, which is how
+      canonical URLs and theme boot scripts drift apart.
+    """
     nav = "".join(
         f'<a href="{href}"{" aria-current=\"page\"" if href == path else ""}>{label}</a>'
         for href, label in NAV
@@ -606,11 +727,14 @@ def _page(title: str, description: str, body: str, path: str = "/") -> str:
 <meta property="og:site_name" content="twoHelixes">
 <meta property="og:title" content="{html.escape(title)}">
 <meta property="og:description" content="{html.escape(description)}">
-<meta property="og:image" content="{site}/static/art/hero-1344.webp">
+<meta property="og:image" content="{site}/static/art/og-1200.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 {_THEME_BOOT}
 <style>{_css()}</style>
+{head}
 </head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}">
 <a class="skip" href="#content">Skip to content</a>
 <header class="site"><div class="shell">
@@ -624,13 +748,14 @@ def _page(title: str, description: str, body: str, path: str = "/") -> str:
 {body}
 {_overlays()}
 <footer class="site"><div class="shell">
-  <span>twoHelixes — data analytics agents</span>
+  <span>twoHelixes — charts of your data, from a sentence</span>
   <nav aria-label="Footer">
-    <a href="/features">Features</a><a href="/pricing">Pricing</a>
-    <a href="/docs">Docs</a><a href="/app">App</a>
+    <a href="/features">Features</a><a href="/datasets">Datasets</a>
+    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/app">App</a>
   </nav>
 </div></footer>
 <script type="module" src="/static/marketing.js"></script>
+{_analytics_snippet()}
 </body></html>"""
 
 
@@ -648,52 +773,60 @@ def home(ctx: router.Context) -> router.Result:
     connectors = (
         "PostgreSQL", "MySQL", "SQL Server", "Snowflake", "BigQuery",
         "Redshift", "ClickHouse", "Trino", "Oracle", "DuckDB", "SQLite",
-        "MongoDB", "Elasticsearch", "CSV", "Parquet", "Excel", "HTTP APIs",
+        "MongoDB", "Elasticsearch", "HTTP APIs",
+        "CSV", "TSV", "JSON", "Parquet", "Excel", "OpenDocument", ".gz", ".zip",
     )
     chips = "".join(f'<span class="chip">{html.escape(c)}</span>' for c in connectors)
+
+    # Internal links to the dataset pages from the page with the most
+    # authority. Built from the catalogue rather than hand-listed so a new
+    # dataset appears here the day it is added.
+    from twohelixes.datasets import samples as sample_data
+
+    dataset_links = "".join(
+        f'<a class="chip" href="/datasets/{html.escape(s.key)}">'
+        f"{html.escape(s.name)}</a>"
+        for s in sample_data.SAMPLES
+    )
 
     body = f"""
 <main id="content">
 <div class="hero"><div class="shell hero-layout">
   <div>
-    <span class="eyebrow">Ask a question. Watch it work.</span>
-    <h1>Analytics that shows its working</h1>
-    <p class="lede">Ask in plain language. twoHelixes finds the data, joins it,
-    shapes it and picks the chart &mdash; showing every step, so you can check
-    the answer instead of trusting it.</p>
+    <span class="eyebrow">Any data. One sentence. A chart.</span>
+    <h1>Charts of your data, from a sentence</h1>
+    <p class="lede">Drop in a spreadsheet or connect a database, then ask for
+    what you want to see. It finds the columns, joins them, shapes them and
+    draws the chart &mdash; every time, never an apology.</p>
     <div class="actions">
       <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
       <a class="btn btn-ghost" href="#how">See how it works</a>
     </div>
-    <p class="hero-note">{config.FREE_QUERIES_PER_USER} free queries when you
-    sign in. No card required.</p>
+    <p class="hero-note">Ask one question now without an account. Sign in for
+    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month &mdash;
+    no card, and the sample data is already loaded.</p>
   </div>
-  <div class="hero-art">
-    <div class="plate">
-      <img src="/static/art/hero-1344.webp"
-           srcset="/static/art/hero-768.webp 768w, /static/art/hero-1344.webp 1344w"
-           sizes="(max-width:899px) 100vw, 52vw"
-           alt="" width="1344" height="768" fetchpriority="high" decoding="async">
-    </div>
-    <figure class="figure">
-      {hero_chart}
-      <figcaption><b>&ldquo;how did revenue trend by region?&rdquo;</b>
-      &mdash; drawn by the live pipeline.</figcaption>
-    </figure>
+  <div class="stage">
+    <span class="stage-mark" aria-hidden="true">{helix.logo(320, mode, uid="heromark")}</span>
+    <div class="askline"><span class="tag">Ask</span>
+      <span class="q">how did revenue trend by region?</span></div>
+    <figure class="figure">{hero_chart}</figure>
+    <div class="stage-caption"><b>Drawn by the live pipeline</b>
+      <span class="ms">2.4 s</span></div>
   </div>
 </div></div>
 
 <section class="band" id="how" style="margin-top:clamp(2rem,5vw,4.5rem)">
  <div class="shell">
   <div class="stats">
-    <div class="stat"><div class="n">5</div>
-      <div class="l">visible stages per answer</div></div>
-    <div class="stat"><div class="n">17</div>
-      <div class="l">data connectors</div></div>
+    <div class="stat"><div class="n">19</div>
+      <div class="l">chart forms it can pick from</div></div>
+    <div class="stat"><div class="n">15</div>
+      <div class="l">databases, warehouses and APIs</div></div>
+    <div class="stat"><div class="n">100%</div>
+      <div class="l">of answers come back as a chart</div></div>
     <div class="stat"><div class="n">0</div>
       <div class="l">dual axes, ever</div></div>
-    <div class="stat"><div class="n">SVG</div>
-      <div class="l">export with no headless browser</div></div>
   </div>
  </div>
 </section>
@@ -701,14 +834,17 @@ def home(ctx: router.Context) -> router.Result:
 <section><div class="shell split">
   <div>
     <p class="kicker">How it works</p>
-    <h2>You see the reasoning, not a spinner</h2>
-    <p class="lead-in">Each stage streams as it happens: what it looked for,
-    which key it joined on, the Python it ran, why it chose that chart. When a
-    stage has to approximate, it says so.</p>
+    <h2>It always gets you a chart</h2>
+    <p class="lead-in">Most data assistants hand back a paragraph explaining
+    why they could not help. This one draws something every time. If two tables
+    share no values it drops the join and charts what is left. If its own
+    shaping code fails it charts the cleaned data instead. If the question is
+    vague it picks the most useful cut and names the one it rejected. You get a
+    figure, plus a plain note about anything it had to approximate.</p>
     <div class="chips">
-      <span class="chip">Stop mid-run</span>
-      <span class="chip">Edit and re-run</span>
-      <span class="chip">Take over by hand</span>
+      <span class="chip">Degrades, never dead-ends</span>
+      <span class="chip">Every approximation named</span>
+      <span class="chip">Fix it and re-run</span>
     </div>
   </div>
   <div class="trace-demo">
@@ -770,55 +906,78 @@ def home(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 
+<section class="band"><div class="shell">
+  <p class="kicker">Worked examples</p>
+  <h2>Nine datasets, already loaded, already answered</h2>
+  <p class="lead-in">Every account starts with these. Each one has a page with
+  its schema, its rows, and the charts the pipeline drew from them &mdash; with
+  the reasoning behind every choice one click away. No account needed to read
+  them.</p>
+  <div class="chips">{dataset_links}</div>
+  <div class="actions" style="margin-top:var(--s5)">
+    <a class="btn btn-ghost" href="/datasets">Browse the datasets</a></div>
+</div></section>
+
 <section><div class="shell split">
   <div>
-    <p class="kicker">Connectors</p>
-    <h2>Connect what you already have</h2>
-    <p class="lead-in">Warehouses, databases, documents, files and APIs &mdash;
-    behind one read-only interface. Generated SQL is checked before it ever
-    reaches a driver.</p>
+    <p class="kicker">Your data</p>
+    <h2>Whatever the data lives in, it can chart it</h2>
+    <p class="lead-in">Drag in a CSV, Excel file or Parquet extract and ask a
+    question thirty seconds later. Or connect the warehouse and leave the rows
+    where they are &mdash; everything is read-only, and generated SQL is checked
+    before it ever reaches a driver.</p>
     <div class="chips">{chips}</div>
   </div>
-  <div class="plate bleed">
-    <img src="/static/art/connect-1344.webp"
-         srcset="/static/art/connect-768.webp 768w, /static/art/connect-1344.webp 1344w"
-         sizes="(max-width:939px) 100vw, 46vw"
-         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  <div class="stage list">
+    <span class="stage-mark" aria-hidden="true">{helix.logo(280, mode, uid="connmark")}</span>
+    <div class="stage-row"><i class="dot"></i><span class="nm">orders.csv</span>
+      <span class="meta">uploaded &middot; 41k rows</span></div>
+    <div class="stage-row"><i class="dot"></i><span class="nm">warehouse &middot; Snowflake</span>
+      <span class="meta">read-only</span></div>
+    <div class="stage-row"><i class="dot"></i><span class="nm">regions</span>
+      <span class="meta">joined on region_id, 98% overlap</span></div>
+    <div class="stage-row"><i class="dot"></i><span class="nm">SELECT &hellip;</span>
+      <span class="meta">checked read-only</span></div>
   </div>
 </div></section>
 
 <section><div class="shell">
-  <p class="kicker">In the product</p>
-  <h2>Built for people who check the numbers</h2>
+  <p class="kicker">After the first chart</p>
+  <h2>The chart is a starting point, not a screenshot</h2>
   <div class="grid">
-    <div class="card"><h3>A real SQL editor</h3><p>Schema-aware completions that
-    answer instantly without waiting on a model, AI-generated queries, suggested
-    questions per source, and saved queries with history.</p></div>
-    <div class="card"><h3>Yours to change</h3><p>Swap the axes, the chart type
-    or the grouping by hand &mdash; no query spent. Or describe the change in
-    words and let the edit stage apply it.</p></div>
-    <div class="card"><h3>Agents that run for minutes</h3><p>Deep research runs
-    hypothesis&ndash;test&ndash;revise loops in the code interpreter and reports
-    only what it produced output for.</p></div>
-    <div class="card"><h3>Export that stays sharp</h3><p>A native SVG exporter
-    &mdash; no headless browser, deterministic output, and markup a designer can
-    open and edit. PNG and CSV too.</p></div>
+    <div class="card"><h3>Change it for free</h3><p>Swap the axes, the chart
+    type, the grouping or the aggregation by hand and it redraws &mdash; no
+    model call, no credit spent. Or say what you want changed in words and let
+    the edit stage apply it.</p></div>
+    <div class="card"><h3>Real Python underneath</h3><p>The shaping runs in a
+    sandboxed interpreter with pandas, polars, numpy, scipy, scikit-learn and
+    statsmodels &mdash; so &ldquo;fit a trend and forecast the next quarter&rdquo;
+    is a question, not a feature request. The code is shown and editable.</p></div>
+    <div class="card"><h3>A real SQL editor</h3><p>For when you already know the
+    query. Schema-aware completions answer instantly without waiting on a model,
+    plus generated SQL, per-source suggested questions and saved history.</p></div>
+    <div class="card"><h3>Take it with you</h3><p>SVG, PNG or CSV; pin it to a
+    dashboard with a share link that needs no account; export the whole run as
+    a Jupyter <code>.ipynb</code> or a marimo notebook &mdash; both run here as
+    well as on your laptop; or call the same pipeline over HTTP.</p></div>
   </div>
 </div></section>
 
 <section class="band"><div class="shell split">
-  <div class="plate bleed" style="order:2">
-    <img src="/static/art/data-1344.webp"
-         srcset="/static/art/data-768.webp 768w, /static/art/data-1344.webp 1344w"
-         sizes="(max-width:939px) 100vw, 46vw"
-         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  <div class="stage" style="order:2">
+    <span class="stage-mark" aria-hidden="true">{helix.logo(300, mode, uid="startmark")}</span>
+    <div class="askline"><span class="tag">Ask</span>
+      <span class="q">which channel brings the most signups?</span></div>
+    <figure class="figure">{channels}</figure>
   </div>
   <div>
     <p class="kicker">Get started</p>
-    <h2>Ask your first question</h2>
-    <p class="lead-in">{config.FREE_QUERIES_PER_USER} free queries when you
-    sign in, and about a minute to connect a source. Sample datasets are
-    already there if you just want to look around.</p>
+    <h2>Chart something you actually care about</h2>
+    <p class="lead-in">Try it on the sample data without signing up. Then
+    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month with an
+    email, and paid plans that start at
+    ${config.PLAN_ALLOWANCES['plus']['price_cents'] // 100} when charting
+    becomes a habit.</p>
     <a class="btn btn-primary" href="/app" data-action="signin">Open twoHelixes</a>
   </div>
 </div></section>
@@ -826,9 +985,9 @@ def home(ctx: router.Context) -> router.Result:
 
     return router.html(
         _page(
-            "twoHelixes — analytics agents that show their working",
-            "Ask questions of your data in plain language. twoHelixes finds it, "
-            "joins it, charts it, and shows every step of its reasoning.",
+            "twoHelixes — charts of your data, from a sentence",
+            "Ask for a chart of any data you have - a spreadsheet, a database, "
+            "a warehouse - and get one back in seconds, correct and readable.",
             body,
             "/",
         )
@@ -849,6 +1008,28 @@ STAGES = (
 )
 
 CAPABILITIES = (
+    ("Always a chart",
+     "Every stage has a fallback, so a run cannot end in an apology. A join "
+     "with no overlapping values is dropped and the rest is charted; failed "
+     "shaping code falls back to the cleaned frame; a model outage falls back "
+     "to heuristic chart selection. Whatever it had to approximate is printed "
+     "beside the figure rather than hidden."),
+    ("Nineteen chart forms",
+     "Bar, horizontal bar, line, area, scatter, bubble, pie, histogram, "
+     "heatmap, box, candlestick, sankey, treemap, sunburst, funnel, waterfall "
+     "and maps - points from latitude and longitude, or countries filled by "
+     "value - plus stat tiles and tables for the questions whose honest answer "
+     "is a single number. The "
+     "form is chosen from the data's shape, and the rejected alternative is "
+     "named so you can disagree with the choice."),
+    ("Any data you have",
+     "CSV, TSV, JSON, Excel, OpenDocument and Parquet by drag and drop, "
+     "gzipped or zipped if that is how it arrived; PostgreSQL, MySQL, SQL "
+     "Server, Oracle, Snowflake, BigQuery, Redshift, ClickHouse, Trino, DuckDB "
+     "and SQLite by connection string; MongoDB, Elasticsearch and HTTP APIs "
+     "for everything else. All read-only. A file that will not parse with "
+     "commas is retried with the delimiter sniffed and then with the bad rows "
+     "skipped, because a rejected upload is the worst first minute there is."),
     ("Code interpreter",
      "pandas, polars, numpy, scipy, scikit-learn, statsmodels and plotly are "
      "pre-imported at worker boot, so the first query is not the slow one. "
@@ -873,8 +1054,10 @@ CAPABILITIES = (
      "no headless browser, deterministic output, and markup a designer can "
      "open and edit. PNG, CSV and JSON too."),
     ("Notebooks and dashboards",
-     "Any answer exports to a marimo notebook you can keep running, or pins to "
-     "a dashboard with a share link that needs no account to read."),
+     "Any answer exports to a Jupyter .ipynb or a marimo notebook - the data, "
+     "the transformation and the chart, in the order they ran. Host either one "
+     "here, or pin the chart to a dashboard with a share link that needs no "
+     "account to read."),
 )
 
 
@@ -898,18 +1081,22 @@ def features(ctx: router.Context) -> router.Result:
 <main id="content">
 <section class="page-head"><div class="shell">
   <p class="kicker">Features</p>
-  <h1>Everything here is implemented, not planned</h1>
-  <p class="sub">twoHelixes answers a question the way an analyst would, and
-  shows the work at each step so you can disagree with it.</p>
+  <h1>What you actually get</h1>
+  <p class="sub">A chart of your data, every time you ask, from whatever the
+  data happens to live in &mdash; then the controls, the code and the export
+  formats to do something with it. All of this is shipped, none of it is
+  planned.</p>
 </div></section>
 
 <section><div class="shell split top">
   <div>
-    <p class="kicker">The pipeline</p>
-    <h2>Five stages, each one visible</h2>
-    <p class="sub">A stage that fails degrades rather than aborting: a failed
-    transform falls back to the cleaned frame and says so, and you still get a
-    chart. Every stage can be stopped, edited or taken over by hand.</p>
+    <p class="kicker">How a question becomes a chart</p>
+    <h2>Five stages, none of which can dead-end</h2>
+    <p class="sub">Each stage has a fallback: a failed transform charts the
+    cleaned frame instead, a model outage falls back to heuristics, a join with
+    no overlap is dropped rather than fatal. You get a chart and a note about
+    what was approximated. Every stage can be stopped, edited or taken over by
+    hand.</p>
   </div>
   <ul class="trace-demo">{stages}</ul>
 </div></section>
@@ -934,36 +1121,38 @@ def features(ctx: router.Context) -> router.Result:
 
 <section><div class="shell">
   <p class="kicker">In the product</p>
-  <h2>What you get to use</h2>
+  <h2>Everything in the box</h2>
   <div class="grid three">{cards}</div>
 </div></section>
 
 <section class="band"><div class="shell split">
   <div>
     <p class="kicker">Get started</p>
-    <h2>Ask your first question</h2>
-    <p class="sub">{config.FREE_QUERIES_PER_USER} free queries when you sign
-    in. Sample datasets are already loaded, so you can try it before connecting
-    anything.</p>
+    <h2>Make your first chart</h2>
+    <p class="sub">One question with no account at all, then
+    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month with an
+    email. Sample datasets are already loaded, so you can see it work before
+    connecting anything of your own.</p>
     <div class="actions" style="margin-top:var(--s5);display:flex;gap:.65rem;
       flex-wrap:wrap">
       <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
       <a class="btn btn-ghost" href="/pricing">See pricing</a>
     </div>
   </div>
-  <div class="plate bleed">
-    <img src="/static/art/data-1344.webp"
-         srcset="/static/art/data-768.webp 768w, /static/art/data-1344.webp 1344w"
-         sizes="(max-width:939px) 100vw, 46vw"
-         alt="" width="1344" height="768" loading="lazy" decoding="async">
+  <div class="stage">
+    <span class="stage-mark" aria-hidden="true">{helix.logo(300, mode, uid="featmark")}</span>
+    <div class="askline"><span class="tag">Ask</span>
+      <span class="q">how long do requests take?</span></div>
+    <figure class="figure">{showcase.chart_svg("latency", mode,
+        *showcase.GALLERY_SIZE)}</figure>
   </div>
 </div></section>
 </main>"""
     return router.html(
         _page(
             "Features — twoHelixes",
-            "The five-stage pipeline, the code interpreter, the SQL editor, "
-            "chart controls and export - all implemented, all visible.",
+            "Nineteen chart forms, fifteen data sources, a Python code "
+            "interpreter, a SQL editor, free chart controls and sharp exports.",
             body,
             "/features",
         )
@@ -971,17 +1160,39 @@ def features(ctx: router.Context) -> router.Result:
 
 
 def _plan_cta(plan: dict[str, Any]) -> str:
-    """Free plans sign in; paid plans open checkout without leaving the page."""
+    """Free signs in; a paid plan opens checkout without leaving the page.
+
+    The plan id goes to the server, which resolves the Stripe price. Putting
+    the price id in the markup meant the page had to be redeployed to change a
+    price, and a stale one charges the wrong amount.
+    """
     if plan["id"] == "free":
         return ('<a class="btn btn-ghost" href="/app" data-action="signin">'
                 f'{html.escape(plan["cta"])}</a>')
-    if plan["id"] == "pro":
-        price_id = config.get("STRIPE_PRICE_PRO", "") or ""
-        return ('<button class="btn btn-primary" data-action="buy" '
-                f'data-price="{html.escape(price_id)}">'
-                f'{html.escape(plan["cta"])}</button>')
-    return ('<button class="btn btn-primary" data-action="buy" '
-            f'data-pack="pack_25">{html.escape(plan["cta"])}</button>')
+    style = "btn-primary" if plan.get("highlight") else "btn-ghost"
+    return (f'<button class="btn {style}" data-action="buy" '
+            f'data-plan="{html.escape(plan["id"])}">'
+            f'{html.escape(plan["cta"])}</button>')
+
+
+def _rate_suffix(plan: dict[str, Any]) -> str:
+    cents = int(config.PLAN_ALLOWANCES[plan["id"]]["price_cents"])
+    if not cents:
+        return ""
+    return f" &middot; {_effective_rate(plan)}"
+
+
+def _effective_rate(plan: dict[str, Any]) -> str:
+    """What a plan works out at per chart, if you use what you paid for.
+
+    The number people actually compare. Leaving them to divide $19 by 500 in
+    their head is how a fair price reads as an expensive one.
+    """
+    cents = int(config.PLAN_ALLOWANCES[plan["id"]]["price_cents"])
+    included = int(plan["included"]["chat_query"] or 0)
+    if not cents or not included:
+        return "free"
+    return f"{cents / included:.1f}c each"
 
 
 @router.get("/pricing")
@@ -990,11 +1201,14 @@ def pricing(ctx: router.Context) -> router.Result:
     for plan in PLANS:
         features_html = "".join(f"<li>{html.escape(f)}</li>" for f in plan["features"])
         highlight = " highlight" if plan.get("highlight") else ""
+        included = plan["included"]["chat_query"]
         plans_html += f"""
 <div class="plan{highlight}">
   <h3 style="font-size:1.05rem;font-weight:640">{html.escape(plan['name'])}</h3>
   <div class="amount">{html.escape(plan['price'])}</div>
   <div class="cadence">{html.escape(plan['cadence'])}</div>
+  <p class="plan-blurb">{html.escape(plan['blurb'])}</p>
+  <p class="plan-rate">{included:,} charts a month{_rate_suffix(plan)}</p>
   <ul>{features_html}</ul>
   {_plan_cta(plan)}
 </div>"""
@@ -1008,6 +1222,13 @@ def pricing(ctx: router.Context) -> router.Result:
         for p in CREDIT_PACKS
     )
 
+    tiers_html = "".join(
+        f"<tr><td>{'$%s+' % f'{threshold // 100:,}' if threshold else 'Any'}</td>"
+        f"<td>{int(rate * 100)}%</td>"
+        f"<td>{config.CREDIT_COST['chat_query'] * (1 - rate):.1f} credits</td></tr>"
+        for threshold, rate in config.VOLUME_TIERS
+    )
+
     def _cost(value: int) -> str:
         # A schema-only completion costs nothing because it never calls a
         # model; "0 credits" reads like a rounding error, "Free" is the point.
@@ -1015,10 +1236,38 @@ def pricing(ctx: router.Context) -> router.Result:
             return '<span class="badge">Free</span>'
         return f"{value} credit{'' if value == 1 else 's'}"
 
+    # Metered work is priced per minute, and a table that prints "long agent
+    # minute - 10 credits" beside "chat query - 2 credits" invites the reader
+    # to compare them as if they were the same unit.
+    def _unit(name: str) -> str:
+        return " / minute" if name.endswith("_minute") else ""
+
     costs_html = "".join(
-        f"<tr><td>{html.escape(k.replace('_', ' '))}</td><td>{_cost(int(v))}</td></tr>"
+        f"<tr><td>{html.escape(k.replace('_minute', '').replace('_', ' '))}"
+        f"{_unit(k)}</td><td>{_cost(int(v))}{_unit(k)}</td></tr>"
         for k, v in config.CREDIT_COST.items()
     )
+
+    # The machine table is built from the catalogue rather than written, for
+    # the same reason the plan cards read their allowances from config: a page
+    # that quotes a rate the biller does not charge is a refund.
+    from twohelixes import machines
+
+    def _machine_row(m: dict) -> str:
+        spec = f"{m['vcpu']} vCPU, {m['ram_gb']} GB"
+        if m["gpu"]:
+            spec = f"{m['gpu']}, {m['gpu_ram_gb']} GB"
+        included = ('<span class="badge">Included</span>' if m["included"]
+                    else html.escape(m["min_plan"].title()))
+        return (f"<tr><td><b>{html.escape(m['label'])}</b></td>"
+                f"<td>{html.escape(spec)}</td>"
+                f"<td>{m['credits_per_minute']} credit"
+                f"{'' if m['credits_per_minute'] == 1 else 's'} / minute</td>"
+                f"<td>{html.escape(m['price_per_hour'])} / hour</td>"
+                f"<td>{included}</td></tr>")
+
+    machines_html = "".join(_machine_row(m) for m in machines.catalog_for(""))
+    included_hours = config.PLAN_ALLOWANCES["plus"]["notebook_minute"] // 60
 
     body = f"""
 <main id="content">
@@ -1044,17 +1293,57 @@ def pricing(ctx: router.Context) -> router.Result:
   </table></div>
 </div></section>
 
+<section class="band"><div class="shell">
+  <h2>Volume pricing, without asking</h2>
+  <p class="lead-in">The unit price falls automatically with your trailing
+  30-day spend. There is no contract to sign and no tier to request &mdash;
+  <code>GET /v1/usage</code> reports the tier you are in and what the next one
+  is worth.</p>
+  <div class="scroll-x"><table class="packs">
+    <thead><tr><th>30-day spend</th><th>Discount</th>
+      <th>Cost per chart</th></tr></thead>
+    <tbody>{tiers_html}</tbody>
+  </table></div>
+  <p class="sub" style="margin-top:var(--s4);color:var(--text-muted);
+    font-size:.9rem">Fractions of a credit are carried on the account rather
+  than rounded, so a discount is exact however small each call is.</p>
+</div></section>
+
+<section class="band"><div class="shell">
+  <h2>Machines</h2>
+  <p class="lead-in">A hosted notebook runs on a machine you pick, billed by
+  the minute while it is up. Every paid plan includes {included_hours} hours or
+  more of CPU time a month &mdash; a Plus subscription comes with a machine, not
+  just a seat &mdash; and GPUs are credits only, because one GPU hour costs more
+  than the plan does.</p>
+  <div class="scroll-x"><table class="packs">
+    <thead><tr><th>Machine</th><th>Specification</th><th>Rate</th>
+      <th>Per hour</th><th>Plan</th></tr></thead>
+    <tbody>{machines_html}</tbody>
+  </table></div>
+  <p class="sub" style="margin-top:var(--s4);color:var(--text-muted);
+    font-size:.9rem">Sessions suspend when idle and stop at their ceiling, so a
+  tab left open overnight does not spend the month. A session stops when the
+  balance runs out rather than running up a debt, and the instance behind it is
+  destroyed either way &mdash; we are paying for it too.</p>
+</div></section>
+
 <section><div class="shell">
   <h2>What things cost</h2>
-  <p class="lead-in">Every priced operation, in credits.</p>
+  <p class="lead-in">Every priced operation, in credits. Work that holds a
+  process &mdash; a hosted notebook, a long-running agent &mdash; is billed by
+  the minute for as long as it runs, and <code>GET /v1/usage</code> shows what
+  is running, what it has cost and how many minutes your balance covers.</p>
   <div class="scroll-x"><table class="packs">
     <thead><tr><th>Operation</th><th>Cost</th></tr></thead>
     <tbody>{costs_html}</tbody>
   </table></div>
   <p class="sub" style="margin-top:var(--s5);color:var(--text-muted);
-    font-size:.9rem">Free accounts get {config.FREE_QUERIES_PER_USER} AI
-  queries in total, under per-minute and per-day limits. Paid credit spend is
-  not rate limited beyond a global per-account safety valve.</p>
+    font-size:.9rem">Included usage is spent before credits, so a plan's charts
+  are never wasted. Nothing is charged until an operation succeeds, a metered
+  session stops when the balance runs out rather than running up a debt, and an
+  agent run that produces nothing is refunded in full &mdash; base fee and
+  minutes. Credits do not expire.</p>
 </div></section>
 </main>"""
     return router.html(
@@ -1064,19 +1353,20 @@ def pricing(ctx: router.Context) -> router.Result:
 
 ENDPOINTS = (
     (
-        "POST", "/v1/query", "Ask a question",
+        "POST", "/v1/query", "Get a chart",
         "Runs the whole pipeline and returns the finished figure, the chart "
-        "config, the row count and every warning it raised on the way.",
+        "config, the row count and every warning it raised on the way. It "
+        "returns a figure even when a stage had to fall back.",
         'curl -X POST https://twohelixes.com/v1/query \\\n'
         '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
         '  -H "Content-Type: application/json" \\\n'
         '  -d \'{"q":"revenue by region this quarter","source_id":"..."}\'',
     ),
     (
-        "POST", "/v1/query/stream", "Stream the reasoning",
-        "The same run as server-sent events, so you can show progress instead "
-        "of a spinner. Event names: stage, thought, warning, partial, result, "
-        "done.",
+        "POST", "/v1/query/stream", "Stream the run",
+        "The same call as server-sent events, so a long run can show its "
+        "progress and its partial chart as it goes. Event names: stage, "
+        "thought, warning, partial, result, done.",
         'curl -N -X POST https://twohelixes.com/v1/query/stream \\\n'
         '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
         '  -d \'{"q":"which regions are shrinking?"}\'',
@@ -1094,6 +1384,32 @@ ENDPOINTS = (
         "SVG, PNG or CSV. SVG is drawn by our own exporter - deterministic, "
         "no headless browser, and editable markup.",
         'curl "https://twohelixes.com/v1/chart/$ID/export?format=svg&mode=dark" \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY"',
+    ),
+    (
+        "POST", "/v1/agent", "Run a deep-research agent",
+        "Starts a long-running agent and returns a job id immediately - no SSE "
+        "connection to hold open. Billed as a base fee plus credits per minute "
+        "while it runs; a run that produces nothing is refunded in full. Poll "
+        "/v1/jobs/{id} for progress, findings and an itemised bill.",
+        'curl -X POST https://twohelixes.com/v1/agent \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
+        '  -d \'{"goal":"why did south shrink last quarter?","source_id":"..."}\'',
+    ),
+    (
+        "GET", "/v1/usage", "See what is running and what it costs",
+        "Every meter: what is open right now, the rate it is burning, the "
+        "minutes already billed and how many minutes your balance covers. The "
+        "per-minute charges in the ledger can all be traced back to a row here.",
+        'curl https://twohelixes.com/v1/usage \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY"',
+    ),
+    (
+        "GET", "/v1/chart/{id}/notebook", "Export a notebook",
+        "The whole run as a notebook: the data, the transformation that was "
+        "run and the chart rebuilt with the same palette. format=ipynb for "
+        "Jupyter, or the default marimo file, which we can also host for you.",
+        'curl -O -J "https://twohelixes.com/v1/chart/$ID/notebook?format=ipynb" \\\n'
         '  -H "Authorization: Bearer $TWOHELIXES_KEY"',
     ),
 )
@@ -1119,7 +1435,7 @@ def docs(ctx: router.Context) -> router.Result:
 <main id="content">
 <section class="page-head"><div class="shell">
   <p class="kicker">API</p>
-  <h1>Every answer is one HTTP call away</h1>
+  <h1>Every chart is one HTTP call away</h1>
   <p class="sub">JSON in, JSON out. Authenticate with a bearer API key from the
   billing page, or with a session cookie if you are calling from a browser
   already signed in.</p>
@@ -1128,11 +1444,20 @@ def docs(ctx: router.Context) -> router.Result:
 <section><div class="shell grid">{blocks}</div></section>
 
 <section class="band"><div class="shell">
+  <h2>Analytics compatibility</h2>
+  <p class="lead-in">The GA4 parity map states exactly what matches, what is
+  partial, and what twoHelixes deliberately does differently.</p>
+  <a class="btn btn-ghost" href="/docs/analytics-parity">Read the parity map</a>
+</div></section>
+
+<section><div class="shell">
   <h2>Rate limits</h2>
-  <p class="lead-in">Free accounts are limited per minute, per hour and per
-  day, and to a lifetime allowance of
-  {config.FREE_QUERIES_PER_USER} AI queries. Requests paid for with API credits
-  are not rate limited beyond a global per-account safety valve.</p>
+  <p class="lead-in">Anonymous callers get
+  {config.ANON_QUERIES_PER_DAY} sample-data question a day, per address. Free
+  accounts get {config.PLAN_ALLOWANCES['free']['chat_query']} AI charts a month
+  under per-minute and per-day limits. Requests paid for from credits are not
+  rate limited beyond a global per-account safety valve, and the unit price
+  falls automatically with your trailing 30-day spend.</p>
   <ul class="rules">
     <li>Charging happens <b>after success</b> &mdash; a failed pipeline does
     not spend anything.</li>
@@ -1156,6 +1481,67 @@ def docs(ctx: router.Context) -> router.Result:
     )
 
 
+ANALYTICS_PARITY = (
+    ("Property / data stream", "Analytics site", "Partial", "One owned web domain; no app streams or multi-stream properties."),
+    ("Measurement ID", "Write key", "At parity", "A public key selects a registered site; unknown keys are discarded."),
+    ("gtag / dataLayer", "th.js", "Partial", "Page, track, identify and queued th calls; no generic dataLayer plugin surface."),
+    ("Event + parameters", "event_name + props", "At parity", "GA-shaped names and JSON parameters are retained within collector limits."),
+    ("user_pseudo_id", "client_id", "Deliberately different", "Random first-party localStorage ID; DNT and GPC disable it."),
+    ("Sessions / session_start", "Server session logic", "At parity", "30-minute inactivity boundary and one session_start on the first hit."),
+    ("engagement_time_msec", "engagement_ms", "Partial", "_et and visible-tab deltas accumulate; the full GA lifecycle is not reproduced."),
+    ("Conversions / key events", "Conventional key-event names", "Partial", "Four conventional names affect engagement; no per-site custom registry."),
+    ("Audiences", "None", "Not supported", "No persistent membership, activation or advertising export."),
+    ("UTM / traffic source", "Session-scoped UTM + referrer", "Partial", "UTMs persist and self-referrals are excluded; no channel grouping or cross-session attribution."),
+    ("Explorations", "Chat + dashboards", "Deliberately different", "Questions and editable charts replace the exploration canvas."),
+    ("BigQuery export", "Export endpoint + datasets", "Partial", "Bounded authenticated batches, not a continuous linked warehouse export."),
+)
+
+
+@router.get("/docs/analytics-parity")
+def analytics_parity(ctx: router.Context) -> router.Result:
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(ga4)}</td>"
+        f"<td>{html.escape(ours)}</td>"
+        f"<td><b>{html.escape(verdict)}</b></td>"
+        f"<td>{html.escape(boundary)}</td>"
+        "</tr>"
+        for ga4, ours, verdict, boundary in ANALYTICS_PARITY
+    )
+    body = f"""
+<main id="content">
+<section class="page-head"><div class="shell">
+  <p class="kicker">Analytics</p>
+  <h1>GA4 parity, without the wishful thinking</h1>
+  <p class="sub">A current capability map. Partial rows say what is missing;
+  deliberate differences say why the behavior does not copy Google Analytics.</p>
+</div></section>
+<section><div class="shell">
+  <div class="scroll-x"><table class="packs">
+    <thead><tr><th>GA4 concept</th><th>twoHelixes</th><th>Verdict</th><th>Boundary</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table></div>
+</div></section>
+<section class="band"><div class="shell">
+  <h2>Collector decision</h2>
+  <p class="lead-in">Unknown write keys are discarded with the normal forgiving
+  collector response. Quarantine would retain unsolicited data and allow
+  guessed hostnames to create storage namespaces.</p>
+  <p class="sub">The HTTP parity suite covers session boundaries,
+  <code>session_start</code>, engagement accumulation, page views,
+  self-referrals, session UTM persistence, and engaged-session bounce rules.</p>
+</div></section>
+</main>"""
+    return router.html(
+        _page(
+            "GA4 analytics parity — twoHelixes",
+            "An honest GA4 to twoHelixes analytics capability map.",
+            body,
+            "/docs/analytics-parity",
+        )
+    )
+
+
 @router.get("/app")
 def app_shell(ctx: router.Context) -> router.Result:
     """The single-page app shell. The bundle takes over from here."""
@@ -1175,7 +1561,70 @@ def app_shell(ctx: router.Context) -> router.Result:
   </div>
 </div>
 <script type="module" src="/static/app.js"></script>
+{_analytics_snippet()}
 </body></html>"""
+    )
+
+
+@router.get("/billing/complete")
+def billing_complete(ctx: router.Context) -> router.Result:
+    """Where Stripe's embedded checkout returns to.
+
+    The webhook is what grants credits, so this page reports rather than
+    decides - and it has to exist: `return_url` on the embedded session points
+    here, and without the route a completed payment landed on a JSON 404,
+    which reads as "my card was charged and the site broke".
+    """
+    session_id = ctx.q("session_id", "") or ""
+    body = f"""
+<main id="content"><section><div class="shell" style="max-width:34rem">
+  <p class="kicker">Checkout</p>
+  <h1 id="billing-heading">Confirming your payment&hellip;</h1>
+  <p class="lead-in" id="billing-detail">Stripe has taken the payment. We are
+  waiting for the confirmation that credits it to your account &mdash; this is
+  usually a second or two.</p>
+  <div class="actions"><a class="btn btn-primary" href="/app">Open the app</a>
+  <a class="btn btn-ghost" href="/pricing">Back to pricing</a></div>
+</div></section></main>
+<script>
+(function(){{
+  var id = {json.dumps(session_id)};
+  var heading = document.getElementById('billing-heading');
+  var detail = document.getElementById('billing-detail');
+  if (!id) {{
+    heading.textContent = 'Nothing to confirm';
+    detail.textContent = 'This page is where Stripe returns after a purchase.';
+    return;
+  }}
+  var tries = 0;
+  // The webhook and this redirect race, and the webhook usually loses. Polling
+  // beats telling a paying customer that nothing happened.
+  function poll() {{
+    fetch('/v1/billing/session/' + encodeURIComponent(id), {{credentials:'same-origin'}})
+      .then(function(r){{ return r.json(); }})
+      .then(function(d){{
+        if (d.payment_status === 'paid' || d.status === 'complete') {{
+          heading.textContent = 'Payment received';
+          detail.textContent = d.credits != null
+            ? 'Your balance is now ' + d.credits.toLocaleString() + ' credits.'
+            : 'Your account has been updated.';
+          return;
+        }}
+        if (++tries < 10) setTimeout(poll, 1200);
+        else detail.textContent = 'Still confirming. Your account updates as '
+          + 'soon as Stripe confirms; nothing further is needed from you.';
+      }})
+      .catch(function(){{
+        if (++tries < 10) setTimeout(poll, 1500);
+      }});
+  }}
+  poll();
+}})();
+</script>"""
+    return router.html(
+        _page("Payment complete — twoHelixes", "Confirming your payment.",
+              body, "/billing/complete",
+              head='<meta name="robots" content="noindex">')
     )
 
 

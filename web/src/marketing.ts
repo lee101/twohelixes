@@ -177,7 +177,11 @@ function loadStripe(publishableKey: string): Promise<any> {
 
 let mountedCheckout: any = null;
 
-async function startCheckout(opts: { pack?: string; priceId?: string }): Promise<void> {
+async function startCheckout(opts: {
+  pack?: string;
+  priceId?: string;
+  plan?: string;
+}): Promise<void> {
   const user = await me(true);
   if (!user.signed_in) {
     // Buying requires an account, so collect it inline rather than bouncing
@@ -198,6 +202,9 @@ async function startCheckout(opts: { pack?: string; priceId?: string }): Promise
   try {
     session = await api("/v1/billing/checkout", {
       pack: opts.pack,
+      // The plan, not the price: the server owns the mapping, so a price
+      // change does not need a redeploy of this page.
+      plan: opts.plan,
       price_id: opts.priceId,
       embedded: Boolean(key),
     });
@@ -307,7 +314,11 @@ function wire(): void {
       });
     } else if (action === "buy") {
       event.preventDefault();
-      void startCheckout({ pack: target.dataset.pack, priceId: target.dataset.price });
+      void startCheckout({
+        pack: target.dataset.pack,
+        plan: target.dataset.plan,
+        priceId: target.dataset.price,
+      });
     } else if (action === "close") {
       event.preventDefault();
       const id = target.closest(".overlay")?.id;

@@ -5,6 +5,12 @@ interactive request is rate limited and the pipeline calls the model several
 times per query. Long-running and deep-research agents escalate to terra/sol,
 which only paying callers can reach.
 
+Every call is priced. `usage` comes back on the response, `PRICES` mirrors the
+gateway's own table, and `spend()` accumulates the cost of a whole pipeline run
+into thread-local state. Without that, the credit prices in `config` would be a
+guess: nobody can set a margin on a number they have never measured, and a
+query that quietly costs more than it charges is a subscription to a loss.
+
 Two behaviours matter for this product:
 
 * `stream_json` surfaces partial reasoning as it arrives so the UI can show
@@ -21,6 +27,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
 from twohelixes import config
@@ -39,7 +46,93 @@ DIRECT_MODEL_FALLBACK = {
     config.MODEL_ESCALATE: "gpt-4.1",
     config.MODEL_DEEP: "gpt-4.1",
     config.MODEL_FAST: "gpt-4.1-nano",
+    config.MODEL_MINI: "gpt-4.1-nano",
 }
+
+
+# US dollars per million tokens, mirroring openpaths/config.yaml. Prices are
+# duplicated rather than fetched because a pricing decision must not depend on
+# a network call - and because a silent gateway price change should show up as
+# a margin discrepancy here, not as an invisible one.
+PRICES = {
+    "gpt-5.6-luna": (1.00, 6.00),
+    "gpt-5.6-terra": (2.50, 15.00),
+    "gpt-5.6-sol": (5.00, 30.00),
+    "auto-easy-task": (0.15, 0.60),
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),
+}
+DEFAULT_PRICE = (1.00, 6.00)
+
+
+@dataclass
+class Spend:
+    """What a run cost us, in tokens and in millionths of a dollar."""
+
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    micros: int = 0
+    by_model: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def cents(self) -> float:
+        return self.micros / 10_000.0
+
+    def add(self, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+        input_price, output_price = PRICES.get(model, DEFAULT_PRICE)
+        micros = round(
+            prompt_tokens * input_price + completion_tokens * output_price
+        )
+        self.calls += 1
+        self.input_tokens += prompt_tokens
+        self.output_tokens += completion_tokens
+        self.micros += micros
+        self.by_model[model] = self.by_model.get(model, 0) + micros
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "micros": self.micros,
+            "cents": round(self.cents, 4),
+            "by_model": self.by_model,
+        }
+
+
+_spend = threading.local()
+
+
+@contextmanager
+def measure() -> Iterator[Spend]:
+    """Accumulate the model cost of everything called inside the block.
+
+    Thread-local because a pipeline run owns a thread here: the streaming
+    handlers run on their own, and two concurrent runs must not pool their
+    spend into one number.
+    """
+    previous = getattr(_spend, "current", None)
+    current = Spend()
+    _spend.current = current
+    try:
+        yield current
+    finally:
+        _spend.current = previous
+
+
+def _record(model: str, usage: Any) -> None:
+    current = getattr(_spend, "current", None)
+    if current is None or usage is None:
+        return
+    try:
+        current.add(
+            model,
+            int(getattr(usage, "prompt_tokens", 0) or 0),
+            int(getattr(usage, "completion_tokens", 0) or 0),
+        )
+    except Exception:  # noqa: BLE001 - accounting must never break a request
+        log.debug("could not record usage for %s", model)
 
 
 class LLMError(Exception):
@@ -185,6 +278,7 @@ def call(
                 max_tokens=max_tokens,
             )
             _circuit.ok()
+            _record(model, getattr(response, "usage", None))
             text = response.choices[0].message.content or ""
             log.debug(
                 "llm %s ok in %dms (%d chars)",
@@ -272,8 +366,15 @@ def stream(
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            # A streamed call reports its usage only in a final, choice-less
+            # chunk, and only if asked. Without this the trace - the most
+            # visible thing the product does - would be the one call whose cost
+            # we never counted.
+            stream_options={"include_usage": True},
         )
         for chunk in response:
+            if getattr(chunk, "usage", None) is not None:
+                _record(model, chunk.usage)
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -302,8 +403,12 @@ def parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     """
     results: dict[str, Any] = {}
     errors: dict[str, Exception] = {}
+    # Spend is thread-local, so a worker thread starts with none and its cost
+    # would vanish - and the stages that fan out are the expensive ones.
+    parent_spend = getattr(_spend, "current", None)
 
     def worker(name: str, kwargs: dict[str, Any]) -> None:
+        _spend.current = parent_spend
         try:
             results[name] = json_call(**kwargs)
         except Exception as exc:  # noqa: BLE001

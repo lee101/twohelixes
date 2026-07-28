@@ -19,12 +19,15 @@ import hashlib
 import json
 import logging
 import re
+import secrets
+import threading
 import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
-from twohelixes import router, store
+from twohelixes import auth, config, router, store
 from twohelixes.router import Context, Result, error, json_result
+from twohelixes.routes import teams
 
 log = logging.getLogger("twohelixes.analytics")
 
@@ -141,27 +144,59 @@ def _props_json(raw: Any) -> str:
     return text
 
 
-def _session_for(site_id: str, client_id: str, given: str, now: float) -> str:
+def _session_for(
+    site_id: str,
+    client_id: str,
+    given: str,
+    event_ts: float,
+    cache: dict[str, tuple[str, float, bool]],
+) -> tuple[str, bool]:
     """Honour the tracker's session id; derive one when it is missing.
 
     A GA-style 30 minute inactivity window, evaluated against the last event we
     stored for this client rather than against a cookie, so the pixel and
     server-side callers get sessionisation too.
     """
+    cached = cache.get(client_id)
     if given:
-        return given[:64]
+        session_id = given[:64]
+        if cached and cached[0] == session_id:
+            cache[client_id] = (session_id, max(cached[1], event_ts), False)
+            return session_id, False
+        exists = store.one(
+            "SELECT 1 FROM analytics_events WHERE site_id = ? AND client_id = ?"
+            " AND session_id = ? LIMIT 1",
+            (site_id, client_id, session_id),
+        )
+        is_new = exists is None
+        cache[client_id] = (session_id, event_ts, is_new)
+        return session_id, is_new
+    if cached and event_ts - cached[1] < SESSION_GAP_SECONDS:
+        cache[client_id] = (cached[0], max(cached[1], event_ts), False)
+        return cached[0], False
     row = store.one(
         "SELECT session_id, ts FROM analytics_events WHERE site_id = ? AND client_id = ?"
-        " ORDER BY ts DESC LIMIT 1",
-        (site_id, client_id),
+        " AND ts <= ? ORDER BY ts DESC LIMIT 1",
+        (site_id, client_id, event_ts),
     )
     data = store.row_to_dict(row)
-    if data and now - float(data["ts"] or 0) < SESSION_GAP_SECONDS:
-        return str(data["session_id"])
-    return store.new_id()
+    if data and event_ts - float(data["ts"] or 0) < SESSION_GAP_SECONDS:
+        session_id = str(data["session_id"])
+        cache[client_id] = (session_id, event_ts, False)
+        return session_id, False
+    session_id = store.new_id()
+    cache[client_id] = (session_id, event_ts, True)
+    return session_id, True
 
 
-def _normalise(event: dict[str, Any], ctx: Context, site_id: str, now: float) -> dict[str, Any] | None:
+def _normalise(
+    event: dict[str, Any],
+    ctx: Context,
+    site: dict[str, Any],
+    now: float,
+    session_cache: dict[str, tuple[str, float, bool]],
+) -> dict[str, Any] | None:
+    site_id = str(site["id"])
     kind = _clip(event.get("type"), 32).lower()
     name = _clip(event.get("event") or event.get("name") or event.get("en"), 64)
     if kind in _SEGMENT_EVENT and not name:
@@ -177,10 +212,25 @@ def _normalise(event: dict[str, Any], ctx: Context, site_id: str, now: float) ->
     if not client_id:
         return None
 
-    page_location = _clip(event.get("page_location") or event.get("url") or event.get("dl"))
-    props = event.get("props") or event.get("properties") or event.get("traits") or {}
+    props = (
+        event.get("props")
+        or event.get("properties")
+        or event.get("params")
+        or event.get("traits")
+        or {}
+    )
     if not isinstance(props, dict):
         props = {"value": props}
+    context = event.get("context") if isinstance(event.get("context"), dict) else {}
+    page = context.get("page") if isinstance(context.get("page"), dict) else {}
+    campaign = context.get("campaign") if isinstance(context.get("campaign"), dict) else {}
+    page_location = _clip(
+        event.get("page_location")
+        or event.get("url")
+        or event.get("dl")
+        or props.get("page_location")
+        or page.get("url")
+    )
 
     ua = ctx.header("user-agent")
     device, browser, os_name, is_bot = _parse_ua(ua)
@@ -196,38 +246,104 @@ def _normalise(event: dict[str, Any], ctx: Context, site_id: str, now: float) ->
     if abs(ts - now) > 86400:
         ts = now
 
-    referrer = _clip(event.get("referrer") or event.get("dr"))
+    session_id, session_start = _session_for(
+        site_id,
+        client_id,
+        _clip(
+            event.get("session_id")
+            or event.get("sid")
+            or props.get("session_id")
+            or props.get("ga_session_id"),
+            64,
+        ),
+        ts,
+        session_cache,
+    )
+    page_query: dict[str, list[str]] = {}
+    try:
+        page_query = parse_qs(urlsplit(page_location).query)
+    except ValueError:
+        pass
+
+    def campaign_value(native: str, ga: str, segment: str) -> str:
+        query_value = (page_query.get(native) or [""])[0]
+        return _clip(
+            event.get(native)
+            or event.get(ga)
+            or props.get(native)
+            or campaign.get(segment)
+            or query_value,
+            128,
+        )
+
+    referrer = _clip(
+        event.get("referrer") or event.get("dr") or props.get("page_referrer") or page.get("referrer")
+    )
+    referrer_host = _host_of(referrer)
+    page_host = _host_of(page_location)
+    site_domain = str(site.get("domain") or "").lower()
+    if referrer_host and referrer_host in {page_host, site_domain, f"www.{site_domain}"}:
+        referrer = ""
+        referrer_host = ""
+
+    attribution = {
+        "utm_source": campaign_value("utm_source", "cs", "source"),
+        "utm_medium": campaign_value("utm_medium", "cm", "medium"),
+        "utm_campaign": campaign_value("utm_campaign", "cn", "name"),
+        "utm_term": campaign_value("utm_term", "ck", "term"),
+        "utm_content": campaign_value("utm_content", "cc", "content"),
+    }
+    if not any(attribution.values()) and not session_start:
+        previous = store.row_to_dict(
+            store.one(
+                "SELECT utm_source, utm_medium, utm_campaign, utm_term, utm_content"
+                " FROM analytics_events WHERE site_id = ? AND session_id = ?"
+                " ORDER BY ts ASC LIMIT 1",
+                (site_id, session_id),
+            )
+        )
+        if previous:
+            attribution = {key: _clip(previous.get(key), 128) for key in attribution}
+
     return {
         "id": store.new_id(),
         "site_id": site_id,
         "client_id": client_id,
-        "session_id": _session_for(site_id, client_id, _clip(event.get("session_id") or event.get("sid"), 64), now),
-        "user_id": _clip(event.get("user_id") or event.get("userId"), 64) or None,
+        "session_id": session_id,
+        "user_id": _clip(
+            event.get("user_id") or event.get("userId") or event.get("uid"), 64
+        )
+        or None,
         "event_name": name,
         "ts": ts,
         "received_at": now,
         "page_location": page_location,
-        "page_path": _clip(event.get("page_path")) or _path_of(page_location),
-        "page_title": _clip(event.get("page_title") or event.get("dt"), 255),
+        "page_path": _clip(event.get("page_path") or props.get("page_path") or page.get("path")) or _path_of(page_location),
+        "page_title": _clip(
+            event.get("page_title") or event.get("dt") or props.get("page_title") or page.get("title"),
+            255,
+        ),
         "referrer": referrer,
-        "referrer_host": _host_of(referrer),
-        "utm_source": _clip(event.get("utm_source"), 128),
-        "utm_medium": _clip(event.get("utm_medium"), 128),
-        "utm_campaign": _clip(event.get("utm_campaign"), 128),
-        "utm_term": _clip(event.get("utm_term"), 128),
-        "utm_content": _clip(event.get("utm_content"), 128),
+        "referrer_host": referrer_host,
+        **attribution,
         "device": device,
         "browser": browser,
         "os": os_name,
-        "screen": _clip(event.get("screen"), 32),
+        "screen": _clip(event.get("screen") or event.get("sr"), 32),
         "viewport": _clip(event.get("viewport"), 32),
-        "language": _clip(event.get("language") or event.get("ul"), 32),
+        "language": _clip(event.get("language") or event.get("ul") or props.get("language"), 32),
         "country": _clip(ctx.header("cf-ipcountry"), 8),
         "ip_hash": _ip_hash(ctx.client_ip, site_id),
-        "engagement_ms": _int(event.get("engagement_ms") or event.get("_et")),
+        "engagement_ms": _int(
+            event.get("engagement_ms")
+            or event.get("_et")
+            or props.get("engagement_time_msec")
+            or props.get("engagement_ms")
+        ),
         "props": _props_json(props),
         "_kind": kind,
         "_traits": event.get("traits") if isinstance(event.get("traits"), dict) else None,
+        "_session_start": session_start,
     }
 
 
@@ -247,6 +363,7 @@ _COLUMNS = (
 
 
 _warned: set[str] = set()
+_dashboard_build_lock = threading.Lock()
 
 
 def _warn_once(message: str) -> None:
@@ -259,25 +376,42 @@ def _warn_once(message: str) -> None:
         log.debug(message, exc_info=True)
 
 
-def _store(rows: list[dict[str, Any]]) -> int:
+def _store(rows: list[dict[str, Any]]) -> tuple[int, list[tuple[str, str]]]:
     if not rows:
-        return 0
+        return 0, []
     placeholders = ", ".join("?" for _ in _COLUMNS)
     # The connection adapts `?` to the driver's paramstyle itself; adapting here
     # too produced valid-looking SQL that Postgres rejected, and the per-row
     # except swallowed it - every event was dropped while ingest still said 204.
     sql = f"INSERT INTO analytics_events ({', '.join(_COLUMNS)}) VALUES ({placeholders})"
     written = 0
+    claimed: list[tuple[str, str]] = []
     with store.transaction() as conn:
         for row in rows:
+            inserted = False
             try:
                 conn.execute(sql, tuple(row[c] for c in _COLUMNS))
                 written += 1
+                inserted = True
             except Exception:  # one bad row must not lose the batch
                 _warn_once("analytics: row rejected")
+            if not inserted:
+                continue
             if row.get("_kind") in ("identify", "alias") and row.get("user_id"):
                 _upsert_identity(conn, row)
-    return written
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO analytics_event_dashboards"
+                    " (site_id, event_name, status, claimed_at)"
+                    " VALUES (?, ?, 'pending', ?)"
+                    " ON CONFLICT (site_id, event_name) DO NOTHING",
+                    (row["site_id"], row["event_name"], time.time()),
+                )
+                if cursor.rowcount:
+                    claimed.append((row["site_id"], row["event_name"]))
+            except Exception:
+                _warn_once("analytics: dashboard claim failed")
+    return written, claimed
 
 
 def _upsert_identity(conn: Any, row: dict[str, Any]) -> None:
@@ -303,16 +437,196 @@ def _upsert_identity(conn: Any, row: dict[str, Any]) -> None:
         _warn_once("analytics: identity upsert failed")
 
 
-def _site_id(ctx: Context, payload: Any) -> str:
+def _site_token(ctx: Context, payload: Any) -> str:
     if isinstance(payload, dict):
         candidate = payload.get("site_id") or payload.get("tid") or payload.get("writeKey")
         if candidate:
-            return _clip(candidate, 64)
+            return _clip(candidate, 128)
     candidate = ctx.q("site_id") or ctx.q("tid")
     if candidate:
-        return _clip(candidate, 64)
-    origin = ctx.header("origin") or ctx.header("referer")
-    return _host_of(origin) or "unknown"
+        return _clip(candidate, 128)
+    return ""
+
+
+def _site_for_write(ctx: Context, payload: Any) -> dict[str, Any] | None:
+    token = _site_token(ctx, payload)
+    if not token:
+        return None
+    return store.row_to_dict(
+        store.one(
+            "SELECT id, user_id, domain, name FROM analytics_sites"
+            " WHERE id = ? OR write_key = ?",
+            (token, token),
+        )
+    )
+
+
+def _site_payload(row: Any) -> dict[str, Any]:
+    site = store.row_to_dict(row) or {}
+    write_key = str(site.get("write_key") or "")
+    endpoint = f"{config.site_url().rstrip('/')}/v1/collect"
+    site["snippet"] = (
+        "<script>window.__thConfig="
+        + json.dumps({"siteId": write_key, "endpoint": endpoint}, separators=(",", ":"))
+        + ";</script>\n"
+        + f'<script async src="{config.site_url().rstrip("/")}/static/th.js"></script>'
+    )
+    return site
+
+
+def _domain(value: Any) -> str:
+    raw = _clip(value, 255).lower()
+    if "://" in raw:
+        raw = _host_of(raw)
+    return raw.removeprefix("www.").split(":", 1)[0].strip(".")
+
+
+def _site_for_read(ctx: Context) -> tuple[dict[str, Any] | None, Result | None]:
+    identity = auth.require(ctx)
+    site_id = _clip(ctx.q("site_id", ""), 64)
+    if not site_id:
+        return None, error(400, "site_id_required")
+    site = store.row_to_dict(
+        store.one("SELECT * FROM analytics_sites WHERE id = ?", (site_id,))
+    )
+    if site is None:
+        return None, error(404, "site_not_found")
+    if not teams.can_read(identity.user_id, "analytics_site", site_id):
+        return None, error(403, "forbidden")
+    return site, None
+
+
+@router.get("/v1/analytics/sites")
+def list_sites(ctx: Context) -> Result:
+    identity = auth.require(ctx)
+    teams.ensure_schema()
+    rows = store.query(
+        "SELECT DISTINCT s.* FROM analytics_sites s"
+        " LEFT JOIN team_objects o ON o.kind = 'analytics_site' AND o.object_id = s.id"
+        " LEFT JOIN team_members m ON m.team_id = o.team_id AND m.user_id = ?"
+        " WHERE s.user_id = ? OR m.user_id = ? ORDER BY s.created_at DESC",
+        (identity.user_id, identity.user_id, identity.user_id),
+    )
+    return json_result({"sites": [_site_payload(row) for row in rows]})
+
+
+@router.post("/v1/analytics/sites")
+def create_site(ctx: Context) -> Result:
+    identity = auth.require(ctx)
+    domain = _domain(ctx.field("domain"))
+    if not domain or "." not in domain or " " in domain:
+        return error(400, "invalid_domain")
+    name = _clip(ctx.field("name"), 120) or domain
+    site_id = store.new_id()
+    write_key = f"thw_{secrets.token_urlsafe(24)}"
+    now = time.time()
+    try:
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO analytics_sites"
+                " (id, user_id, domain, name, write_key, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (site_id, identity.user_id, domain, name, write_key, now),
+            )
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return error(409, "site_already_exists")
+        raise
+    row = store.one("SELECT * FROM analytics_sites WHERE id = ?", (site_id,))
+    return json_result(_site_payload(row), status=201)
+
+
+@router.patch("/v1/analytics/sites/{site_id}")
+def update_site(ctx: Context) -> Result:
+    identity = auth.require(ctx)
+    site_id = ctx.params["site_id"]
+    if not teams.can_write(identity.user_id, "analytics_site", site_id):
+        return error(403, "forbidden")
+    fields: list[str] = []
+    values: list[Any] = []
+    if ctx.field("domain") is not None:
+        domain = _domain(ctx.field("domain"))
+        if not domain or "." not in domain or " " in domain:
+            return error(400, "invalid_domain")
+        fields.append("domain = ?")
+        values.append(domain)
+    if ctx.field("name") is not None:
+        name = _clip(ctx.field("name"), 120)
+        if not name:
+            return error(400, "name_required")
+        fields.append("name = ?")
+        values.append(name)
+    if fields:
+        values.append(site_id)
+        try:
+            with store.transaction() as conn:
+                conn.execute(
+                    f"UPDATE analytics_sites SET {', '.join(fields)} WHERE id = ?",
+                    values,
+                )
+        except Exception as exc:
+            if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+                return error(409, "site_already_exists")
+            raise
+    return json_result(_site_payload(store.one("SELECT * FROM analytics_sites WHERE id = ?", (site_id,))))
+
+
+@router.delete("/v1/analytics/sites/{site_id}")
+def delete_site(ctx: Context) -> Result:
+    identity = auth.require(ctx)
+    site_id = ctx.params["site_id"]
+    if not teams.can_write(identity.user_id, "analytics_site", site_id):
+        return error(403, "forbidden")
+    dashboards = store.query(
+        "SELECT dashboard_id FROM analytics_event_dashboards"
+        " WHERE site_id = ? AND dashboard_id IS NOT NULL",
+        (site_id,),
+    )
+    dashboard_ids = [str(row["dashboard_id"]) for row in dashboards]
+    busy = store.one(
+        "SELECT 1 FROM analytics_event_dashboards"
+        " WHERE site_id = ? AND status IN ('pending', 'building') LIMIT 1",
+        (site_id,),
+    )
+    if busy:
+        return error(409, "site_busy_try_again")
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM analytics_event_dashboards WHERE site_id = ?", (site_id,))
+        conn.execute(
+            "DELETE FROM team_objects WHERE kind = 'analytics_site' AND object_id = ?",
+            (site_id,),
+        )
+        conn.execute("DELETE FROM analytics_sites WHERE id = ?", (site_id,))
+    for offset in range(0, len(dashboard_ids), 100):
+        batch = dashboard_ids[offset : offset + 100]
+        placeholders = ", ".join("?" for _ in batch)
+        with store.transaction() as conn:
+            conn.execute(
+                f"DELETE FROM charts WHERE dashboard_id IN ({placeholders})", batch
+            )
+            conn.execute(
+                f"DELETE FROM dashboards WHERE id IN ({placeholders})", batch
+            )
+    _delete_analytics_rows("analytics_events", "id", site_id)
+    _delete_analytics_rows("analytics_identities", "client_id", site_id)
+    return json_result({"deleted": True})
+
+
+def _delete_analytics_rows(table: str, key: str, site_id: str) -> None:
+    while True:
+        rows = store.query(
+            f"SELECT {key} FROM {table} WHERE site_id = ? LIMIT 1000", (site_id,)
+        )
+        values = [row[key] for row in rows]
+        if not values:
+            return
+        placeholders = ", ".join("?" for _ in values)
+        with store.transaction() as conn:
+            conn.execute(
+                f"DELETE FROM {table} WHERE site_id = ?"
+                f" AND {key} IN ({placeholders})",
+                (site_id, *values),
+            )
 
 
 def _cors(ctx: Context) -> dict[str, str]:
@@ -324,6 +638,64 @@ def _cors(ctx: Context) -> dict[str, str]:
         "Access-Control-Max-Age": "86400",
         "Vary": "Origin",
     }
+
+
+def _with_session_start(row: dict[str, Any]) -> list[dict[str, Any]]:
+    if not row.pop("_session_start", False) or row["event_name"] == "session_start":
+        return [row]
+    first = dict(row)
+    first["id"] = store.new_id()
+    first["event_name"] = "session_start"
+    first["engagement_ms"] = 0
+    first["props"] = ""
+    first["_kind"] = ""
+    first["_traits"] = None
+    return [first, row]
+
+
+def _schedule_dashboards(claimed: list[tuple[str, str]]) -> None:
+    if not claimed:
+        return
+
+    def build(site_id: str, event_name: str) -> None:
+        try:
+            from twohelixes.routes import dashboards
+
+            with _dashboard_build_lock:
+                dashboard_id = dashboards.build_analytics_event_dashboard(
+                    site_id, event_name
+                )
+                if dashboard_id is None:
+                    with store.transaction() as conn:
+                        conn.execute(
+                            "UPDATE analytics_event_dashboards SET status = 'failed'"
+                            " WHERE site_id = ? AND event_name = ? AND status = 'pending'",
+                            (site_id, event_name),
+                        )
+        except Exception:
+            log.exception(
+                "analytics: automatic dashboard failed for %s/%s", site_id, event_name
+            )
+            try:
+                with store.transaction() as conn:
+                    conn.execute(
+                        "UPDATE analytics_event_dashboards SET status = 'failed'"
+                        " WHERE site_id = ? AND event_name = ?"
+                        " AND status IN ('pending', 'building')",
+                        (site_id, event_name),
+                    )
+            except Exception:
+                log.debug("analytics: could not mark dashboard failed", exc_info=True)
+        finally:
+            store.close()
+
+    for site_id, event_name in claimed:
+        threading.Thread(
+            target=build,
+            args=(site_id, event_name),
+            name="analytics-dashboard",
+            daemon=True,
+        ).start()
 
 
 @router.post("/v1/collect")
@@ -347,8 +719,12 @@ def collect(ctx: Context) -> Result:
     elif isinstance(payload, list):
         events = payload
 
-    site_id = _site_id(ctx, payload if isinstance(payload, dict) else {})
+    site = _site_for_write(ctx, payload if isinstance(payload, dict) else {})
+    if site is None:
+        return Result(status=204, body=None, content_type="text/plain", headers=_cors(ctx))
     rows: list[dict[str, Any]] = []
+    session_cache: dict[str, tuple[str, float, bool]] = {}
+    attribution_cache: dict[str, dict[str, str]] = {}
     for event in events[:MAX_EVENTS_PER_BATCH]:
         if not isinstance(event, dict):
             continue
@@ -356,14 +732,22 @@ def collect(ctx: Context) -> Result:
         if isinstance(payload, dict):
             for shared in ("client_id", "anonymousId", "session_id", "user_id", "userId", "screen", "viewport", "language"):
                 merged.setdefault(shared, payload.get(shared))
-        normalised = _normalise(merged, ctx, site_id, now)
+        normalised = _normalise(merged, ctx, site, now, session_cache)
         if normalised:
-            rows.append(normalised)
+            session_id = str(normalised["session_id"])
+            attribution = {
+                key: str(normalised.get(key) or "")
+                for key in ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content")
+            }
+            if any(attribution.values()):
+                attribution_cache[session_id] = attribution
+            elif session_id in attribution_cache:
+                normalised.update(attribution_cache[session_id])
+            rows.extend(_with_session_start(normalised))
 
-    written = _store(rows)
-    return Result(status=204, body=None, content_type="text/plain", headers=_cors(ctx)) if written or not rows else Result(
-        status=204, body=None, content_type="text/plain", headers=_cors(ctx)
-    )
+    _written, claimed = _store(rows)
+    _schedule_dashboards(claimed)
+    return Result(status=204, body=None, content_type="text/plain", headers=_cors(ctx))
 
 
 @router.route("OPTIONS", "/v1/collect")
@@ -376,12 +760,17 @@ def collect_pixel(ctx: Context) -> Result:
     """GA4-Measurement-Protocol-shaped GET. Always answers with a 1x1 GIF."""
     now = time.time()
     flat = {key: values[0] for key, values in ctx.query.items() if values}
-    site_id = _site_id(ctx, flat)
-    props = {k[3:]: v for k, v in flat.items() if k.startswith("ep.") or k.startswith("epn")}
+    site = _site_for_write(ctx, flat)
+    props = {
+        (k[4:] if k.startswith("epn.") else k[3:]): v
+        for k, v in flat.items()
+        if k.startswith("ep.") or k.startswith("epn.")
+    }
     flat["props"] = props
-    row = _normalise(flat, ctx, site_id, now)
+    row = _normalise(flat, ctx, site, now, {}) if site else None
     if row:
-        _store([row])
+        _written, claimed = _store(_with_session_start(row))
+        _schedule_dashboards(claimed)
     headers = _cors(ctx)
     headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return Result(
@@ -405,9 +794,10 @@ def _window(ctx: Context) -> tuple[float, float]:
 
 @router.get("/v1/analytics/summary")
 def summary(ctx: Context) -> Result:
-    site_id = _clip(ctx.q("site_id", ""), 64)
-    if not site_id:
-        return error(400, "site_id_required")
+    site, denied = _site_for_read(ctx)
+    if denied:
+        return denied
+    site_id = str(site["id"])
     start, end = _window(ctx)
 
     totals = store.row_to_dict(
@@ -420,6 +810,27 @@ def summary(ctx: Context) -> Result:
             (site_id, start, end),
         )
     ) or {}
+    session_rows = store.query(
+        "SELECT session_id,"
+        " SUM(CASE WHEN event_name = 'page_view' THEN 1 ELSE 0 END) AS page_views,"
+        " SUM(engagement_ms) AS engagement_ms,"
+        " MAX(CASE WHEN event_name IN"
+        " ('purchase', 'sign_up', 'generate_lead', 'conversion') THEN 1 ELSE 0 END)"
+        " AS has_key_event"
+        " FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?"
+        " GROUP BY session_id",
+        (site_id, start, end),
+    )
+    engaged_sessions = 0
+    for row in store.rows_to_dicts(session_rows):
+        if (
+            int(row.get("engagement_ms") or 0) >= 10_000
+            or int(row.get("page_views") or 0) >= 2
+            or bool(row.get("has_key_event"))
+        ):
+            engaged_sessions += 1
+    sessions = int(totals.get("sessions") or 0)
+    bounces = max(0, sessions - engaged_sessions)
 
     def group(column: str, limit: int = 15) -> list[dict[str, Any]]:
         rows = store.query(
@@ -438,9 +849,12 @@ def summary(ctx: Context) -> Result:
             "totals": {
                 "events": int(totals.get("events") or 0),
                 "users": int(totals.get("users") or 0),
-                "sessions": int(totals.get("sessions") or 0),
+                "sessions": sessions,
                 "page_views": int(totals.get("page_views") or 0),
                 "engagement_ms": int(totals.get("engagement_ms") or 0),
+                "engaged_sessions": engaged_sessions,
+                "bounces": bounces,
+                "bounce_rate": (bounces / sessions) if sessions else 0.0,
             },
             "top_pages": group("page_path"),
             "top_events": group("event_name"),
@@ -455,9 +869,10 @@ def summary(ctx: Context) -> Result:
 
 @router.get("/v1/analytics/events")
 def recent_events(ctx: Context) -> Result:
-    site_id = _clip(ctx.q("site_id", ""), 64)
-    if not site_id:
-        return error(400, "site_id_required")
+    site, denied = _site_for_read(ctx)
+    if denied:
+        return denied
+    site_id = str(site["id"])
     start, end = _window(ctx)
     limit = max(1, min(ctx.q_int("limit", 100), 1000))
     rows = store.query(
@@ -475,25 +890,38 @@ def recent_events(ctx: Context) -> Result:
 @router.get("/v1/analytics/timeseries")
 def timeseries(ctx: Context) -> Result:
     """Hourly buckets, computed in Python so both backends behave identically."""
-    site_id = _clip(ctx.q("site_id", ""), 64)
-    if not site_id:
-        return error(400, "site_id_required")
+    site, denied = _site_for_read(ctx)
+    if denied:
+        return denied
+    site_id = str(site["id"])
     start, end = _window(ctx)
     bucket_seconds = 3600 if (end - start) <= 8 * 86400 else 86400
 
     rows = store.query(
-        "SELECT ts, client_id, event_name FROM analytics_events"
+        "SELECT ts, client_id, session_id, event_name, engagement_ms FROM analytics_events"
         " WHERE site_id = ? AND ts BETWEEN ? AND ?",
         (site_id, start, end),
     )
     buckets: dict[int, dict[str, Any]] = {}
     for row in store.rows_to_dicts(rows):
         slot = int(float(row["ts"]) // bucket_seconds * bucket_seconds)
-        entry = buckets.setdefault(slot, {"ts": slot, "events": 0, "page_views": 0, "_users": set()})
+        entry = buckets.setdefault(
+            slot,
+            {
+                "ts": slot,
+                "events": 0,
+                "page_views": 0,
+                "engagement_ms": 0,
+                "_users": set(),
+                "_sessions": set(),
+            },
+        )
         entry["events"] += 1
         if row["event_name"] == "page_view":
             entry["page_views"] += 1
         entry["_users"].add(row["client_id"])
+        entry["_sessions"].add(row["session_id"])
+        entry["engagement_ms"] += int(row.get("engagement_ms") or 0)
 
     series = []
     for slot in sorted(buckets):
@@ -504,6 +932,8 @@ def timeseries(ctx: Context) -> Result:
                 "events": entry["events"],
                 "page_views": entry["page_views"],
                 "users": len(entry["_users"]),
+                "sessions": len(entry["_sessions"]),
+                "engagement_ms": entry["engagement_ms"],
             }
         )
     return json_result({"site_id": site_id, "bucket_seconds": bucket_seconds, "series": series})
@@ -512,9 +942,10 @@ def timeseries(ctx: Context) -> Result:
 @router.get("/v1/analytics/export")
 def export_events(ctx: Context) -> Result:
     """Segment-shaped export, for syncing into a warehouse."""
-    site_id = _clip(ctx.q("site_id", ""), 64)
-    if not site_id:
-        return error(400, "site_id_required")
+    site, denied = _site_for_read(ctx)
+    if denied:
+        return denied
+    site_id = str(site["id"])
     start, end = _window(ctx)
     limit = max(1, min(ctx.q_int("limit", 1000), 10000))
     rows = store.query(

@@ -65,6 +65,17 @@ SEQUENTIAL_BLUE = (
     "#0d366b",
 )
 
+# The brand. One hue for the whole product, taken from the validated
+# sequential ramp rather than picked separately, so the logo, the buttons, the
+# links and the first chart series are literally the same colour. Anything that
+# is not data and not a status now uses these three and nothing else.
+#
+# The dark values step one stop lighter because #2a78d6 on #1a1a19 is 3.4:1 -
+# fine for a large mark, short of 4.5:1 for a link sitting in body copy.
+BRAND = {"light": "#2a78d6", "dark": "#3987e5"}
+BRAND_DEEP = {"light": "#1c5cab", "dark": "#2a78d6"}
+BRAND_LIGHT = {"light": "#6da7ec", "dark": "#86b6ef"}
+
 # Ordinal ramps must stay readable at the end nearest the surface.
 ORDINAL_LIGHT_START = 3  # #86b6ef, 2.06:1
 ORDINAL_DARK_END = 10  # #184f95, 2.15:1
@@ -237,6 +248,12 @@ def plotly_colorway(mode: str = "light") -> list[str]:
     return list(categorical(mode))
 
 
+def brand(mode: str = "light", tone: str = "base") -> str:
+    """The single product hue, in one of its three tones."""
+    table = {"base": BRAND, "deep": BRAND_DEEP, "light": BRAND_LIGHT}[tone]
+    return table["dark" if mode == "dark" else "light"]
+
+
 def as_css_variables(mode: str = "light") -> dict[str, str]:
     """Role-named custom properties for the frontend."""
     face = surface(mode)
@@ -248,6 +265,9 @@ def as_css_variables(mode: str = "light") -> dict[str, str]:
         "--grid": face.grid,
         "--axis": face.axis,
         "--ring": face.ring,
+        "--brand": brand(mode),
+        "--brand-deep": brand(mode, "deep"),
+        "--brand-light": brand(mode, "light"),
     }
     for index, color in enumerate(categorical(mode), start=1):
         variables[f"--series-{index}"] = color

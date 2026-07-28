@@ -1,0 +1,8 @@
+# Test and benchmark dependencies. Installed into .venv-13 only: the runtime
+# environment the server uses should not carry a browser driver.
+pytest
+playwright
+# Fixture builders for document-ingest tests; these are not server runtime
+# dependencies.
+python-docx
+reportlab

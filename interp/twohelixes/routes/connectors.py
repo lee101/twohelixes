@@ -3,19 +3,46 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from twohelixes import auth, config, router, store
 from twohelixes.connectors import registry
 from twohelixes.connectors.base import ConnectorError
+from twohelixes.ingest import (
+    DOCUMENT_SUFFIXES,
+    DocumentImportError,
+    GoogleSheetsError,
+    IngestResult,
+    fetch_google_sheet,
+    ingest_path,
+    normalise_frame,
+)
+from twohelixes.ingest.document import DOCUMENT_IMPORT_SECONDS
 
 log = logging.getLogger("twohelixes.routes.connectors")
 
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
-ALLOWED_SUFFIXES = {".csv", ".tsv", ".txt", ".json", ".ndjson", ".jsonl", ".parquet", ".xlsx", ".xls"}
+ALLOWED_SUFFIXES = {
+    ".csv", ".tsv", ".txt", ".json", ".ndjson", ".jsonl",
+    ".parquet", ".pq",
+    ".xlsx", ".xls", ".xlsm", ".xlsb", ".ods",
+    ".xml", ".dbf",
+    ".gz", ".zip",
+} | DOCUMENT_SUFFIXES
+ALLOWED_SUFFIX_MESSAGE = (
+    "Supported files: CSV, TSV, delimited or fixed-width text, JSON/JSONL, "
+    "XML, DBF, Parquet, Excel/ODS, CSV.GZ, ZIP, PDF, Word, PowerPoint, HTML, "
+    "Markdown, RTF, EPUB, and MSG."
+)
+
+# A zip is expanded in memory, so both the entry count and the expanded size
+# have to be bounded or a small upload can cost gigabytes of RAM.
+MAX_ZIP_ENTRIES = 200
 
 
 @router.get("/v1/connectors/kinds")
@@ -102,64 +129,68 @@ def upload(ctx: router.Context) -> router.Result:
 
     filename = str(body.get("filename") or "").strip()
     content = body.get("content_base64")
-    if not filename or not isinstance(content, str):
+    source_url = str(body.get("url") or "").strip()
+    if not source_url and filename.startswith("https://docs.google.com/"):
+        source_url = filename
+        filename = ""
+    if not source_url and (not filename or not isinstance(content, str)):
         return router.error(400, "filename_and_content_required")
 
-    suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_SUFFIXES:
-        return router.error(
-            415, "unsupported_type", f"{suffix or 'file'} is not supported"
-        )
-
-    try:
-        raw = base64.b64decode(content, validate=True)
-    except Exception:  # noqa: BLE001
-        return router.error(400, "invalid_base64")
+    deadline = time.monotonic() + DOCUMENT_IMPORT_SECONDS
+    if source_url:
+        try:
+            raw, downloaded_name = fetch_google_sheet(
+                source_url,
+                max_bytes=MAX_UPLOAD_BYTES,
+                deadline=deadline,
+            )
+        except GoogleSheetsError as exc:
+            return router.error(400, "google_sheet_unavailable", str(exc))
+        filename = downloaded_name
+    else:
+        suffix = Path(filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            return router.error(415, "unsupported_type", ALLOWED_SUFFIX_MESSAGE)
+        try:
+            raw = base64.b64decode(content, validate=True)
+        except Exception:  # noqa: BLE001
+            return router.error(400, "invalid_base64")
 
     if len(raw) > MAX_UPLOAD_BYTES:
         return router.error(413, "file_too_large")
 
+    suffix = Path(filename).suffix.lower()
     user_dir = config.data_dir() / "uploads" / identity.user_id
     user_dir.mkdir(parents=True, exist_ok=True)
     safe_name = "".join(c for c in Path(filename).name if c.isalnum() or c in "._-")
-    target = user_dir / (safe_name or f"upload{suffix}")
+    target = user_dir / f"{store.new_id()}-{safe_name or f'upload{suffix}'}"
     target.write_bytes(raw)
 
-    frame = _read_any(target)
-    if frame is None:
+    try:
+        result = ingest_path(target, identity=identity, deadline=deadline)
+    except DocumentImportError as exc:
+        target.unlink(missing_ok=True)
+        return router.error(400, "document_import_failed", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not ingest %s: %s", filename, exc)
         target.unlink(missing_ok=True)
         return router.error(400, "unreadable_file")
 
-    parquet_path = target.with_suffix(".parquet")
     try:
-        frame.to_parquet(parquet_path)
-        storage = str(parquet_path)
-    except Exception:  # noqa: BLE001 - pyarrow may be absent
-        storage = str(target)
-
-    dataset_id = store.new_id()
-    store.execute(
-        "INSERT INTO datasets (id, user_id, source_id, name, description, columns, "
-        "row_count, storage, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            dataset_id,
-            identity.user_id,
-            None,
-            Path(filename).stem,
-            f"Uploaded {filename}",
-            store.dump_json([str(c) for c in frame.columns]),
-            int(len(frame)),
-            storage,
-            time.time(),
-        ),
-    )
-
-    # A per-user folder source makes every upload queryable with SQL through
-    # DuckDB, not just chartable.
-    _ensure_files_source(identity.user_id, user_dir)
+        dataset_id = _register_ingest(
+            identity,
+            result,
+            filename,
+            target,
+            description=f"Uploaded {filename}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("could not persist normalized upload")
+        return router.error(500, "normalization_failed", str(exc))
 
     from twohelixes.interpreter import tools
 
+    frame = result.frame
     return router.json_result(
         {
             "dataset_id": dataset_id,
@@ -168,30 +199,123 @@ def upload(ctx: router.Context) -> router.Result:
             "columns": [str(c) for c in frame.columns],
             "profile": tools.profile(frame),
             "preview": frame.head(20).to_dict("records"),
+            "shape_report": result.report.to_dict(),
+            "dataset_kind": result.report.dataset_kind,
         },
         status=201,
     )
 
 
 def _read_any(path: Path) -> Any:
+    """Read a table out of whatever was uploaded, trying hard before giving up.
+
+    A rejected upload is the earliest and most annoying way to lose someone, so
+    the readers below are deliberately forgiving: an unknown suffix is still
+    attempted as delimited text, and a failed CSV parse is retried with the
+    delimiter sniffed and then with bad lines skipped.
+    """
+    suffix = path.suffix.lower()
+
+    try:
+        if suffix == ".zip":
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()[:MAX_ZIP_ENTRIES]
+                if sum(item.file_size for item in entries) > MAX_UPLOAD_BYTES:
+                    return None
+        return ingest_path(path, allow_agent=False).frame
+    except Exception as exc:  # noqa: BLE001
+        log.warning("structured ingest failed for %s: %s", path.name, exc)
+
+    if suffix == ".gz":
+        return _read_compressed(path)
+    if suffix == ".zip":
+        return _read_zip(path)
+    return _read_table(path, suffix)
+
+
+def _read_table(path: Any, suffix: str, compression: str | None = None) -> Any:
     import pandas as pd
 
-    suffix = path.suffix.lower()
+    kwargs: dict[str, Any] = {} if compression is None else {"compression": compression}
     try:
-        if suffix in (".csv", ".txt"):
-            return pd.read_csv(path)
-        if suffix == ".tsv":
-            return pd.read_csv(path, sep="\t")
-        if suffix == ".parquet":
+        if suffix in (".parquet", ".pq"):
             return pd.read_parquet(path)
-        if suffix in (".json",):
-            return pd.read_json(path)
-        if suffix in (".ndjson", ".jsonl"):
-            return pd.read_json(path, lines=True)
-        if suffix in (".xlsx", ".xls"):
+        if suffix in (".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"):
             return pd.read_excel(path)
+        if suffix == ".json":
+            return pd.read_json(path, **kwargs)
+        if suffix in (".ndjson", ".jsonl"):
+            return pd.read_json(path, lines=True, **kwargs)
+        if suffix == ".tsv":
+            return pd.read_csv(path, sep="\t", **kwargs)
+        frame = pd.read_csv(path, **kwargs)
+        # A semicolon- or pipe-delimited file parses "successfully" as one
+        # column whose name is the whole header row. That charts as nothing, so
+        # treat it as a failed parse and let the sniffing retry below run.
+        if len(frame.columns) > 1 or not _looks_delimited(str(frame.columns[0])):
+            return frame
     except Exception as exc:  # noqa: BLE001
-        log.warning("could not read %s: %s", path.name, exc)
+        log.warning("could not read %s as %s: %s", getattr(path, "name", path), suffix, exc)
+
+    if suffix in (".parquet", ".pq", ".xlsx", ".xls", ".xlsm", ".xlsb", ".ods"):
+        return None
+
+    # Text that pandas could not parse with the default comma: let it sniff the
+    # delimiter, and failing that keep the rows that do parse. A file with one
+    # ragged line is still worth charting.
+    for retry in ({"sep": None, "engine": "python"}, {"on_bad_lines": "skip"}):
+        try:
+            if hasattr(path, "seek"):
+                path.seek(0)
+            return pd.read_csv(path, **retry, **kwargs)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _looks_delimited(header: str) -> bool:
+    return any(sep in header for sep in (";", "|", "\t"))
+
+
+def _read_compressed(path: Path) -> Any:
+    """A .gz wrapping one of the text formats; the inner suffix decides."""
+    inner = Path(path.stem).suffix.lower() or ".csv"
+    return _read_table(path, inner, compression="gzip")
+
+
+def _read_zip(path: Path) -> Any:
+    """The first readable tabular entry in the archive.
+
+    Entries are read through the zip object rather than extracted, so a member
+    path like `../../etc/passwd` never touches the filesystem.
+    """
+    import zipfile
+
+    try:
+        archive = zipfile.ZipFile(path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not open %s: %s", path.name, exc)
+        return None
+
+    with archive:
+        entries = [
+            info
+            for info in archive.infolist()[:MAX_ZIP_ENTRIES]
+            if not info.is_dir() and not Path(info.filename).name.startswith(".")
+        ]
+        total = sum(info.file_size for info in entries)
+        if total > MAX_UPLOAD_BYTES:
+            log.warning("%s expands to %d bytes; refusing", path.name, total)
+            return None
+
+        for info in sorted(entries, key=lambda i: -i.file_size):
+            suffix = Path(info.filename).suffix.lower()
+            if suffix not in ALLOWED_SUFFIXES or suffix in (".zip", ".gz"):
+                continue
+            with archive.open(info) as handle:
+                frame = _read_table(io.BytesIO(handle.read()), suffix)
+            if frame is not None:
+                return frame
     return None
 
 
@@ -230,12 +354,27 @@ def presign_upload(ctx: router.Context) -> router.Result:
     if not isinstance(body, dict):
         return router.error(400, "invalid_body")
 
+    filename = str(body.get("filename") or "")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        return router.error(415, "unsupported_type", ALLOWED_SUFFIX_MESSAGE)
+    try:
+        size = int(body.get("size") or 0)
+    except (TypeError, ValueError):
+        return router.error(400, "upload_rejected", "size must be an integer")
+    if size <= 0 or size > MAX_UPLOAD_BYTES:
+        return router.error(
+            413,
+            "file_too_large",
+            f"size must be between 1 and {MAX_UPLOAD_BYTES} bytes",
+        )
+
     try:
         ticket = r2.upload_ticket(
             identity.user_id,
-            str(body.get("filename") or ""),
-            str(body.get("content_type") or ""),
-            int(body.get("size") or 0),
+            filename,
+            "application/octet-stream",
+            size,
         )
     except r2.R2Error as exc:
         return router.error(400, "upload_rejected", str(exc))
@@ -260,21 +399,46 @@ def complete_upload(ctx: router.Context) -> router.Result:
         raw = r2.fetch(key)
     except Exception as exc:  # noqa: BLE001
         return router.error(400, "fetch_failed", str(exc))
+    if len(raw) > MAX_UPLOAD_BYTES:
+        return router.error(413, "file_too_large")
 
     user_dir = config.data_dir() / "uploads" / identity.user_id
     user_dir.mkdir(parents=True, exist_ok=True)
     name = Path(key).name
+    suffix = Path(name).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        return router.error(415, "unsupported_type", ALLOWED_SUFFIX_MESSAGE)
     target = user_dir / name
     target.write_bytes(raw)
 
-    frame = _read_any(target)
-    if frame is None:
+    try:
+        result = ingest_path(
+            target,
+            identity=identity,
+            deadline=time.monotonic() + DOCUMENT_IMPORT_SECONDS,
+        )
+    except DocumentImportError as exc:
+        target.unlink(missing_ok=True)
+        return router.error(400, "document_import_failed", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not ingest direct upload %s: %s", name, exc)
         target.unlink(missing_ok=True)
         return router.error(400, "unreadable_file")
 
-    dataset_id = _register_dataset(identity, frame, name, target)
+    try:
+        dataset_id = _register_ingest(
+            identity,
+            result,
+            name,
+            target,
+            description=f"Uploaded {name}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("could not persist normalized direct upload")
+        return router.error(500, "normalization_failed", str(exc))
     from twohelixes.interpreter import tools
 
+    frame = result.frame
     return router.json_result(
         {
             "dataset_id": dataset_id,
@@ -284,37 +448,48 @@ def complete_upload(ctx: router.Context) -> router.Result:
             "bytes": meta.get("size", len(raw)),
             "profile": tools.profile(frame),
             "preview": frame.head(20).to_dict("records"),
+            "shape_report": result.report.to_dict(),
+            "dataset_kind": result.report.dataset_kind,
         },
         status=201,
     )
 
 
-def _register_dataset(identity: Any, frame: Any, name: str, target: Path) -> str:
-    """Store a dataframe as Parquet where possible and record it."""
-    parquet_path = target.with_suffix(".parquet")
-    try:
-        frame.to_parquet(parquet_path)
-        storage = str(parquet_path)
-    except Exception:  # noqa: BLE001 - pyarrow may be absent
-        storage = str(target)
-
+def _register_ingest(
+    identity: Any,
+    result: IngestResult,
+    name: str,
+    raw_path: Path,
+    *,
+    description: str,
+) -> str:
+    """Write normalized Parquet before opening the short metadata transaction."""
     dataset_id = store.new_id()
-    store.execute(
-        "INSERT INTO datasets (id, user_id, source_id, name, description, columns, "
-        "row_count, storage, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            dataset_id,
-            identity.user_id,
-            None,
-            Path(name).stem,
-            f"Uploaded {name}",
-            store.dump_json([str(c) for c in frame.columns]),
-            int(len(frame)),
-            storage,
-            time.time(),
-        ),
-    )
-    _ensure_files_source(identity.user_id, target.parent)
+    parquet_path = raw_path.parent / f"{dataset_id}.parquet"
+    result.frame.to_parquet(parquet_path, index=False)
+    now = time.time()
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO datasets (id, user_id, source_id, folder_id, name, "
+            "description, columns, row_count, storage, raw_storage, shape_report, "
+            "sheet_name, created_at, updated_at) "
+            "VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                dataset_id,
+                identity.user_id,
+                Path(name).stem,
+                description,
+                store.dump_json([str(column) for column in result.frame.columns]),
+                int(len(result.frame)),
+                str(parquet_path),
+                str(raw_path),
+                store.dump_json(result.report.to_dict()),
+                result.report.sheet,
+                now,
+                now,
+            ),
+        )
+    _ensure_files_source(identity.user_id, raw_path.parent)
     return dataset_id
 
 
@@ -348,26 +523,16 @@ def attach_sample(ctx: router.Context) -> router.Result:
     sample = samples.BY_KEY[key]
     user_dir = config.data_dir() / "uploads" / identity.user_id
     user_dir.mkdir(parents=True, exist_ok=True)
-    target = user_dir / f"{key}.parquet"
-    frame.to_parquet(target)
-
-    dataset_id = store.new_id()
-    store.execute(
-        "INSERT INTO datasets (id, user_id, source_id, name, description, columns, "
-        "row_count, storage, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            dataset_id,
-            identity.user_id,
-            None,
-            sample.name,
-            sample.description,
-            store.dump_json([str(c) for c in frame.columns]),
-            int(len(frame)),
-            str(target),
-            time.time(),
-        ),
+    target = user_dir / f"{store.new_id()}-{key}.source.parquet"
+    frame.to_parquet(target, index=False)
+    result = normalise_frame(frame, sheet="Sheet1")
+    dataset_id = _register_ingest(
+        identity,
+        result,
+        sample.name,
+        target,
+        description=sample.description,
     )
-    _ensure_files_source(identity.user_id, user_dir)
 
     return router.json_result(
         {
@@ -376,6 +541,7 @@ def attach_sample(ctx: router.Context) -> router.Result:
             "rows": int(len(frame)),
             "columns": [str(c) for c in frame.columns],
             "questions": sample.questions,
+            "shape_report": result.report.to_dict(),
         },
         status=201,
     )
@@ -385,29 +551,46 @@ def attach_sample(ctx: router.Context) -> router.Result:
 def list_datasets(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
     rows = store.query(
-        "SELECT id, name, description, columns, row_count, created_at FROM datasets "
+        "SELECT id, name, description, folder_id, columns, row_count, shape_report, "
+        "created_at, updated_at FROM datasets "
         "WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
         (identity.user_id,),
     )
     out = store.rows_to_dicts(rows)
     for entry in out:
         entry["columns"] = store.load_json(entry.get("columns"), [])
+        entry["shape_report"] = store.load_json(entry.get("shape_report"), None)
     return router.json_result({"datasets": out})
 
 
 @router.delete("/v1/datasets/{dataset_id}")
 def delete_dataset(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    from twohelixes.routes import teams
+
+    teams.ensure_schema()
     row = store.one(
-        "SELECT storage FROM datasets WHERE id = ? AND user_id = ?",
+        "SELECT storage, raw_storage FROM datasets WHERE id = ? AND user_id = ?",
         (ctx.params["dataset_id"], identity.user_id),
     )
     if row is None:
         return router.error(404, "not_found")
 
-    store.execute("DELETE FROM datasets WHERE id = ?", (ctx.params["dataset_id"],))
-    try:
-        Path(row["storage"]).unlink(missing_ok=True)
-    except OSError:
-        pass
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM datasets WHERE id = ?", (ctx.params["dataset_id"],))
+        conn.execute(
+            "DELETE FROM team_objects WHERE kind = 'dataset' AND object_id = ?",
+            (ctx.params["dataset_id"],),
+        )
+        conn.execute(
+            "UPDATE shares SET revoked = 1 WHERE kind = 'dataset' AND object_id = ?",
+            (ctx.params["dataset_id"],),
+        )
+    for location in (row["storage"], row["raw_storage"]):
+        if not location:
+            continue
+        try:
+            Path(location).unlink(missing_ok=True)
+        except OSError:
+            pass
     return router.json_result({"deleted": True})

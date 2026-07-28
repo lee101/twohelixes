@@ -31,6 +31,11 @@ GRID_WIDTH = 1
 
 # Direct-label every series only while the chart stays readable.
 MAX_DIRECT_LABELS = 4
+# Height of the horizontal legend row that sits above the plot area.
+LEGEND_ROW = 24
+# Bottom margin that fits tick labels, the standoff and an axis title.
+X_TITLE_ROW = 62
+
 # A legend appears from two series up; one series is named by the title.
 MIN_SERIES_FOR_LEGEND = 2
 
@@ -112,8 +117,15 @@ def apply(spec: dict[str, Any], *, mode: str = "light", chart_type: str = "") ->
 
     title = _extract_title(figure["layout"])
     layout = base_layout(mode, title)
-    layout.update(
-        {k: v for k, v in figure["layout"].items() if k not in ("colorway", "template")}
+    # Merge, do not replace. A builder that sets `{"yaxis": {"title": ...}}` -
+    # which is nearly all of them - used to overwrite the whole styled axis,
+    # taking the grid colour, the tick font, the zero line and `automargin`
+    # with it. Every chart in the product was rendering with Plotly's default
+    # axis styling and clipping its own category labels, because the axis the
+    # design system built was thrown away by the line that added a title.
+    _merge_into(
+        layout,
+        {k: v for k, v in figure["layout"].items() if k not in ("colorway", "template")},
     )
     layout["title"] = base_layout(mode, title)["title"]
 
@@ -126,6 +138,7 @@ def apply(spec: dict[str, Any], *, mode: str = "light", chart_type: str = "") ->
     _configure_hover(traces, layout, chart_type)
     _configure_legend(traces, layout)
     _configure_axes(traces, layout, mode)
+    _configure_geo(traces, layout, mode)
     _add_direct_labels(traces, mode)
 
     figure["data"] = traces
@@ -147,6 +160,18 @@ def display_config() -> dict[str, Any]:
         ],
         "toImageButtonOptions": {"format": "svg", "scale": 2},
     }
+
+
+def _merge_into(base: dict[str, Any], incoming: dict[str, Any]) -> None:
+    """Recursive dict merge; the incoming value wins at the leaves."""
+    for key, value in incoming.items():
+        current = base.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged = dict(current)
+            _merge_into(merged, value)
+            base[key] = merged
+        else:
+            base[key] = value
 
 
 def _extract_title(layout: dict[str, Any]) -> str:
@@ -253,7 +278,7 @@ def _assign_colors(traces: list[dict[str, Any]], mode: str, chart_type: str) -> 
             marker = dict(trace.get("marker") or {})
             marker["color"] = color
             trace["marker"] = marker
-        elif kind in ("pie",):
+        elif kind in ("pie", "treemap", "sunburst"):
             marker = dict(trace.get("marker") or {})
             marker.setdefault(
                 "colors",
@@ -263,12 +288,15 @@ def _assign_colors(traces: list[dict[str, Any]], mode: str, chart_type: str) -> 
                 ],
             )
             trace["marker"] = marker
+        elif kind == "choropleth":
+            trace.setdefault("colorscale", _plotly_scale(palette.sequential(9, mode)))
         else:
             line = dict(trace.get("line") or {})
             line["color"] = color
             trace["line"] = line
             marker = dict(trace.get("marker") or {})
-            marker["color"] = color
+            if not isinstance(marker.get("color"), (list, tuple)):
+                marker["color"] = color
             trace["marker"] = marker
 
 
@@ -328,9 +356,62 @@ def _style_marks(traces: list[dict[str, Any]], mode: str, chart_type: str) -> No
             trace.setdefault("textposition", "outside")
             trace.setdefault("sort", True)
 
+        elif kind in ("treemap", "sunburst"):
+            marker = dict(trace.get("marker") or {})
+            marker["line"] = {"color": face.background, "width": SPACER}
+            trace["marker"] = marker
+
+        elif kind == "scattergeo":
+            marker = dict(trace.get("marker") or {})
+            marker.setdefault("size", 10)
+            marker["line"] = {"color": face.background, "width": SPACER}
+            if isinstance(marker.get("color"), (list, tuple)):
+                marker.setdefault("colorscale", _plotly_scale(palette.sequential(9, mode)))
+            trace["marker"] = marker
+
+        elif kind == "choropleth":
+            trace.setdefault("colorscale", _plotly_scale(palette.sequential(9, mode)))
+            trace.setdefault("showscale", True)
+            trace.setdefault("marker", {"line": {"color": face.background, "width": 0.5}})
+
         elif kind in ("heatmap", "densitymapbox"):
             trace.setdefault("colorscale", _plotly_scale(palette.sequential(9, mode)))
             trace.setdefault("showscale", True)
+
+        elif kind == "table":
+            # Plotly's table defaults to white cells with grey text, so in dark
+            # mode the table form rendered as a white slab of unreadable type -
+            # the one chart type whose whole job is being read.
+            header = dict(trace.get("header") or {})
+            header["fill"] = {"color": face.grid}
+            header["font"] = {
+                "family": FONT_STACK, "size": 12, "color": face.text_primary,
+            }
+            header["align"] = "left"
+            header["line"] = {"color": face.grid, "width": 1}
+            trace["header"] = header
+
+            cells = dict(trace.get("cells") or {})
+            cells["fill"] = {"color": face.background}
+            cells["font"] = {
+                "family": FONT_STACK, "size": 12, "color": face.text_secondary,
+            }
+            cells["align"] = "left"
+            cells["height"] = 26
+            cells["line"] = {"color": face.grid, "width": 1}
+            trace["cells"] = cells
+
+        elif kind == "candlestick":
+            # Rising and falling are a status, not a series, so they take the
+            # status colours rather than palette slots. The range slider is a
+            # second chart in the same box on a 340px card.
+            trace.setdefault(
+                "increasing", {"line": {"color": palette.STATUS["good"][mode]}}
+            )
+            trace.setdefault(
+                "decreasing", {"line": {"color": palette.STATUS["critical"][mode]}}
+            )
+            trace["xaxis"] = trace.get("xaxis") or "x"
 
     if stacked:
         for trace in traces:
@@ -373,8 +454,17 @@ def _configure_hover(
     else:
         layout["hovermode"] = "closest"
         for trace in traces:
-            if str(trace.get("type")) == "pie":
+            kind = str(trace.get("type"))
+            if kind == "pie":
                 trace.setdefault("hovertemplate", "%{label}: %{value}<extra></extra>")
+            elif kind in ("treemap", "sunburst"):
+                trace.setdefault("hovertemplate", "%{label}: %{value}<extra></extra>")
+            elif kind == "scattergeo":
+                trace.setdefault(
+                    "hovertemplate", "%{lat}, %{lon}<extra>%{fullData.name}</extra>"
+                )
+            elif kind == "choropleth":
+                trace.setdefault("hovertemplate", "%{location}: %{z}<extra></extra>")
             else:
                 trace.setdefault(
                     "hovertemplate", "%{x}: %{y}<extra>%{fullData.name}</extra>"
@@ -386,6 +476,15 @@ def _configure_legend(traces: list[dict[str, Any]], layout: dict[str, Any]) -> N
     layout["showlegend"] = len(named) >= MIN_SERIES_FOR_LEGEND
     if len(traces) == 1:
         traces[0].setdefault("showlegend", False)
+
+    # The legend is anchored just above the plot, in the same band as the
+    # title, and Plotly does not grow the margin to fit it. At the default 56
+    # the legend row sat on the title's descenders on every multi-series chart
+    # in the benchmark. Reserve the row.
+    if layout["showlegend"]:
+        margin = dict(layout.get("margin") or {})
+        margin["t"] = max(int(margin.get("t") or 0), 56 if layout.get("title") else 24) + LEGEND_ROW
+        layout["margin"] = margin
 
 
 def _configure_axes(
@@ -400,6 +499,11 @@ def _configure_axes(
     for key in ("yaxis2", "yaxis3", "xaxis2"):
         layout.pop(key, None)
 
+    if any(str(t.get("type")) == "candlestick" for t in traces):
+        axis = dict(layout.get("xaxis") or {})
+        axis["rangeslider"] = {"visible": False}
+        layout["xaxis"] = axis
+
     x_values = traces[0].get("x") if traces else None
     if _looks_temporal(x_values):
         axis = dict(layout.get("xaxis") or {})
@@ -413,6 +517,24 @@ def _configure_axes(
     yaxis.setdefault("rangemode", "tozero")
     layout["yaxis"] = yaxis
 
+    # Tick labels, the standoff and the axis title do not fit in 48px, and
+    # automargin does not grow a margin that was set explicitly - so the axis
+    # title sat flush on the bottom edge with its descenders cut off at every
+    # size in the benchmark. Reserve the row only when there is a title to put
+    # in it; an unlabelled axis should not pay for the space.
+    margin = dict(layout.get("margin") or {})
+    margin["b"] = X_TITLE_ROW if _axis_title(layout.get("xaxis")) else 44
+    layout["margin"] = margin
+
+
+def _axis_title(axis: Any) -> str:
+    if not isinstance(axis, dict):
+        return ""
+    title = axis.get("title")
+    if isinstance(title, dict):
+        return str(title.get("text") or "")
+    return str(title or "")
+
 
 def _looks_temporal(values: Any) -> bool:
     if not values:
@@ -422,6 +544,25 @@ def _looks_temporal(values: Any) -> bool:
         return False
     text = str(sample)
     return len(text) >= 8 and text[:4].isdigit() and text[4] in "-/"
+
+
+def _configure_geo(
+    traces: list[dict[str, Any]], layout: dict[str, Any], mode: str
+) -> None:
+    if not any(str(trace.get("type")) in ("scattergeo", "choropleth") for trace in traces):
+        return
+    face = palette.surface(mode)
+    geo = dict(layout.get("geo") or {})
+    geo.setdefault("bgcolor", face.background)
+    geo.setdefault("showland", True)
+    geo.setdefault("landcolor", face.grid)
+    geo.setdefault("showocean", True)
+    geo.setdefault("oceancolor", face.background)
+    geo.setdefault("showcoastlines", True)
+    geo.setdefault("coastlinecolor", face.axis)
+    geo.setdefault("showframe", False)
+    geo.setdefault("fitbounds", "locations")
+    layout["geo"] = geo
 
 
 def _add_direct_labels(traces: list[dict[str, Any]], mode: str) -> None:

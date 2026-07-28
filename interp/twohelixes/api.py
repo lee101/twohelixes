@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 import traceback
 
 log = logging.getLogger("twohelixes.api")
@@ -43,6 +44,24 @@ def _widen_dlopen() -> None:
         sys.setdlopenflags(flags)
     except (ValueError, OSError):
         log.warning("could not widen dlopen flags; native extensions may fail")
+
+
+def _warm_examples() -> None:
+    try:
+        from twohelixes.datasets import examples
+
+        examples.warm()
+    except Exception:  # noqa: BLE001 - a cold cache is not a boot failure
+        log.exception("could not warm dataset examples")
+
+    try:
+        # 16 MB of int8 weights read from disk. Loading it here means the
+        # first question that needs a column resolved does not pay for it.
+        from twohelixes.pipeline import semantic
+
+        semantic.warm()
+    except Exception:  # noqa: BLE001 - the classifier is optional by design
+        log.exception("could not warm the embedding model")
 
 
 def boot() -> str:
@@ -74,6 +93,22 @@ def boot() -> str:
     from twohelixes.routes import showcase
 
     showcase.warm()
+
+    # The dataset examples read Parquet and draw nineteen charts, which is a
+    # second and a half a worker - too long to put in front of the first
+    # request to /healthz, and unnecessary because every page renders lazily
+    # anyway. The thread only front-runs the first visitor.
+    threading.Thread(target=_warm_examples, name="warm-examples", daemon=True).start()
+
+    # Orphan reaping starts with the worker, not with the first session: the
+    # instances that cost us most are the ones nobody remembers starting, and
+    # a box that never serves another notebook is exactly where one hides.
+    # Idempotent across workers - it only ever destroys what no meter is paying
+    # for, so several of them racing agree.
+    from twohelixes import machines
+
+    if machines.enabled_ids() - {"local"}:
+        machines.start_orphan_reaper()
 
     _BOOTED = True
     log.info("twohelixes worker booted")

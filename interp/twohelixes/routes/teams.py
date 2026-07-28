@@ -27,7 +27,8 @@ ROLES = ("owner", "admin", "member", "viewer")
 # Rank matters: a check is "at least this role", so the order is the policy.
 ROLE_RANK = {role: index for index, role in enumerate(reversed(ROLES))}
 
-SHAREABLE = ("dashboard", "chart", "query")
+SHAREABLE = ("dashboard", "chart", "query", "dataset")
+TEAM_SHAREABLE = (*SHAREABLE, "analytics_site")
 MAX_TEAMS_PER_USER = 20
 
 SCHEMA = """
@@ -86,22 +87,29 @@ CREATE TABLE IF NOT EXISTS team_objects (
 CREATE INDEX IF NOT EXISTS team_objects_team ON team_objects(team_id);
 """
 
-_ready = False
+_ready_for = ""
 
 
 def ensure_schema() -> None:
-    global _ready
-    if _ready:
+    global _ready_for
+    target = store.dsn() or str(config.data_dir() / "twohelixes.db")
+    if _ready_for == target:
         return
     store.connection().executescript(SCHEMA)
-    _ready = True
+    _ready_for = target
 
 
 # --------------------------------------------------------------------------
 # Access control - the only place that decides
 # --------------------------------------------------------------------------
 
-OWNER_COLUMN = {"dashboard": "dashboards", "chart": "charts", "query": "saved_queries"}
+OWNER_COLUMN = {
+    "dashboard": "dashboards",
+    "chart": "charts",
+    "query": "saved_queries",
+    "dataset": "datasets",
+    "analytics_site": "analytics_sites",
+}
 
 
 def _owner_of(kind: str, object_id: str) -> str | None:
@@ -178,6 +186,66 @@ def resolve_share(token: str) -> dict[str, Any] | None:
     if expires and float(expires) < time.time():
         return None
     return share
+
+
+def mint_share(
+    user_id: str,
+    kind: str,
+    object_id: str,
+    *,
+    expires_days: int | None = None,
+    label: str = "",
+) -> dict[str, Any]:
+    """Mint a link through the shared access-control primitive."""
+    ensure_schema()
+    if kind not in SHAREABLE:
+        raise ValueError("unshareable_kind")
+    if not can_write(user_id, kind, object_id):
+        raise PermissionError("not_yours_to_share")
+    expires_at = (
+        time.time() + int(expires_days) * 86400
+        if expires_days not in (None, 0)
+        else None
+    )
+    token = secrets.token_urlsafe(24)
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO shares (token, kind, object_id, owner_id, created_at, "
+            "expires_at, label) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                token,
+                kind,
+                object_id,
+                user_id,
+                time.time(),
+                expires_at,
+                label[:120] or None,
+            ),
+        )
+    return {
+        "token": token,
+        "url": f"{config.site_url()}/share/{token}",
+        "expires_at": expires_at,
+    }
+
+
+def revoke_object_shares(user_id: str, kind: str, object_id: str) -> int:
+    """Revoke all live links for one object while preserving their audit rows."""
+    ensure_schema()
+    if not can_write(user_id, kind, object_id):
+        raise PermissionError("not_yours")
+    row = store.one(
+        "SELECT COUNT(*) AS n FROM shares "
+        "WHERE kind = ? AND object_id = ? AND revoked = 0",
+        (kind, object_id),
+    )
+    count = int(row["n"]) if row else 0
+    with store.transaction() as conn:
+        conn.execute(
+            "UPDATE shares SET revoked = 1 WHERE kind = ? AND object_id = ?",
+            (kind, object_id),
+        )
+    return count
 
 
 # --------------------------------------------------------------------------
@@ -349,14 +417,20 @@ def share_with_team(ctx: router.Context) -> router.Result:
 
     kind = str(ctx.field("kind") or "")
     object_id = str(ctx.field("object_id") or "")
-    if kind not in SHAREABLE:
+    if kind not in TEAM_SHAREABLE:
         return router.error(400, "unshareable_kind")
     if _owner_of(kind, object_id) != identity.user_id:
         return router.error(403, "not_yours_to_share")
 
+    # `ON CONFLICT ... DO UPDATE` rather than SQLite's `INSERT OR REPLACE`:
+    # the latter is not SQL Postgres understands, and this was the only
+    # non-portable statement in the tree. Re-sharing an object moves it to the
+    # new team rather than failing, which is what the endpoint promises.
     store.execute(
-        "INSERT OR REPLACE INTO team_objects (team_id, kind, object_id, added_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO team_objects (team_id, kind, object_id, added_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (kind, object_id) DO UPDATE SET "
+        "team_id = excluded.team_id, added_at = excluded.added_at",
         (team_id, kind, object_id, time.time()),
     )
     return router.json_result({"shared": True})
@@ -381,34 +455,19 @@ def create_share(ctx: router.Context) -> router.Result:
         return router.error(403, "not_yours_to_share")
 
     expires_days = ctx.field("expires_days")
-    expires_at = (
-        time.time() + int(expires_days) * 86400
-        if expires_days not in (None, "", 0)
-        else None
-    )
-
-    token = secrets.token_urlsafe(24)
-    store.execute(
-        "INSERT INTO shares (token, kind, object_id, owner_id, created_at, "
-        "expires_at, label) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            token,
+    try:
+        share = mint_share(
+            identity.user_id,
             kind,
             object_id,
-            identity.user_id,
-            time.time(),
-            expires_at,
-            str(ctx.field("label") or "")[:120] or None,
-        ),
-    )
-    return router.json_result(
-        {
-            "token": token,
-            "url": f"{config.site_url()}/share/{token}",
-            "expires_at": expires_at,
-        },
-        status=201,
-    )
+            expires_days=(
+                int(expires_days) if expires_days not in (None, "", 0) else None
+            ),
+            label=str(ctx.field("label") or ""),
+        )
+    except (TypeError, ValueError):
+        return router.error(400, "invalid_expiry")
+    return router.json_result(share, status=201)
 
 
 @router.get("/v1/shares")
@@ -464,11 +523,20 @@ def read_share(ctx: router.Context) -> router.Result:
         return router.error(404, "object_gone")
 
     data = store.row_to_dict(row) or {}
+    dataset_storage = data.get("storage") if kind == "dataset" else None
     # Never leak who owns it, what it was asked of, or which source it came
     # from: a share link grants the rendered object and nothing else.
-    for secret in ("user_id", "source_id", "query", "sql"):
+    for secret in ("user_id", "source_id", "query", "sql", "storage", "raw_storage"):
         data.pop(secret, None)
-    for field in ("spec", "graph_args", "trace", "layout", "params"):
+    for field in (
+        "spec",
+        "graph_args",
+        "trace",
+        "layout",
+        "params",
+        "columns",
+        "shape_report",
+    ):
         if field in data:
             data[field] = store.load_json(data[field], {} if field != "trace" else [])
 
@@ -477,10 +545,29 @@ def read_share(ctx: router.Context) -> router.Result:
             "SELECT id, title, spec, graph_args FROM charts WHERE dashboard_id = ?",
             (object_id,),
         )
+        from twohelixes.routes import dashboards as dashboard_routes
+
+        mode = ctx.q("mode", "light") or "light"
         tiles = store.rows_to_dicts(charts)
         for tile in tiles:
-            tile["spec"] = store.load_json(tile.get("spec"), {})
+            # Restyled for whoever opened the link, not for whoever saved it.
+            tile["spec"] = dashboard_routes._themed(
+                store.load_json(tile.get("spec"), {}), mode
+            )
             tile["graph_args"] = store.load_json(tile.get("graph_args"), {})
         data["charts"] = tiles
+    elif kind == "dataset" and dataset_storage:
+        try:
+            import pandas as pd
+
+            frame = pd.read_parquet(dataset_storage)
+            preview = frame.head(50).astype(object).where(pd.notna(frame.head(50)), None)
+            data["schema"] = [
+                {"name": str(column), "dtype": str(frame[column].dtype)}
+                for column in frame.columns
+            ]
+            data["rows"] = preview.to_dict("records")
+        except Exception as exc:  # noqa: BLE001
+            data["preview_error"] = str(exc)
 
     return router.json_result({"kind": kind, "object": data})

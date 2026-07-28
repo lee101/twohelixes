@@ -7,6 +7,7 @@ hatch, and one that does not run is worse than no export at all.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from twohelixes.datasets import samples
-from twohelixes.notebooks import compute, marimo_export
+from twohelixes.notebooks import compute, ipynb_export, marimo_export
 
 NB_PYTHON = Path(__file__).resolve().parents[1] / ".venv-nb" / "bin" / "python"
 
@@ -140,6 +141,151 @@ def test_sample_notebooks_all_export():
             )
         )
         ast.parse(source)
+
+
+# -- .ipynb ---------------------------------------------------------------
+#
+# The format most people already have open. Both exports come off the same
+# NotebookSpec, so these tests are about the document being well formed and
+# the code in it running - not about the content, which the marimo tests
+# above already cover.
+
+
+def test_ipynb_is_valid_notebook_json():
+    document = json.loads(ipynb_export.build(_spec(inline_rows=[{"a": 1}])))
+    assert document["nbformat"] == 4
+    assert document["metadata"]["kernelspec"]["name"] == "python3"
+    assert {c["cell_type"] for c in document["cells"]} <= {"code", "markdown"}
+    for cell in document["cells"]:
+        assert isinstance(cell["source"], list)
+        if cell["cell_type"] == "code":
+            assert cell["outputs"] == [] and cell["execution_count"] is None
+
+
+def test_ipynb_code_cells_are_valid_python():
+    cells = ipynb_export.code_cells(ipynb_export.build(_spec(inline_rows=[{"a": 1}])))
+    assert cells
+    for cell in cells:
+        ast.parse(cell)
+
+
+def test_ipynb_escapes_a_hostile_title():
+    """A title is user text; it must not be able to close a string or a cell."""
+    document = ipynb_export.build(
+        _spec(inline_rows=[{"a": 1}], title='""" + __import__("os").system("x") + """')
+    )
+    json.loads(document)
+    for cell in ipynb_export.code_cells(document):
+        ast.parse(cell)
+
+
+def test_ipynb_runs_end_to_end():
+    """The claim on the button: run the cells in order and a chart comes out.
+
+    Executed here rather than shelled out to nbclient, because the point is
+    that the notebook needs only what our own runner has - pandas and plotly.
+    """
+    plotly = pytest.importorskip("plotly")
+    document = ipynb_export.build(
+        marimo_export.NotebookSpec(
+            title="Revenue by region",
+            question="how did revenue trend by region?",
+            transform_code=(
+                'result = df.groupby("region", as_index=False)["revenue"].sum()'
+            ),
+            chart_config={
+                "chart_type": "bar",
+                "x": "region",
+                "y": "revenue",
+                "title": "Revenue by region",
+            },
+            inline_rows=[
+                {"region": "North", "revenue": 120},
+                {"region": "North", "revenue": 80},
+                {"region": "South", "revenue": 60},
+            ],
+        )
+    )
+    namespace: dict = {}
+    for cell in ipynb_export.code_cells(document):
+        exec(compile(cell, "<cell>", "exec"), namespace)
+
+    figure = namespace["fig"]
+    assert isinstance(figure, plotly.graph_objects.Figure)
+    assert len(figure.data) == 1
+    assert list(figure.data[0].x) == ["North", "South"]
+    assert list(figure.data[0].y) == [200, 60]
+    assert figure.layout.title.text == "Revenue by region"
+    # The palette travels with the export, in slot order.
+    assert figure.data[0].marker.color == "#2a78d6"
+
+
+def test_ipynb_sample_exports_all_parse():
+    samples.materialise()
+    from twohelixes.pipeline import figures
+
+    for sample in samples.SAMPLES:
+        frame = samples.frame(sample.key)
+        config = figures.validate_config(figures.heuristic_config(frame, ""), frame)
+        document = ipynb_export.build(
+            marimo_export.NotebookSpec(
+                title=sample.name,
+                dataset_path=str(samples.path_for(sample.key)),
+                chart_config=config,
+            )
+        )
+        for cell in ipynb_export.code_cells(document):
+            ast.parse(cell)
+
+
+def test_ipynb_converts_back_to_a_hostable_marimo_notebook():
+    """Hosting an export must run it, not just accept it.
+
+    marimo cells are functions: a name defined in one is invisible to the next
+    unless it is returned and taken as an argument. The conversion is only
+    correct if that threading is right, so this asserts on the wiring rather
+    than on the text.
+    """
+    document = ipynb_export.build(
+        _spec(inline_rows=[{"region": "North", "revenue": 1}])
+    )
+    source = ipynb_export.to_marimo(document)
+    tree = ast.parse(source)
+
+    cells = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and any(getattr(d, "attr", "") == "cell" for d in node.decorator_list)
+    ]
+    assert len(cells) >= 4
+
+    defined: set[str] = set()
+    for cell in cells:
+        params = {a.arg for a in cell.args.args}
+        assert params <= defined, f"cell takes an undefined name: {params - defined}"
+        returned = cell.body[-1]
+        if isinstance(returned, ast.Return) and isinstance(returned.value, ast.Tuple):
+            defined |= {
+                element.id for element in returned.value.elts
+                if isinstance(element, ast.Name)
+            }
+    assert {"pd", "go", "df", "result", "CHART", "fig"} <= defined
+
+
+def test_ipynb_conversion_rejects_a_non_notebook():
+    with pytest.raises(ValueError):
+        ipynb_export.to_marimo("not json")
+
+
+def test_ipynb_conversion_keeps_an_unparseable_cell_as_a_comment():
+    document = json.dumps({
+        "cells": [{"cell_type": "code", "source": ["def oops(\n"], "outputs": [],
+                   "execution_count": None, "metadata": {}}],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+    })
+    source = ipynb_export.to_marimo(document)
+    ast.parse(source)
+    assert "# skipped" in source
 
 
 # -- compute ---------------------------------------------------------------

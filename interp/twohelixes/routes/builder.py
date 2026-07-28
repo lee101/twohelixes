@@ -67,9 +67,33 @@ Rules:
 
 def _load_frame(identity: Any, ctx: router.Context) -> Any:
     """Resolve whatever data the builder is pointed at."""
+    return frame_from_source(
+        identity,
+        {
+            key: ctx.field(key)
+            for key in ("dataset_id", "sample", "source_id", "sql", "data")
+            if ctx.field(key) is not None
+        },
+    )
+
+
+# The keys that name data without carrying it. These are what a saved chart
+# keeps so it can be rebuilt later; `data` is deliberately not one of them,
+# because an inline payload is kept as rows on the chart instead.
+SOURCE_KEYS = ("dataset_id", "sample", "source_id", "sql")
+
+
+def frame_from_source(identity: Any, source: dict[str, Any]) -> Any:
+    """Resolve a data descriptor to a frame.
+
+    Taking a dict rather than the request means a chart saved from the builder
+    can be rebuilt from the descriptor stored with it - which is what makes a
+    built chart reconfigurable and refreshable months later, without keeping a
+    copy of the rows.
+    """
     import pandas as pd
 
-    dataset_id = ctx.field("dataset_id")
+    dataset_id = source.get("dataset_id")
     if dataset_id:
         row = store.one(
             "SELECT * FROM datasets WHERE id = ? AND user_id = ?",
@@ -84,20 +108,20 @@ def _load_frame(identity: Any, ctx: router.Context) -> Any:
             return pd.read_csv(storage)
         return pd.read_json(storage)
 
-    sample_key = ctx.field("sample")
+    sample_key = source.get("sample")
     if sample_key:
         from twohelixes.datasets import samples
 
         return samples.frame(str(sample_key))
 
-    source_id, sql = ctx.field("source_id"), ctx.field("sql")
+    source_id, sql = source.get("source_id"), source.get("sql")
     if source_id and sql:
         from twohelixes.connectors import registry
 
         connector = registry.for_source(str(source_id), identity.user_id)
         return connector.frame(str(sql))
 
-    rows = ctx.field("data")
+    rows = source.get("data")
     if isinstance(rows, list) and rows:
         return pd.DataFrame(rows)
 
@@ -278,23 +302,35 @@ def save(ctx: router.Context) -> router.Result:
     figure = ctx.field("figure") or {}
     chart_id = str(ctx.field("chart_id") or "") or store.new_id()
     now = time.time()
+    shaped_rows = _shaped_rows(identity, ctx, steps)
 
     existing = store.one(
         "SELECT id FROM charts WHERE id = ? AND user_id = ?", (chart_id, identity.user_id)
     )
+    # The descriptor travels with the chart. Without it a built chart could be
+    # looked at and nothing else: the manual controls, the tile editor and
+    # dashboard refresh all need a frame, and there was nothing to rebuild one
+    # from once the request that made it had gone.
     payload = store.dump_json(
-        {"steps": [s.to_dict() for s in steps], "config": chart_config}
+        {
+            "steps": [s.to_dict() for s in steps],
+            "config": chart_config,
+            "source": {
+                key: ctx.field(key) for key in SOURCE_KEYS if ctx.field(key) is not None
+            },
+        }
     )
 
     if existing:
         store.execute(
             "UPDATE charts SET title = ?, spec = ?, graph_args = ?, trace = ?, "
-            "updated_at = ? WHERE id = ?",
+            "rows_json = ?, updated_at = ? WHERE id = ?",
             (
                 str(chart_config.get("title") or "Chart")[:200],
                 store.dump_json(figure),
                 store.dump_json(chart_config),
                 payload,
+                shaped_rows,
                 now,
                 chart_id,
             ),
@@ -302,18 +338,19 @@ def save(ctx: router.Context) -> router.Result:
     else:
         store.execute(
             "INSERT INTO charts (id, user_id, dashboard_id, title, query, source_id, "
-            "spec, graph_args, trace, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "spec, graph_args, trace, rows_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chart_id,
                 identity.user_id,
                 ctx.field("dashboard_id"),
                 str(chart_config.get("title") or "Chart")[:200],
-                str(ctx.field("request") or ""),
+                str(ctx.field("sql") or ctx.field("request") or ""),
                 ctx.field("source_id"),
                 store.dump_json(figure),
                 store.dump_json(chart_config),
                 payload,
+                shaped_rows,
                 now,
                 now,
             ),
@@ -322,9 +359,34 @@ def save(ctx: router.Context) -> router.Result:
     return router.json_result({"chart_id": chart_id, "saved": True})
 
 
+# Enough to redraw any form; past this the data belongs in a dataset.
+MAX_KEPT_ROWS = 5000
+
+
+def _shaped_rows(identity: Any, ctx: router.Context, steps: Any) -> str | None:
+    """The rows this chart plots, kept with it.
+
+    Without them a chart built by hand could be looked at and nothing else:
+    the manual controls, the tile editor and dashboard refresh all need a frame
+    to rebuild from, and `_frame_for_chart` had nowhere to get one. A chart on a
+    connected source can be re-queried instead, so it keeps no copy.
+    """
+    if any(ctx.field(key) is not None for key in SOURCE_KEYS):
+        return None
+    try:
+        frame = _load_frame(identity, ctx)
+        shaped, _notes = transform.apply(frame, steps)
+        if len(shaped) > MAX_KEPT_ROWS:
+            return None
+        return store.dump_json(shaped.to_dict("records"))
+    except Exception:  # noqa: BLE001 - never fail a save over its own cache
+        log.exception("could not keep the rows for a built chart")
+        return None
+
+
 @router.post("/v1/builder/notebook")
 def notebook(ctx: router.Context) -> router.Result:
-    """Export the plan as a marimo notebook.
+    """Export the plan as a notebook - marimo, or .ipynb with format=ipynb.
 
     The notebook carries the steps as readable pandas rather than a second
     implementation, so what runs there is what ran here.
@@ -337,6 +399,7 @@ def notebook(ctx: router.Context) -> router.Result:
         return router.error(400, "invalid_plan", str(exc))
 
     from twohelixes.notebooks import marimo_export
+    from twohelixes.routes.notebooks import _format
 
     dataset_path = ""
     dataset_id = ctx.field("dataset_id")
@@ -353,7 +416,8 @@ def notebook(ctx: router.Context) -> router.Result:
         dataset_path = str(samples.path_for(str(ctx.field("sample"))))
 
     chart_config = ctx.field("config") or {}
-    source = marimo_export.build(
+    module, extension, content_type = _format(ctx)
+    source = module.build(
         marimo_export.NotebookSpec(
             title=str(chart_config.get("title") or "twoHelixes chart"),
             question=str(ctx.field("request") or ""),
@@ -366,6 +430,6 @@ def notebook(ctx: router.Context) -> router.Result:
     return router.Result(
         status=200,
         body=source,
-        content_type="text/x-python; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="chart.py"'},
+        content_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="chart.{extension}"'},
     )

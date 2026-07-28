@@ -114,14 +114,19 @@ systemctl enable --now nb.service
 # --------------------------------------------------------------------------
 
 
-def hetzner_create(name: str, token: str, payload_url: str = "") -> dict[str, Any]:
+def hetzner_create(name: str, token: str, payload_url: str = "",
+                   server_type: str = "") -> dict[str, Any]:
     api_token = config.get("HETZNER_API_TOKEN")
     if not api_token:
         raise NotConfigured("HETZNER_API_TOKEN is not set")
 
+    # The machine class picks the server type; the environment is only the
+    # fallback for callers that have no class, because a class whose type came
+    # from the environment would be billed at one size and provisioned at
+    # another.
     body = {
         "name": name,
-        "server_type": config.get("HETZNER_SERVER_TYPE", HETZNER_DEFAULT_TYPE),
+        "server_type": server_type or config.get("HETZNER_SERVER_TYPE", HETZNER_DEFAULT_TYPE),
         "image": config.get("HETZNER_IMAGE", HETZNER_DEFAULT_IMAGE),
         "location": config.get("HETZNER_LOCATION", HETZNER_DEFAULT_LOCATION),
         "start_after_create": True,
@@ -165,6 +170,12 @@ def hetzner_delete(server_id: str) -> None:
 
 
 def hetzner_list() -> list[dict[str, Any]]:
+    """Our servers, normalised to `{id, name, status, created_at}`.
+
+    `created_at` is epoch seconds because the orphan reaper compares it to
+    `time.time()`; Hetzner returns ISO 8601, and a string there would make
+    every instance look infinitely old and get reaped mid-provision.
+    """
     api_token = config.get("HETZNER_API_TOKEN")
     if not api_token:
         raise NotConfigured("HETZNER_API_TOKEN is not set")
@@ -174,7 +185,32 @@ def hetzner_list() -> list[dict[str, Any]]:
             headers={"Authorization": f"Bearer {api_token}"},
         )
         response.raise_for_status()
-        return response.json().get("servers", [])
+        servers = response.json().get("servers", [])
+    return [
+        {
+            "id": str(s.get("id", "")),
+            "name": s.get("name", ""),
+            "status": s.get("status", ""),
+            "created_at": _epoch(s.get("created")),
+            "raw": s,
+        }
+        for s in servers
+    ]
+
+
+def _epoch(value: Any) -> float:
+    """Provider timestamps, in seconds. Unparseable means "now", which is the
+    safe direction: a machine we cannot date is treated as too new to reap."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        from datetime import datetime
+
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    return time.time()
 
 
 # --------------------------------------------------------------------------
@@ -182,7 +218,7 @@ def hetzner_list() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def runpod_create(name: str, token: str) -> dict[str, Any]:
+def runpod_create(name: str, token: str, gpu_type: str = "") -> dict[str, Any]:
     api_key = config.get("RUNPOD_API_KEY")
     if not api_key:
         raise NotConfigured("RUNPOD_API_KEY is not set")
@@ -190,7 +226,7 @@ def runpod_create(name: str, token: str) -> dict[str, Any]:
     body = {
         "name": name,
         "imageName": config.get("RUNPOD_IMAGE", RUNPOD_IMAGE),
-        "gpuTypeIds": [config.get("RUNPOD_GPU_TYPE", RUNPOD_DEFAULT_GPU)],
+        "gpuTypeIds": [gpu_type or config.get("RUNPOD_GPU_TYPE", RUNPOD_DEFAULT_GPU)],
         "cloudType": "SECURE",
         "containerDiskInGb": 20,
         "ports": ["8080/http"],
@@ -223,6 +259,36 @@ def runpod_create(name: str, token: str) -> dict[str, Any]:
     }
 
 
+def runpod_list() -> list[dict[str, Any]]:
+    """Every pod on the account, normalised like `hetzner_list`.
+
+    RunPod has no label selector, so this returns everything the key can see -
+    which is what the reaper wants anyway: a pod we cannot account for is a pod
+    costing us money whether or not we tagged it.
+    """
+    api_key = config.get("RUNPOD_API_KEY")
+    if not api_key:
+        raise NotConfigured("RUNPOD_API_KEY is not set")
+    with _client() as client:
+        response = client.get(
+            f"{RUNPOD_API}/pods",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    pods = payload if isinstance(payload, list) else payload.get("pods", [])
+    return [
+        {
+            "id": str(p.get("id", "")),
+            "name": p.get("name", ""),
+            "status": p.get("desiredStatus", ""),
+            "created_at": _epoch(p.get("createdAt") or p.get("created_at")),
+            "raw": p,
+        }
+        for p in pods
+    ]
+
+
 def runpod_delete(pod_id: str) -> None:
     api_key = config.get("RUNPOD_API_KEY")
     if not api_key:
@@ -239,12 +305,16 @@ def runpod_delete(pod_id: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def start_remote(provider: str, user_id: str, session_id: str, source: str) -> dict[str, Any]:
+def start_remote(provider: str, user_id: str, session_id: str, source: str,
+                 machine: Any = None) -> dict[str, Any]:
     """Provision a notebook on `provider` and return connection details.
 
     The notebook source goes to R2 and the instance fetches it, rather than
     riding along in cloud-init: that is what keeps `user_data` under Hetzner's
     ceiling, and it means the payload can be any size.
+
+    `machine` is a `machines.MachineClass`. It decides the size, and the size is
+    what the caller is being billed for, so it must not come from anywhere else.
     """
     token = secrets.token_urlsafe(24)
     payload_url = ""
@@ -261,15 +331,20 @@ def start_remote(provider: str, user_id: str, session_id: str, source: str) -> d
 
     name = f"th-nb-{session_id[:10]}"
 
+    provider_ref = getattr(machine, "provider_ref", "") or ""
+
     if provider == "hetzner":
-        info = hetzner_create(name, token, payload_url)
+        info = hetzner_create(name, token, payload_url, server_type=provider_ref)
         info["url"] = f"http://{info['ip']}:8080/?access_token={token}" if info.get("ip") else ""
     elif provider == "runpod":
-        info = runpod_create(name, token)
+        info = runpod_create(name, token, gpu_type=provider_ref)
     else:
         raise ComputeError(f"unknown provider '{provider}'")
 
-    info.update({"token": token, "running": True, "session_id": session_id})
+    info.update({
+        "token": token, "running": True, "session_id": session_id,
+        "machine": getattr(machine, "id", ""),
+    })
     log.info("started %s notebook %s (%s)", provider, session_id, info.get("id"))
     return info
 

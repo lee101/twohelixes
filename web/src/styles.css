@@ -184,13 +184,24 @@ body {
 
 [hidden] { display: none !important; }
 
-/* -- trace -------------------------------------------------------------- */
+/* -- trace --------------------------------------------------------------
+   A <details>. Open while the run happens, shut to one line afterwards, so
+   the finished chart is not sitting under a screen of transcript. */
 
-.trace-header {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s2);
-  margin-bottom: var(--s2);
+/* The Show/Hide affordance, the leading dot and the summary padding come
+   from `details.trace > summary` in the inlined design system - the same
+   disclosure the dataset pages use for their trace. Reproducing it here is
+   how the two drift apart, so this only adds what is specific to the app. */
+.trace-header { margin: calc(var(--s4) * -1) calc(var(--s4) * -1) 0; }
+.trace[open] > .trace-header { margin-bottom: var(--s2); }
+.trace.is-running > .trace-header .trace-detail { color: var(--accent); }
+.trace-header .trace-detail { margin-left: 0; }
+
+.trace-stage-summary {
+  margin: 0;
+  padding: 0 0.7rem 0.5rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 .trace-title {
   font-size: 0.78rem;
@@ -570,7 +581,7 @@ body {
   font-size: 0.84rem;
 }
 .shelf-slot.is-empty { color: var(--text-muted); font-size: 0.78rem; }
-.shelf-slot.is-over { border-color: var(--series-1); background: var(--surface-1); }
+.shelf-slot.is-over { border-color: var(--accent); background: var(--surface-1); }
 .shelf-pill {
   display: inline-flex;
   align-items: center;
@@ -606,8 +617,8 @@ body {
 .step.is-disabled { opacity: 0.5; }
 /* A left edge marks who wrote the step, so provenance is visible without
    reading the badge. */
-.step-agent { border-left: 3px solid var(--series-1); }
-.step-human { border-left: 3px solid var(--series-3); }
+.step-agent { border-left: 3px solid var(--accent); }
+.step-human { border-left: 3px solid var(--text-muted); }
 
 .step-head { display: flex; align-items: center; gap: 0.4rem; }
 .step-badge {
@@ -711,7 +722,7 @@ body {
   min-width: 0;
 }
 .dash-title:hover:not(:disabled) { border-color: var(--border); }
-.dash-title:focus-visible { border-color: var(--series-1); outline: none; }
+.dash-title:focus-visible { border-color: var(--accent); outline: none; }
 .dash-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
 .dash-status { font-size: 0.85rem; color: var(--text-muted); }
@@ -736,8 +747,8 @@ body {
   gap: 0.4rem;
   align-content: start;
 }
-.dash-tile:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
-.dash-tile.is-over { border-color: var(--series-1); }
+.dash-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dash-tile.is-over { border-color: var(--accent); }
 /* A span wider than the grid has columns is clamped by the media queries
    above, so a 3-wide tile simply fills the row on a phone. */
 @media (min-width: 720px)  { .dash-tile.span-2, .dash-tile.span-3 { grid-column: span 2; } }
@@ -757,6 +768,811 @@ body {
   white-space: nowrap;
 }
 .dash-tile-controls { margin-left: auto; display: flex; gap: 0.15rem; flex: 0 0 auto; }
-.dash-size.is-active { border-color: var(--series-1); color: var(--series-1); }
+.dash-size.is-active { border-color: var(--accent); color: var(--accent); }
 .dash-plot { width: 100%; height: 260px; min-width: 0; }
 .dash-empty { color: var(--text-muted); font-size: 0.9rem; padding: 1.5rem 0; }
+
+/* -- data library -------------------------------------------------------
+   The drawer keeps management within thumb reach without giving the chart's
+   permanent desktop column to a task people visit only occasionally. */
+
+body.library-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.library-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.library-shell.is-open {
+  pointer-events: auto;
+  visibility: visible;
+}
+
+.library-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: rgb(16 16 14 / 48%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.library-shell.is-open .library-backdrop { opacity: 1; }
+
+.library-drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  width: min(100%, 30rem);
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--panel);
+  color: var(--text-primary);
+  border-right: 1px solid var(--border-strong);
+  box-shadow: var(--sh-3);
+  transform: translateX(-102%);
+  transition: transform 0.22s ease;
+  outline: 0;
+}
+
+.library-shell.is-open .library-drawer { transform: translateX(0); }
+
+.library-header,
+.library-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 64px;
+  padding: calc(var(--s3) + env(safe-area-inset-top)) var(--s4) var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+
+.library-header h2,
+.library-sheet-header h2 {
+  margin: 0;
+  font-size: 1.08rem;
+  font-weight: 650;
+}
+
+.library-eyebrow {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.library-close {
+  min-width: 44px;
+  font-size: 0;
+}
+
+.library-close::before {
+  content: "×";
+  font-size: 1.5rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.library-search { padding: var(--s3) var(--s4); }
+
+.library-search .control-input {
+  min-height: 44px;
+  width: 100%;
+}
+
+.library-scroll {
+  display: grid;
+  align-content: start;
+  gap: var(--s5);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--s4) var(--s5);
+  scrollbar-gutter: stable;
+}
+
+.library-folders,
+.library-contents {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.library-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-height: 44px;
+}
+
+.library-section-head h3,
+.sheet-section-title {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.library-folder-actions,
+.library-item-actions,
+.upload-result-actions,
+.sheet-actions,
+.connect-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.folder-tree,
+.library-item-list,
+.upload-list {
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.folder-tree .folder-tree { padding-left: var(--s3); }
+
+.folder-tree-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.folder-tree-branch {
+  display: grid;
+  min-width: 0;
+}
+
+.folder-toggle,
+.folder-name,
+.library-item-name {
+  min-height: 44px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.folder-toggle {
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.folder-toggle:disabled { cursor: default; }
+
+.folder-name {
+  overflow: hidden;
+  padding: 0 var(--s2);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.folder-name:hover,
+.folder-name.is-active { background: var(--panel-2); }
+.folder-name.is-active { color: var(--accent); font-weight: 650; }
+
+.library-item {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+}
+
+.library-item-copy,
+.upload-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.library-item-name {
+  overflow: hidden;
+  min-height: 44px;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+  font-weight: 650;
+}
+
+.inline-rename .control-input {
+  width: 100%;
+  min-height: 44px;
+}
+
+.source-name { font-weight: 620; font-size: 0.92rem; }
+.source-meta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.library-empty,
+.sources-lede {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.library-action-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4) calc(var(--s3) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.library-action-bar .btn,
+.library-drawer .btn,
+.library-drawer input,
+.library-drawer select {
+  min-height: 44px;
+}
+
+.library-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  background: var(--panel);
+}
+
+.library-sheet-body {
+  display: grid;
+  align-content: start;
+  gap: var(--s4);
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s4) var(--s4) calc(var(--s5) + env(safe-area-inset-bottom));
+}
+
+.sheet-form,
+.override-form {
+  display: grid;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.source-field {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.source-status,
+.source-message {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.source-status.is-error,
+.source-message.is-error {
+  color: var(--status-critical);
+  font-weight: 560;
+}
+
+.source-status.is-ok { color: var(--status-good); font-weight: 560; }
+
+.file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.file-drop {
+  display: grid;
+  place-items: center;
+  gap: var(--s1);
+  min-height: 13rem;
+  padding: var(--s5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.file-drop:hover,
+.file-drop:focus-visible,
+.file-drop.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.file-drop span { color: var(--text-secondary); font-size: 0.85rem; }
+
+.upload-item {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+}
+
+.upload-item progress {
+  width: 100%;
+  height: 0.45rem;
+  accent-color: var(--accent);
+}
+
+.folder-choice-list,
+.kind-list {
+  display: grid;
+  gap: var(--s2);
+}
+
+.folder-choice,
+.kind-row {
+  width: 100%;
+  justify-content: flex-start;
+  padding: var(--s3);
+  text-align: left;
+}
+
+.folder-choice[aria-current="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.kind-row {
+  display: grid;
+  gap: var(--s1);
+  min-height: 64px !important;
+}
+
+.kind-row span { color: var(--text-muted); font-size: 0.8rem; }
+
+.connect-progress {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.connect-step-field {
+  display: grid;
+  gap: var(--s2);
+  padding-block: var(--s5);
+}
+
+.connect-step-title { font-size: 1.15rem; font-weight: 650; }
+.connect-review { display: grid; gap: var(--s3); padding-block: var(--s5); }
+.connect-nav { justify-content: space-between; margin-top: auto; }
+
+.type-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--s3);
+}
+
+.dataset-preview-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  -webkit-overflow-scrolling: touch;
+}
+
+.dataset-preview {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.dataset-preview th,
+.dataset-preview td {
+  max-width: 18rem;
+  overflow: hidden;
+  padding: var(--s2) var(--s3);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  text-overflow: ellipsis;
+}
+
+.dataset-preview th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.dataset-preview th span,
+.dataset-preview th small { display: block; }
+.dataset-preview th small { color: var(--text-muted); font-weight: 400; }
+
+.share-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s2);
+}
+
+.library-toast {
+  position: absolute;
+  z-index: 9;
+  right: var(--s3);
+  bottom: calc(4.5rem + env(safe-area-inset-bottom));
+  left: var(--s3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--text-primary);
+  color: var(--surface-1);
+  box-shadow: var(--sh-3);
+}
+
+@media (min-width: 800px) {
+  .library-drawer { width: 29rem; }
+  .library-backdrop { display: none; }
+  .type-grid { grid-template-columns: 1fr 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .library-drawer,
+  .library-backdrop { transition: none; }
+}
+
+.builder-local-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin: 0 0 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  cursor: pointer;
+}
+.builder-local-toggle input { margin-top: 0.12rem; }
+
+/* ---------------------------------------------------------------------
+   Section navigation.
+
+   The dashboard grid shipped before there was any way to reach it, which is
+   the same as it not shipping. Two words in the header fix that; on a phone
+   they sit on their own row so the brand and the account controls keep theirs.
+   --------------------------------------------------------------------- */
+.app-nav {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.15rem;
+  background: var(--surface-2, color-mix(in srgb, var(--text-primary) 5%, transparent));
+  border-radius: var(--r-md);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.app-nav::-webkit-scrollbar { display: none; }
+.app-nav-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 560;
+  color: var(--text-secondary);
+  padding: 0.35rem 0.75rem;
+  border-radius: calc(var(--r-md) - 0.15rem);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.app-nav-item:hover { color: var(--text-primary); }
+.app-nav-item.is-active {
+  background: var(--panel);
+  color: var(--text-primary);
+  box-shadow: var(--sh-1);
+}
+.app-nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------------------------------------------------------------------
+   Dictation. The mic is the browser's recogniser or it is not drawn at all,
+   so this style only ever applies to a button that works.
+   --------------------------------------------------------------------- */
+.mic-btn { padding: 0.4rem 0.55rem; display: inline-flex; align-items: center; }
+.mic-icon {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+.mic-btn.is-listening {
+  color: var(--status-critical);
+  border-color: currentColor;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  50% { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mic-btn.is-listening { animation: none; }
+}
+
+.voice-field {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+.voice-field .chart-edit-input { flex: 1 1 auto; min-width: 0; }
+
+/* ---------------------------------------------------------------------
+   The dashboard list, and the composer that puts panes on a board.
+   --------------------------------------------------------------------- */
+.dash-list { display: grid; gap: 0.9rem; }
+.dash-list-title { font-size: 1.3rem; margin: 0; letter-spacing: -0.02em; }
+.dash-list-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+.dash-list-item {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 0.5rem 0.6rem;
+}
+.dash-list-open {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 0.1rem;
+  color: var(--text-primary);
+  padding: 0.3rem;
+  border-radius: var(--r-sm);
+}
+.dash-list-open:hover { background: color-mix(in srgb, var(--text-primary) 5%, transparent); }
+.dash-list-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dash-list-name { font-weight: 600; }
+.dash-list-meta { font-size: 0.8rem; color: var(--text-muted); }
+.dash-empty {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  padding: 1.2rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  text-align: center;
+}
+
+.dash-composer {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.6rem;
+}
+.dash-composer-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 650;
+  margin: 0;
+}
+.dash-composer-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.dash-composer-ask { flex: 1 1 20rem; }
+.dash-composer-manual {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* The builder, in a sheet, so building a pane never leaves the board. */
+.dash-sheet {
+  width: min(96vw, 74rem);
+  max-height: 92vh;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  padding: 0.9rem;
+  overflow: auto;
+}
+.dash-sheet::backdrop { background: rgba(0, 0, 0, 0.5); }
+.dash-sheet-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.dash-sheet-bar h2 { margin: 0; font-size: 1.05rem; }
+.dash-sheet-bar .btn { margin-left: auto; }
+
+/* Per-tile editing: words on top, channels underneath. */
+.dash-tile-editor {
+  display: grid;
+  gap: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+  margin-top: 0.2rem;
+}
+.dash-tile-status { margin: 0; font-size: 0.8rem; color: var(--text-muted); min-height: 1rem; }
+.dash-tile-status.is-warn { color: var(--status-warning); }
+.dash-tile-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 0.4rem;
+}
+.dash-tile-controls-grid .control-input { width: 100%; min-width: 0; }
+
+/* Which dashboard to add to. A sheet, because a browser prompt cannot list. */
+.pick-sheet {
+  width: min(92vw, 24rem);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  color: var(--text-primary);
+  padding: 1rem;
+}
+.pick-sheet::backdrop { background: rgba(0, 0, 0, 0.5); }
+.pick-sheet h2 { margin: 0 0 0.6rem; font-size: 1rem; }
+.pick-list { list-style: none; margin: 0 0 0.6rem; padding: 0; display: grid; gap: 0.3rem; }
+.pick-item {
+  appearance: none;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.55rem 0.65rem;
+  cursor: pointer;
+}
+.pick-item:hover { border-color: var(--accent); }
+.pick-item.is-new { color: var(--accent); font-weight: 600; }
+
+/* ---------------------------------------------------------------------
+   Disclosures in the chart card. Seven channel pickers and four export
+   buttons are a toolbar on a laptop and a wall on a phone.
+   --------------------------------------------------------------------- */
+.chart-controls-panel { width: 100%; }
+.chart-controls-panel > summary,
+.chart-exports > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 0.3rem 0;
+  list-style: none;
+}
+.chart-controls-panel > summary::-webkit-details-marker,
+.chart-exports > summary::-webkit-details-marker { display: none; }
+.chart-controls-panel > summary::before,
+.chart-exports > summary::before { content: "▸ "; color: var(--text-muted); }
+.chart-controls-panel[open] > summary::before,
+.chart-exports[open] > summary::before { content: "▾ "; }
+.chart-controls-grid {
+  display: flex;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding-top: var(--s2);
+}
+.chart-exports { display: inline-flex; flex-wrap: wrap; gap: var(--s1); align-items: center; }
+
+.dash-sizes { display: flex; gap: 0.15rem; }
+/* Tile chrome is secondary to the chart in it: quiet until the tile is
+   hovered or something in it has focus, and always reachable by keyboard. */
+.dash-tile-controls .btn-small { opacity: 0.55; transition: opacity 0.15s ease; }
+.dash-tile:hover .dash-tile-controls .btn-small,
+.dash-tile:focus-within .dash-tile-controls .btn-small,
+.dash-tile-controls .btn-small:focus-visible,
+.dash-tile-controls .dash-size.is-active { opacity: 1; }
+@media (hover: none) {
+  .dash-tile-controls .btn-small { opacity: 1; }
+}
+
+/* ---------------------------------------------------------------------
+   Phone. This block is last on purpose: it overrides everything above it
+   at the same specificity, which is what a narrow-screen pass is for.
+   --------------------------------------------------------------------- */
+@media (max-width: 719px) {
+  /* The header was brand + theme + account on one row and the nav made it
+     three things fighting for 390px. The nav gets its own row. */
+  .app-header { flex-wrap: wrap; row-gap: 0.4rem; }
+  .app-nav { order: 3; flex: 1 0 100%; }
+  .brand span { font-size: 1rem; }
+
+  .dash-bar { gap: 0.5rem; }
+  .dash-title { font-size: 1.05rem; flex: 1 0 100%; }
+  .dash-actions { flex: 1 1 auto; }
+  .dash-actions .btn { flex: 1 1 auto; min-height: 40px; }
+  .dash-list-title { font-size: 1.1rem; }
+
+  .dash-composer { padding: 0.7rem; }
+  .dash-composer-row { gap: 0.4rem; }
+  .dash-composer-ask,
+  .voice-field { flex: 1 1 100%; }
+  .dash-composer-row .control { flex: 1 1 100%; }
+
+  .dash-sheet {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
+    border: 0;
+  }
+
+  .dash-tile-controls-grid { grid-template-columns: 1fr 1fr; }
+
+  /* The trace is shut by default now, so it no longer needs a third of the
+     screen to itself - open, it can use the room. */
+  .trace-list { max-height: 52vh; }
+
+  /* 44px everywhere it is tapped rather than read. */
+  .app-nav-item { min-height: 40px; }
+  .dash-list-open { min-height: 44px; }
+  .pick-item { min-height: 44px; }
+  .mic-btn { min-height: 44px; min-width: 44px; justify-content: center; }
+  .voice-field .btn { min-height: 44px; }
+  /* Below 720px the grid is one column, so 1x/2x/3x cannot change anything.
+     A row of controls that does nothing is worse than no row. */
+  .dash-sizes { display: none; }
+  .dash-tile-controls .btn-small { min-height: 34px; min-width: 34px; padding: 0.2rem 0.45rem; }
+  .dash-tile-head { gap: 0.35rem; }
+  .dash-tile { padding: 0.6rem; }
+}
+
+
+/* A table tile scrolls inside itself rather than squeezing ten columns into a
+   phone. The scroller is the tile's, so the page never moves sideways. */
+.dash-plot-scroll { overflow-x: auto; min-width: 0; scrollbar-width: thin; }

@@ -20,12 +20,18 @@ from typing import Any
 from twohelixes import config, llm
 from twohelixes.charts import defaults as chart_defaults
 from twohelixes.interpreter import sandbox, tools
-from twohelixes.pipeline import figures, prompts
+from twohelixes.pipeline import figures, prompts, route
 
 log = logging.getLogger("twohelixes.pipeline")
 
 MAX_ROWS_TO_CHART = 5000
 MAX_TRANSFORM_ATTEMPTS = 3
+
+# Every model stage retries independently, so without one shared budget three
+# slow stages can outlive nginx's own read timeout - and a chart delivered
+# after the connection dropped is no chart at all. Past this, stages take
+# their deterministic path.
+PIPELINE_BUDGET_SECONDS = 240.0
 
 
 @dataclass
@@ -54,6 +60,14 @@ class PipelineResult:
     transform_code: str = ""
     interpretation: str = ""
     elapsed_ms: int = 0
+    # What the run cost us at the gateway, in millionths of a dollar. The
+    # price of a query is set from this, so it travels with the result.
+    cost_micros: int = 0
+    model_calls: int = 0
+    # The frame the chart was actually drawn from. Not part of the payload -
+    # the preview is what the client gets - but the caller needs it to keep
+    # the rows for data that has no source to re-query.
+    frame: Any = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -74,9 +88,20 @@ class PipelineResult:
 class Emitter:
     """Wraps a stream so a pipeline run works with or without one."""
 
-    def __init__(self, stream: Any = None):
+    def __init__(self, stream: Any = None, deadline: float = 0.0):
         self.stream = stream
         self.trace: list[dict[str, Any]] = []
+        self.deadline = deadline
+
+    def out_of_time(self) -> bool:
+        """Whether the next model call would run past the request's budget.
+
+        Each stage retries independently, so three slow stages could otherwise
+        add up past the proxy's own read timeout - and a chart nobody is still
+        connected to is the same as no chart. Past the deadline every stage
+        takes its deterministic path instead.
+        """
+        return self.deadline > 0 and time.time() >= self.deadline
 
     def stage(self, name: str, status: str, **detail: Any) -> None:
         event = {"stage": name, "status": status, "at": time.time(), **detail}
@@ -119,7 +144,7 @@ def run(
 ) -> PipelineResult:
     """Run the full pipeline for one question."""
     started = time.time()
-    emit = Emitter(stream)
+    emit = Emitter(stream, deadline=started + PIPELINE_BUDGET_SECONDS)
     result = PipelineResult()
 
     if not frames:
@@ -127,6 +152,44 @@ def run(
         result.trace = emit.trace
         return result
 
+    # One measurement around the whole run, salvage included: what a query
+    # costs us is what we spent before the user got their chart, not what the
+    # happy path spent.
+    with llm.measure() as spend:
+        try:
+            out = _run(question, frames, result, emit, started,
+                       catalog=catalog, model=model, mode=mode,
+                       existing_config=existing_config, edit_request=edit_request)
+        except Exception as exc:  # noqa: BLE001
+            # The promise is a chart every time, so the last line of defence
+            # draws the widest frame we still hold rather than surfacing a
+            # stack trace.
+            log.exception("pipeline failed; falling back to a raw view")
+            emit.warn(f"The pipeline could not finish ({exc}); charting the source data.")
+            out = _salvage(frames, result, emit, started, mode)
+
+    out.cost_micros = spend.micros
+    out.model_calls = spend.calls
+    log.info(
+        "pipeline spend: %d calls, %d in / %d out tokens, %.3f cents",
+        spend.calls, spend.input_tokens, spend.output_tokens, spend.cents,
+    )
+    return out
+
+
+def _run(
+    question: str,
+    frames: dict[str, Any],
+    result: PipelineResult,
+    emit: Emitter,
+    started: float,
+    *,
+    catalog: list[dict[str, Any]] | None,
+    model: str,
+    mode: str,
+    existing_config: dict[str, Any] | None,
+    edit_request: str,
+) -> PipelineResult:
     # ---- stage 1: search -------------------------------------------------
     emit.stage("search", "start")
     search = _search(question, frames, catalog or [], emit, model)
@@ -142,24 +205,51 @@ def run(
         name: frame
         for name, frame in frames.items()
         if not search.get("datasets") or name in search["datasets"]
-    } or frames
+    }
+    if not selected:
+        # Discovery found nothing that answers the question. Charting everything
+        # is still more use than an error, but saying so is what stops the user
+        # reading an unrelated chart as an answer.
+        emit.warn(
+            "Nothing here obviously answers that question; charting the data "
+            "that is connected so you can see what is available."
+        )
+        selected = frames
 
     # ---- stage 2: join ---------------------------------------------------
     if len(selected) > 1:
         emit.stage("join", "start")
-        frame, join_detail = _join(selected, emit, model)
+        try:
+            frame, join_detail = _join(selected, emit, model)
+        except Exception as exc:  # noqa: BLE001
+            emit.warn(f"The join failed ({exc}); charting the largest table on its own.")
+            frame = max(selected.values(), key=lambda f: len(f))
+            join_detail = {"fallback": "join_failed"}
         emit.stage("join", "done", **join_detail)
     else:
         frame = next(iter(selected.values()))
         join_detail = {}
 
-    frame = tools.clean_frame(frame)
+    try:
+        frame = tools.clean_frame(frame)
+    except Exception as exc:  # noqa: BLE001
+        emit.warn(f"Could not clean the columns ({exc}); using them as they arrived.")
+
+    if len(frame) == 0:
+        emit.warn("The selected data has no rows, so the chart will be empty.")
 
     # ---- stage 3: transform ---------------------------------------------
     emit.stage("transform", "start")
     shaped, transform_detail = _transform(question, frame, emit, model)
     result.transform_code = transform_detail.get("code", "")
     emit.stage("transform", "done", **{k: v for k, v in transform_detail.items() if k != "code"})
+
+    # An empty result is a real answer to some questions, but it is never a
+    # chart. Falling back to the unshaped frame at least shows the shape of
+    # what was there, with the note saying why.
+    if len(shaped) == 0 and len(frame) > 0:
+        emit.warn("The shaped result had no rows; charting the source data instead.")
+        shaped = frame
 
     if len(shaped) > MAX_ROWS_TO_CHART:
         emit.warn(
@@ -169,16 +259,20 @@ def run(
 
     # ---- stage 4: chart configuration -----------------------------------
     emit.stage("chart", "start")
-    if edit_request and existing_config:
-        chart_config = _edit(edit_request, existing_config, shaped, emit, model)
-    else:
-        chart_config = _choose_chart(question, shaped, emit, model)
+    try:
+        if edit_request and existing_config:
+            chart_config = _edit(edit_request, existing_config, shaped, emit, model)
+        else:
+            chart_config = _choose_chart(question, shaped, emit, model)
+    except Exception as exc:  # noqa: BLE001
+        emit.warn(f"Chart selection failed ({exc}); picking a form from the data alone.")
+        chart_config = figures.heuristic_config(shaped, question)
     emit.stage("chart", "done", chart_type=chart_config.get("chart_type"))
     emit.partial("config", chart_config)
 
     # ---- stage 5: build and apply defaults ------------------------------
     emit.stage("render", "start")
-    figure, build_warnings = figures.build(shaped, chart_config, mode=mode)
+    figure, build_warnings, chart_config = _build(shaped, chart_config, mode, emit)
     figure = chart_defaults.apply(
         figure, mode=mode, chart_type=str(chart_config.get("chart_type") or "")
     )
@@ -192,10 +286,72 @@ def run(
 
     result.figure = figure
     result.config = chart_config
+    result.frame = shaped
     result.columns = [str(c) for c in shaped.columns]
     result.row_count = int(len(shaped))
     result.data_preview = _preview(shaped)
     result.audit = findings
+    result.warnings = [t["warning"] for t in emit.trace if "warning" in t]
+    result.trace = emit.trace
+    result.elapsed_ms = int((time.time() - started) * 1000)
+    return result
+
+
+def _build(
+    shaped: Any, chart_config: dict[str, Any], mode: str, emit: Emitter
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    """Build the figure, stepping down through simpler forms until one draws.
+
+    A chart config that names a column the shaped frame does not have, or a
+    form the data cannot support, is the most common way a run used to end
+    with nothing. Rather than fail, drop to the form the data's own roles
+    imply, and past that to a table - which any frame can always produce.
+    """
+    try:
+        figure, warnings = figures.build(shaped, chart_config, mode=mode)
+        return figure, warnings, chart_config
+    except Exception as exc:  # noqa: BLE001
+        emit.warn(f"Could not draw a {chart_config.get('chart_type')} ({exc}); "
+                  "falling back to a form the data supports.")
+
+    fallback = figures.heuristic_config(shaped, "")
+    if fallback.get("chart_type") != chart_config.get("chart_type"):
+        try:
+            figure, warnings = figures.build(shaped, fallback, mode=mode)
+            return figure, warnings, fallback
+        except Exception as exc:  # noqa: BLE001
+            emit.warn(f"That form did not draw either ({exc}); showing the rows.")
+
+    table = {"chart_type": "table", "title": str(chart_config.get("title") or "Data")}
+    figure, warnings = figures.build(shaped, table, mode=mode)
+    return figure, warnings, table
+
+
+def _salvage(
+    frames: dict[str, Any],
+    result: PipelineResult,
+    emit: Emitter,
+    started: float,
+    mode: str,
+) -> PipelineResult:
+    """Last resort: chart the largest source frame, or say there was nothing."""
+    frame = max(frames.values(), key=lambda f: len(f)) if frames else None
+    if frame is not None:
+        try:
+            chart_config = figures.heuristic_config(frame, "")
+            figure, _, chart_config = _build(frame, chart_config, mode, emit)
+            result.figure = chart_defaults.apply(
+                figure, mode=mode, chart_type=str(chart_config.get("chart_type") or "")
+            )
+            result.config = chart_config
+            result.frame = frame
+            result.columns = [str(c) for c in frame.columns]
+            result.row_count = int(len(frame))
+            result.data_preview = _preview(frame)
+        except Exception:  # noqa: BLE001
+            log.exception("salvage render failed")
+            emit.warn("There was no chart to draw from this data.")
+
     result.warnings = [t["warning"] for t in emit.trace if "warning" in t]
     result.trace = emit.trace
     result.elapsed_ms = int((time.time() - started) * 1000)
@@ -345,10 +501,38 @@ def _transform(
     return frame, {"code": "", "fallback": "failed", "error": last_error}
 
 
+def _small_call(prompt: str, system: str, model: str) -> dict[str, Any]:
+    """A small structured decision: cheap model first, the caller's model next.
+
+    The chart form and the meaning of a one-line edit are small JSON objects
+    over a profile we have already computed, and `validate_config` repairs
+    whatever comes back against the real frame - so the cheap tier's worst
+    case is a form we would have picked heuristically anyway. The expensive
+    model stays one retry away, because "cheaper" must not mean "sometimes no
+    answer": a failed mini call escalates rather than surfacing.
+    """
+    try:
+        return llm.json_call(prompt, system=system, model=config.MODEL_MINI, attempts=2)
+    except llm.CircuitOpen:
+        raise
+    except llm.LLMError as exc:
+        log.info("mini model declined (%s); escalating to %s", exc, model)
+        return llm.json_call(prompt, system=system, model=model)
+
+
 def _choose_chart(
     question: str, frame: Any, emit: Emitter, model: str
 ) -> dict[str, Any]:
     """Pick the chart form and channel mapping, with a heuristic fallback."""
+    # A question that names its own chart and has the columns to support it
+    # does not need a model. This is a gate, not a chooser: it abstains on
+    # anything ambiguous, so the cost of it being cautious is one model call
+    # and the cost of it being wrong would be a wrong chart.
+    routed = route.classify(question, frame)
+    if routed is not None:
+        emit.thought(routed.reason, "chart")
+        return figures.validate_config(routed.config, frame, emit)
+
     profile = tools.profile(frame)
     prompt = (
         f"Question: {question}\n\n"
@@ -357,7 +541,7 @@ def _choose_chart(
     )
 
     try:
-        answer = llm.json_call(prompt, system=prompts.GRAPH_SYSTEM, model=model)
+        answer = _small_call(prompt, prompts.GRAPH_SYSTEM, model)
     except llm.LLMError as exc:
         emit.warn(f"Chart selection fell back to heuristics ({exc}).")
         return figures.heuristic_config(frame, question)
@@ -383,7 +567,7 @@ def _edit(
     )
 
     try:
-        answer = llm.json_call(prompt, system=prompts.EDIT_SYSTEM, model=model)
+        answer = _small_call(prompt, prompts.EDIT_SYSTEM, model)
     except llm.LLMError as exc:
         emit.warn(f"Edit could not be interpreted ({exc}); keeping the chart.")
         return existing

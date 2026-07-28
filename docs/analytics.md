@@ -8,7 +8,7 @@ export shaped like Segment so a warehouse sync is a copy rather than a rewrite.
 
 ```html
 <script>
-  window.__thConfig = { siteId: 'netwrck.com' };
+  window.__thConfig = { siteId: 'thw_…' };
 </script>
 <script async src="https://twohelixes.com/static/th.js"></script>
 ```
@@ -22,7 +22,7 @@ is synchronous.
 
 | key        | default                              | meaning                            |
 | ---------- | ------------------------------------ | ---------------------------------- |
-| `siteId`   | `location.hostname`                  | which site the events belong to    |
+| `siteId`   | required                             | the registered site's write key    |
 | `endpoint` | `https://twohelixes.com/v1/collect`  | where to send them                 |
 | `autoPage` | `true`                               | fire `page_view` on load           |
 
@@ -32,11 +32,11 @@ is synchronous.
   `popstate`)
 * `outbound_click` for links to another host, `file_download` for common file
   extensions
-* `js_error` with message, source and line
+* `js_error` with an error class and source host, never the message
 * `page_exit` with the visible-time engagement counter
 
 Each event carries the identity triple (`client_id`, `session_id`, `user_id`),
-the page (location, path, title, referrer), the campaign (`utm_*`), and coarse
+the page (location, path and referrer), the campaign (`utm_*`), and coarse
 environment (device class, browser, OS, screen, viewport, language).
 
 ## API
@@ -71,15 +71,19 @@ Calls made before the script finishes loading are replayed if you stub it:
 also what keeps the request "simple" and skips the CORS preflight.
 
 ```json
-{ "site_id": "netwrck.com",
+{ "site_id": "thw_…",
   "events": [ { "event": "page_view", "client_id": "…", "session_id": "…",
                 "ts": 1785100000000, "page_location": "https://…" } ] }
 ```
 
-Always answers `204`. Unknown keys are kept in `props`; unusable events are
+Always answers `204`. Unknown event keys are kept in `props`; unusable events are
 dropped individually so one bad row never loses the batch. Bot user agents are
 discarded at ingest. Client timestamps more than a day from server time are
 replaced — a wrong device clock should not create events in 2031.
+
+An unknown site/write key is discarded with the same `204`. It is not
+quarantined: retaining unsolicited events would create an unbounded namespace
+and keep data nobody authorised twoHelixes to hold.
 
 `GET /v1/collect?tid=…&cid=…&en=page_view&dl=…` — GA4 Measurement-Protocol
 shaped, answers a 1×1 GIF. This is the no-JS pixel and the server-side path.
@@ -90,6 +94,9 @@ the same table; `identify` and `alias` also upsert `analytics_identities`, which
 is how an anonymous history gets stitched to a user.
 
 ## Reporting API
+
+Every reporting endpoint requires a signed-in identity and checks site
+ownership through the same team-sharing policy as charts and datasets.
 
 | endpoint                                  | returns                                        |
 | ----------------------------------------- | ---------------------------------------------- |
@@ -105,6 +112,10 @@ No raw IP is stored. `ip_hash` is `sha256(site | UTC date | ip)` truncated to
 across days or across sites. Country comes from Cloudflare's header when
 present. There are no third-party cookies and no cross-site identifiers; the
 client id is a random value in the site's own `localStorage`.
+
+Do Not Track and Global Privacy Control disable the tracker before it creates a
+client ID. The tracker suppresses events while sign-in or checkout sheets are
+open, does not collect page titles, and strips JavaScript error messages.
 
 ## Why it is built this way
 

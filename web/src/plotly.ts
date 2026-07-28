@@ -7,7 +7,7 @@
  * no renderer at all. Nothing errored - Plotly just ignores a trace type it
  * does not know, which is the worst possible failure mode.
  *
- * The full `plotly.js-dist` is ~3.5 MB. Registering the twelve traces we
+ * The full `plotly.js-dist` is ~3.5 MB. Registering the sixteen traces we
  * actually support keeps it far smaller, and the import is lazy so no one
  * pays for it until a chart is drawn.
  *
@@ -19,12 +19,16 @@ import Plotly from "plotly.js/lib/core";
 
 import bar from "plotly.js/lib/bar";
 import box from "plotly.js/lib/box";
+import candlestick from "plotly.js/lib/candlestick";
+import choropleth from "plotly.js/lib/choropleth";
 import funnel from "plotly.js/lib/funnel";
 import heatmap from "plotly.js/lib/heatmap";
 import histogram from "plotly.js/lib/histogram";
 import indicator from "plotly.js/lib/indicator";
 import pie from "plotly.js/lib/pie";
 import sankey from "plotly.js/lib/sankey";
+import scattergeo from "plotly.js/lib/scattergeo";
+import sunburst from "plotly.js/lib/sunburst";
 import table from "plotly.js/lib/table";
 import treemap from "plotly.js/lib/treemap";
 import waterfall from "plotly.js/lib/waterfall";
@@ -33,12 +37,16 @@ import waterfall from "plotly.js/lib/waterfall";
 Plotly.register([
   bar,
   box,
+  candlestick,
+  choropleth,
   funnel,
   heatmap,
   histogram,
   indicator,
   pie,
   sankey,
+  scattergeo,
+  sunburst,
   table,
   treemap,
   waterfall,
@@ -50,12 +58,16 @@ export const SUPPORTED_TRACES = new Set([
   "scattergl",
   "bar",
   "box",
+  "candlestick",
+  "choropleth",
   "funnel",
   "heatmap",
   "histogram",
   "indicator",
   "pie",
   "sankey",
+  "scattergeo",
+  "sunburst",
   "table",
   "treemap",
   "waterfall",

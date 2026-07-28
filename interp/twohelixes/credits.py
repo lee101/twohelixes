@@ -31,32 +31,35 @@ def balance(user_id: str) -> int:
     return int(row["api_credits"]) if row else 0
 
 
+def apply_locked(conn: Any, user_id: str, delta: int, reason: str, ref: str | None) -> int:
+    """Move a balance and write the ledger row, inside a caller's transaction.
+
+    Metering has to advance a meter's paid-up-to mark and take the credits for
+    those minutes atomically: two workers sweeping the same meter must not both
+    read "one minute is due" and both charge for it. That means the ledger
+    write has to join a transaction the caller already opened, so it lives here
+    and `_write` is the wrapper for everything that just wants a balance change.
+    """
+    row = conn.execute("SELECT api_credits FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown user {user_id}")
+    current = int(row["api_credits"])
+    new_balance = current + delta
+    if new_balance < 0:
+        raise InsufficientCredits(-delta, current)
+    conn.execute("UPDATE users SET api_credits = ? WHERE id = ?", (new_balance, user_id))
+    conn.execute(
+        "INSERT INTO credit_ledger (id, user_id, delta, balance, reason, ref, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (store.new_id(), user_id, delta, new_balance, reason, ref, time.time()),
+    )
+    return new_balance
+
+
 def _write(user_id: str, delta: int, reason: str, ref: str | None) -> int:
-    conn = store.connection()
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        row = conn.execute(
-            "SELECT api_credits FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown user {user_id}")
-        current = int(row["api_credits"])
-        new_balance = current + delta
-        if new_balance < 0:
-            raise InsufficientCredits(-delta, current)
-        conn.execute(
-            "UPDATE users SET api_credits = ? WHERE id = ?", (new_balance, user_id)
-        )
-        conn.execute(
-            "INSERT INTO credit_ledger (id, user_id, delta, balance, reason, ref, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (store.new_id(), user_id, delta, new_balance, reason, ref, time.time()),
-        )
-        conn.execute("COMMIT")
+    with store.transaction() as conn:
+        new_balance = apply_locked(conn, user_id, delta, reason, ref)
         return new_balance
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
 
 
 def grant(user_id: str, amount: int, reason: str = "purchase", ref: str | None = None) -> int:

@@ -91,7 +91,7 @@ Return JSON:
 {
   "chart_type": "line"|"bar"|"hbar"|"area"|"scatter"|"pie"|"heatmap"|
                 "box"|"histogram"|"candlestick"|"sankey"|"treemap"|
-                "funnel"|"waterfall"|"stat",
+                "sunburst"|"bubble"|"map"|"funnel"|"waterfall"|"stat",
   "x": "col"|null,
   "y": "col"|["col", ...]|null,
   "z": "col"|null,
@@ -112,6 +112,9 @@ Rules:
 - Time on the x axis means a line or area chart, never a bar chart, unless the
   buckets are few and discrete.
 - Ranking categories means a bar chart, horizontal when labels are long.
+- Use a map only for valid latitude/longitude columns or a country column.
+- Use bubble when a third numeric measure should control point area.
+- Use sunburst or treemap for nested part-to-whole relationships.
 - One number as the answer means "stat" - do not draw a one-bar bar chart.
 - Never propose two y-axes. If two measures differ in scale, pick the one the
   question asks about and say so in reasoning.

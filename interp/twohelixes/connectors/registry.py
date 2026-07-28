@@ -214,7 +214,7 @@ def invalidate(source_id: str) -> None:
 
 def list_sources(user_id: str) -> list[dict[str, Any]]:
     rows = store.query(
-        "SELECT id, name, kind, created_at, last_ok_at, last_error "
+        "SELECT id, name, kind, folder_id, created_at, last_ok_at, last_error "
         "FROM data_sources WHERE user_id = ? ORDER BY created_at DESC",
         (user_id,),
     )
@@ -240,21 +240,28 @@ def create_source(
 
     source_id = store.new_id()
     now = time.time()
-    store.execute(
-        "INSERT INTO data_sources (id, user_id, name, kind, config, created_at, "
-        "updated_at, last_ok_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            source_id,
-            user_id,
-            name.strip() or CONNECTORS[kind].display_name,
-            kind,
-            encrypt_config(source_config),
-            now,
-            now,
-            now,
-        ),
-    )
-    return {"id": source_id, "name": name, "kind": kind, "test": test}
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO data_sources (id, user_id, name, kind, config, created_at, "
+            "updated_at, last_ok_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                source_id,
+                user_id,
+                name.strip() or CONNECTORS[kind].display_name,
+                kind,
+                encrypt_config(source_config),
+                now,
+                now,
+                now,
+            ),
+        )
+    return {
+        "id": source_id,
+        "name": name,
+        "kind": kind,
+        "folder_id": None,
+        "test": test,
+    }
 
 
 def delete_source(user_id: str, source_id: str) -> bool:
@@ -265,5 +272,6 @@ def delete_source(user_id: str, source_id: str) -> bool:
     )
     if row is None:
         return False
-    store.execute("DELETE FROM data_sources WHERE id = ?", (source_id,))
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM data_sources WHERE id = ?", (source_id,))
     return True

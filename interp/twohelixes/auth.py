@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import time
@@ -37,6 +38,9 @@ class Identity:
     plan: str = "anon"
     api_credits: int = 0
     free_queries_used: int = 0
+    # Included usage taken in the current allowance period. Read from the
+    # user row rather than counted here, because it is shared across workers.
+    included_used: int = 0
     is_admin: bool = False
     via_api_key: bool = False
     ip: str = "0.0.0.0"
@@ -48,7 +52,7 @@ class Identity:
     @property
     def paid(self) -> bool:
         """Paid means credits on hand or an active subscription."""
-        return self.api_credits > 0 or self.plan in ("pro", "team", "scale")
+        return self.api_credits > 0 or self.plan in config.PAID_PLANS
 
     @property
     def key(self) -> str:
@@ -62,9 +66,15 @@ class Identity:
             "plan": self.plan,
             "api_credits": self.api_credits,
             "free_queries_used": self.free_queries_used,
-            "free_queries_total": config.FREE_QUERIES_PER_USER,
+            "free_queries_total": config.PLAN_ALLOWANCES.get(
+                self.plan, config.PLAN_ALLOWANCES["free"]
+            )["chat_query"],
             "free_queries_left": max(
-                0, config.FREE_QUERIES_PER_USER - self.free_queries_used
+                0,
+                config.PLAN_ALLOWANCES.get(self.plan, config.PLAN_ALLOWANCES["free"])[
+                    "chat_query"
+                ]
+                - self.included_used,
             ),
             "paid": self.paid,
             "is_admin": self.is_admin,
@@ -111,12 +121,21 @@ def clear_cookie_header() -> str:
 
 
 def _identity_from_user(row: dict[str, Any], via_api_key: bool = False) -> Identity:
+    usage = row.get("plan_usage")
+    if isinstance(usage, str):
+        try:
+            usage = json.loads(usage)
+        except ValueError:
+            usage = {}
+    used = int((usage or {}).get("chat_query", 0))
+
     return Identity(
         user_id=row["id"],
         email=row.get("email") or "",
         plan=row.get("plan") or "free",
         api_credits=int(row.get("api_credits") or 0),
         free_queries_used=int(row.get("free_queries_used") or 0),
+        included_used=used,
         is_admin=bool(row.get("is_admin")),
         via_api_key=via_api_key,
     )

@@ -8,71 +8,124 @@ user who reloads the success page must not mint credits.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
-from twohelixes import auth, config, credits, router, store
+from twohelixes import auth, config, credits, entitlements, metering, router, store
 
 log = logging.getLogger("twohelixes.routes.billing")
 
 # Prepaid credit packs. 1 credit == 1 US cent, so `credits` == amount paid.
+# Credits never expire: an expiry date earns a little revenue and costs the
+# trust of exactly the customers who prepay.
 CREDIT_PACKS = [
     {"id": "pack_10", "label": "$10", "amount_cents": 1000, "credits": 1100, "bonus": "10% bonus"},
     {"id": "pack_25", "label": "$25", "amount_cents": 2500, "credits": 2900, "bonus": "16% bonus"},
     {"id": "pack_100", "label": "$100", "amount_cents": 10000, "credits": 12500, "bonus": "25% bonus"},
 ]
 
+
+def _plan_card(plan_id: str, name: str, blurb: str, features: list[str],
+               cta: str, highlight: bool = False) -> dict[str, Any]:
+    """A plan as the pricing page needs it, priced from one source.
+
+    The allowances live in `config.PLAN_ALLOWANCES` because the gate reads them
+    there; a page that hard-codes "500 charts" beside a gate that allows 300 is
+    the kind of discrepancy that ends in a refund.
+    """
+    allowance = config.PLAN_ALLOWANCES[plan_id]
+    cents = int(allowance["price_cents"])
+    return {
+        "id": plan_id,
+        "name": name,
+        "blurb": blurb,
+        "price": "$0" if cents == 0 else f"${cents // 100}",
+        "cadence": "" if cents == 0 else "per month",
+        "included": {
+            "chat_query": allowance["chat_query"],
+            "deep_research": allowance["deep_research"],
+            "notebook_minute": allowance["notebook_minute"],
+            "seats": allowance["seats"],
+        },
+        "features": features,
+        "cta": cta,
+        "highlight": highlight,
+    }
+
+
 PLANS = [
-    {
-        "id": "free",
-        "name": "Free",
-        "price": "$0",
-        "cadence": "",
-        "features": [
-            f"{config.FREE_QUERIES_PER_USER} AI chart queries",
-            "Manual dashboards and SQL editor",
-            "All data connectors",
-            "CSV, SVG and PNG export",
+    _plan_card(
+        "free", "Free",
+        "Enough to answer real questions, every month.",
+        [
+            f"{config.PLAN_ALLOWANCES['free']['chat_query']} AI charts a month, renewing",
+            "Every chart form, every connector",
+            "Unlimited manual edits - changing a chart never costs anything",
+            "SVG, PNG, CSV and notebook export",
         ],
-        "cta": "Start free",
-    },
-    {
-        "id": "credits",
-        "name": "Pay as you go",
-        "price": "from $10",
-        "cadence": "one-off",
-        "features": [
-            "Unlimited chat charts while credits last",
-            "No rate limits",
-            "Long-running agents and deep research",
+        "Start free",
+    ),
+    _plan_card(
+        "plus", "Plus",
+        "For one person who charts things most days.",
+        [
+            f"{config.PLAN_ALLOWANCES['plus']['chat_query']} AI charts a month",
+            f"{config.PLAN_ALLOWANCES['plus']['notebook_minute'] // 60} hours of hosted "
+            "machine time included, every month",
+            "Dashboards and share links that need no account to read",
             "API access with your own key",
+            f"Then {config.CREDIT_COST['chat_query']}c a chart from credits - never cut off mid-month",
         ],
-        "cta": "Buy credits",
-        "highlight": True,
-    },
-    {
-        "id": "pro",
-        "name": "Pro",
-        "price": "$29",
-        "cadence": "per month",
-        "features": [
-            "Everything in pay as you go",
+        "Choose Plus",
+        highlight=True,
+    ),
+    _plan_card(
+        "pro", "Pro",
+        "For the person the questions get forwarded to.",
+        [
+            f"{config.PLAN_ALLOWANCES['pro']['chat_query']} AI charts a month",
+            f"{config.PLAN_ALLOWANCES['pro']['deep_research']} deep-research runs",
+            f"{config.PLAN_ALLOWANCES['pro']['notebook_minute'] // 60} hours of hosted "
+            "machine time, and GPUs by the minute",
             "Scheduled dashboard refresh",
-            "Shared dashboards and team links",
             "Priority model routing",
         ],
-        "cta": "Go Pro",
-    },
+        "Choose Pro",
+    ),
+    _plan_card(
+        "team", "Team",
+        "One workspace, one bill, five people.",
+        [
+            f"{config.PLAN_ALLOWANCES['team']['seats']} seats",
+            f"{config.PLAN_ALLOWANCES['team']['chat_query']} AI charts a month, pooled",
+            f"{config.PLAN_ALLOWANCES['team']['deep_research']} deep-research runs",
+            f"{config.PLAN_ALLOWANCES['team']['notebook_minute'] // 60} hours of hosted "
+            "machine time, pooled across the workspace",
+            "Shared sources, dashboards and history",
+            "Volume pricing on anything above the allowance",
+        ],
+        "Choose Team",
+    ),
 ]
 
 
 @router.get("/v1/billing/plans")
 def plans(ctx: router.Context) -> router.Result:
+    from twohelixes import machines
+
+    identity = auth.identify(ctx)
+    plan = getattr(identity, "plan", "") if identity else ""
     return router.json_result(
         {
             "plans": PLANS,
             "packs": CREDIT_PACKS,
             "publishable_key": config.stripe_publishable_key() or "",
             "costs": config.CREDIT_COST,
+            # The machine table is served from the same place as the plans so
+            # the included hours and the per-minute rate beside them cannot
+            # disagree - they are read from one catalogue.
+            "machines": machines.catalog_for(plan),
+            "included_class": config.MACHINE_INCLUDED_CLASS,
         }
     )
 
@@ -80,16 +133,63 @@ def plans(ctx: router.Context) -> router.Result:
 @router.get("/v1/billing/balance")
 def balance(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    summary = entitlements.summary(identity)
+    included = summary["included"]["chat_query"]
     return router.json_result(
         {
             "credits": credits.balance(identity.user_id),
             "plan": identity.plan,
             "ledger": credits.ledger(identity.user_id, limit=50),
-            "free_queries_left": max(
-                0, config.FREE_QUERIES_PER_USER - identity.free_queries_used
+            "included": summary["included"],
+            "period_end": summary["period_end"],
+            "renews_in_days": summary["renews_in_days"],
+            # Kept under the old name because the app header reads it: what a
+            # free user has left this month is the same question it was asking.
+            "free_queries_left": max(0, included["limit"] - included["used"]),
+        }
+    )
+
+
+@router.get("/v1/usage")
+def usage(ctx: router.Context) -> router.Result:
+    """What the metered work is costing, itemised and auditable.
+
+    Per-request charges are already visible in the ledger. Metered work is not
+    self-explanatory there - eight rows of "notebook_minute" say nothing about
+    which notebook, for how long, or whether it is still running - so the
+    meters are reported as themselves, including anything open right now and
+    the rate it is burning.
+    """
+    identity = auth.require(ctx)
+    report = metering.usage(identity.user_id)
+    plan = entitlements.summary(identity)
+    return router.json_result(
+        {
+            **report,
+            **plan,
+            "rates": plan["prices"],
+            "list_rates": dict(config.CREDIT_COST),
+            # A balance that will not outlast what is already running is the
+            # one number a caller needs before starting anything else.
+            "minutes_of_headroom": (
+                int(credits.balance(identity.user_id) / report["credits_per_minute_open"])
+                if report["credits_per_minute_open"]
+                else None
             ),
         }
     )
+
+
+def _price_for_plan(plan_id: str) -> str:
+    """The Stripe price for a plan, from the environment.
+
+    Prices are not in the repository: the same code runs against test and live
+    keys, and a hard-coded price id is the classic way to charge a real card a
+    test amount.
+    """
+    if plan_id not in config.PAID_PLANS:
+        return ""
+    return config.get(f"TWOHELIXES_STRIPE_PRICE_{plan_id.upper()}", "") or ""
 
 
 def _stripe() -> Any:
@@ -113,8 +213,16 @@ def checkout(ctx: router.Context) -> router.Result:
     """
     identity = auth.require(ctx)
     pack_id = str(ctx.field("pack") or "")
-    price_id = str(ctx.field("price_id") or "")
+    plan_id = str(ctx.field("plan") or "")
+    price_id = str(ctx.field("price_id") or _price_for_plan(plan_id))
     embedded = bool(ctx.field("embedded", True))
+
+    if plan_id and not price_id:
+        return router.error(
+            503,
+            "plan_unavailable",
+            f"No Stripe price is configured for the {plan_id} plan.",
+        )
 
     try:
         stripe = _stripe()
@@ -127,7 +235,13 @@ def checkout(ctx: router.Context) -> router.Result:
     if price_id:
         mode = "subscription"
         line_items = [{"price": price_id, "quantity": 1}]
-        metadata = {"user_id": identity.user_id, "kind": "subscription"}
+        # The plan travels on the session, so the webhook does not have to
+        # reverse-engineer which subscription it just received from a price id.
+        metadata = {
+            "user_id": identity.user_id,
+            "kind": "subscription",
+            "plan": plan_id or "pro",
+        }
     else:
         pack = next((p for p in CREDIT_PACKS if p["id"] == pack_id), None)
         if pack is None:
@@ -266,14 +380,17 @@ def webhook(ctx: router.Context) -> router.Result:
                 if already is None:
                     credits.grant(user_id, amount, reason="purchase", ref=obj["id"])
         else:
-            store.touch_user(user_id, plan="pro")
+            plan = str(metadata.get("plan") or "pro")
+            _activate(user_id, plan, subscription=obj.get("subscription"))
 
     elif kind in ("customer.subscription.deleted", "customer.subscription.paused"):
         row = store.one(
             "SELECT id FROM users WHERE stripe_id = ?", (obj.get("customer"),)
         )
         if row:
-            store.touch_user(row["id"], plan="free")
+            # Downgrade, do not wipe: unused credits were paid for separately
+            # and survive the end of a subscription.
+            _activate(str(row["id"]), "free")
 
     elif kind == "customer.subscription.updated":
         row = store.one(
@@ -281,17 +398,70 @@ def webhook(ctx: router.Context) -> router.Result:
         )
         if row:
             active = obj.get("status") in ("active", "trialing")
-            store.touch_user(row["id"], plan="pro" if active else "free")
+            plan = _plan_from_subscription(obj) if active else "free"
+            _activate(str(row["id"]), plan, subscription=obj.get("id"))
+
+    elif kind == "invoice.paid":
+        # A renewal. The allowance period restarts here rather than drifting
+        # from whenever the account was created, so what a subscriber gets each
+        # month lines up with what they are billed for each month.
+        row = store.one(
+            "SELECT id, plan FROM users WHERE stripe_id = ?", (obj.get("customer"),)
+        )
+        if row:
+            _activate(str(row["id"]), str(row["plan"] or "pro"), renew=True)
 
     return router.json_result({"received": True})
 
 
+def _plan_from_subscription(obj: Any) -> str:
+    """Which plan a subscription object represents.
+
+    By price id, matched against the environment - the same mapping that
+    created the checkout session, read in reverse.
+    """
+    try:
+        price_id = obj["items"]["data"][0]["price"]["id"]
+    except (KeyError, IndexError, TypeError):
+        return "pro"
+    for plan_id in config.PAID_PLANS:
+        if _price_for_plan(plan_id) == price_id:
+            return plan_id
+    return "pro"
+
+
+def _activate(user_id: str, plan: str, subscription: Any = None, renew: bool = False) -> None:
+    """Put a user on a plan and start their allowance period now."""
+    fields: dict[str, Any] = {"plan": plan}
+    if subscription:
+        fields["stripe_subscription"] = str(subscription)
+    store.touch_user(user_id, **fields)
+    store.execute(
+        "UPDATE users SET plan_period_start = ?, plan_usage = ? WHERE id = ?",
+        (time.time(), store.dump_json({}), user_id),
+    )
+    log.info("user %s is now on %s (renew=%s)", user_id, plan, renew)
+
+
 @router.post("/v1/billing/api-key")
 def api_key(ctx: router.Context) -> router.Result:
-    """Issue the caller's API key. Paid callers only - it bypasses free limits."""
+    """Issue the caller's API key.
+
+    Any paid account: a subscriber's included charts are usable from the API
+    as well as the app. Making the API credits-only meant a Plus customer who
+    wanted to script one report had to buy a second product first.
+    """
     identity = auth.require(ctx)
     if not identity.paid:
         return router.error(
-            402, "credits_required", "Add credits to use the API."
+            402,
+            "upgrade_required",
+            "The API needs a paid plan or credits. Both are self-serve.",
         )
-    return router.json_result({"api_key": auth.api_key_for(identity.user_id)})
+    return router.json_result(
+        {
+            "api_key": auth.api_key_for(identity.user_id),
+            "usage": "/v1/usage",
+            "prices": entitlements.summary(identity)["prices"],
+        }
+    )

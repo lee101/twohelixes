@@ -86,9 +86,22 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 
+CREATE TABLE IF NOT EXISTS folders (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT,
+    team_id     TEXT,
+    parent_id   TEXT,
+    name        TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS folders_user ON folders(user_id);
+CREATE INDEX IF NOT EXISTS folders_team ON folders(team_id);
+CREATE INDEX IF NOT EXISTS folders_parent ON folders(parent_id);
+
 CREATE TABLE IF NOT EXISTS data_sources (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
+    folder_id   TEXT,
     name        TEXT NOT NULL,
     kind        TEXT NOT NULL,
     config      TEXT NOT NULL,
@@ -103,12 +116,17 @@ CREATE TABLE IF NOT EXISTS datasets (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
     source_id   TEXT,
+    folder_id   TEXT,
     name        TEXT NOT NULL,
     description TEXT,
     columns     TEXT NOT NULL,
     row_count   INTEGER NOT NULL DEFAULT 0,
     storage     TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    raw_storage TEXT,
+    shape_report TEXT,
+    sheet_name  TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL
 );
 CREATE INDEX IF NOT EXISTS datasets_user ON datasets(user_id);
 
@@ -234,6 +252,17 @@ CREATE TABLE IF NOT EXISTS rate_events (
 );
 CREATE INDEX IF NOT EXISTS rate_events_lookup ON rate_events(identity, bucket, created_at);
 
+CREATE TABLE IF NOT EXISTS analytics_sites (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    domain      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    write_key   TEXT NOT NULL UNIQUE,
+    created_at  REAL NOT NULL,
+    UNIQUE (user_id, domain)
+);
+CREATE INDEX IF NOT EXISTS analytics_sites_user ON analytics_sites(user_id, created_at);
+
 -- Site analytics. One row per event, GA-shaped: the identity triple
 -- (site/client/session), the page it happened on, the acquisition fields, and
 -- a JSON bag for everything specific to the event.
@@ -283,6 +312,18 @@ CREATE TABLE IF NOT EXISTS analytics_identities (
     PRIMARY KEY (site_id, client_id)
 );
 CREATE INDEX IF NOT EXISTS analytics_identities_user ON analytics_identities(site_id, user_id);
+
+CREATE TABLE IF NOT EXISTS analytics_event_dashboards (
+    site_id       TEXT NOT NULL,
+    event_name    TEXT NOT NULL,
+    dashboard_id  TEXT,
+    status         TEXT NOT NULL,
+    claimed_at     REAL NOT NULL,
+    created_at     REAL,
+    PRIMARY KEY (site_id, event_name)
+);
+CREATE INDEX IF NOT EXISTS analytics_event_dashboards_status
+    ON analytics_event_dashboards(status, claimed_at);
 """
 
 
@@ -522,6 +563,12 @@ _ADDED_COLUMNS = (
     ("users", "stripe_subscription", "TEXT"),
     ("users", "credit_dust", "INTEGER"),
     ("jobs", "cost_micros", "INTEGER"),
+    ("data_sources", "folder_id", "TEXT"),
+    ("datasets", "folder_id", "TEXT"),
+    ("datasets", "raw_storage", "TEXT"),
+    ("datasets", "shape_report", "TEXT"),
+    ("datasets", "sheet_name", "TEXT"),
+    ("datasets", "updated_at", "REAL"),
 )
 
 

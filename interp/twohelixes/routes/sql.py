@@ -295,7 +295,9 @@ def suggestions(ctx: router.Context) -> router.Result:
         answer = llm.json_call(
             f"Dialect: {connector.dialect}\nSchema:\n{schema_text}",
             system=prompts.SQL_SUGGEST_SYSTEM,
-            model=config.MODEL_DEFAULT,
+            # Starter questions off a schema summary: small, bounded, and
+            # nobody's chart depends on them being the best possible ones.
+            model=config.MODEL_MINI,
         )
     except llm.LLMError as exc:
         return router.error(503, "llm_unavailable", str(exc))

@@ -105,6 +105,90 @@ def test_treemap_flat_when_no_parent(flows):
     assert all(p == "" for p in traces[0]["parents"])
 
 
+# -- sunburst --------------------------------------------------------------
+
+
+def test_sunburst_uses_the_treemap_hierarchy(flows):
+    config = {"x": "region", "y": "revenue", "color": "channel"}
+    treemap, _ = forms.treemap(flows, config)
+    figure, _ = figures.build(flows, {"chart_type": "sunburst", **config})
+    trace = figure["data"][0]
+    assert trace["type"] == "sunburst"
+    assert trace["labels"] == treemap[0]["labels"]
+    assert trace["parents"] == treemap[0]["parents"]
+    assert trace["values"] == treemap[0]["values"]
+    assert defaults.audit(defaults.apply(figure, chart_type="sunburst")) == []
+
+
+# -- bubble ----------------------------------------------------------------
+
+
+def test_bubble_builds_with_area_scaled_sizes():
+    frame = pd.DataFrame({
+        "x": [1, 2, 3],
+        "y": [3, 2, 1],
+        "population": [1, 4, 100],
+    })
+    figure, _ = figures.build(
+        frame, {"chart_type": "bubble", "x": "x", "y": "y", "size": "population"}
+    )
+    trace = figure["data"][0]
+    assert trace["type"] == "scatter"
+    assert trace["mode"] == "markers"
+    assert trace["marker"]["size"] == pytest.approx([6.0, 8.4, 42.0])
+    assert defaults.audit(defaults.apply(figure, chart_type="bubble")) == []
+
+
+def test_bubble_caps_groups_at_three():
+    frame = pd.DataFrame({
+        "x": range(5),
+        "y": range(5),
+        "size": [1, 2, 3, 4, 5],
+        "group": list("abcde"),
+    })
+    figure, warnings = figures.build(
+        frame,
+        {"chart_type": "bubble", "x": "x", "y": "y", "size": "size", "color": "group"},
+    )
+    assert len(figure["data"]) == palette.ALL_PAIRS_MAX_SERIES
+    assert any("showing" in warning for warning in warnings)
+
+
+# -- map -------------------------------------------------------------------
+
+
+def test_coordinate_map_builds_scattergeo_and_caps_groups():
+    frame = pd.DataFrame({
+        "latitude": [51.5, 48.9, 40.7, 35.7, -33.9],
+        "longitude": [-0.1, 2.3, -74.0, 139.7, 151.2],
+        "value": [10, 20, 30, 40, 50],
+        "group": list("abcde"),
+    })
+    figure, warnings = figures.build(
+        frame, {"chart_type": "map", "y": "value", "color": "group"}
+    )
+    assert len(figure["data"]) == palette.ALL_PAIRS_MAX_SERIES
+    assert all(trace["type"] == "scattergeo" for trace in figure["data"])
+    assert any("showing" in warning for warning in warnings)
+    styled = defaults.apply(figure, chart_type="map")
+    assert defaults.audit(styled) == []
+
+
+def test_country_map_builds_choropleth_with_our_sequential_scale():
+    frame = pd.DataFrame({
+        "country": ["France", "Germany", "Japan"],
+        "value": [10, 20, 30],
+    })
+    figure, _ = figures.build(
+        frame, {"chart_type": "map", "x": "country", "y": "value"}
+    )
+    trace = figure["data"][0]
+    assert trace["type"] == "choropleth"
+    assert trace["locationmode"] == "country names"
+    assert [stop[1] for stop in trace["colorscale"]] == palette.sequential(9)
+    assert defaults.audit(defaults.apply(figure, chart_type="map")) == []
+
+
 # -- funnel ----------------------------------------------------------------
 
 

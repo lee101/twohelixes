@@ -8,6 +8,7 @@
  */
 
 import { el, formatDuration } from "./chart";
+
 import { spinner } from "./helix";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -22,6 +23,8 @@ const STAGE_LABELS: Record<string, string> = {
 interface StageNode {
   root: HTMLElement;
   body: HTMLElement;
+  /** One line that survives collapsing, so a shut stage still says what it did. */
+  summary: HTMLElement;
   status: HTMLElement;
   startedAt: number;
 }
@@ -32,14 +35,33 @@ export class TraceView {
   private readonly count: HTMLElement;
   private readonly stages = new Map<string, StageNode>();
   private active: StageNode | null = null;
+  /** The user opened or closed it by hand; stop opening it for them. */
+  private pinned = false;
+  private startedAt = 0;
 
   constructor() {
-    this.root = el("section", "trace");
-    const header = el("header", "trace-header");
+    // A disclosure rather than a panel. The trace is the product's proof of
+    // work, not its output: it opens itself while a run is happening so you
+    // can watch, and closes to one line once the chart is there - which is
+    // the moment the chart, not the reasoning, is what you came for.
+    const root = document.createElement("details");
+    root.className = "trace";
+    this.root = root;
+    const header = document.createElement("summary");
+    header.className = "trace-header";
     const title = el("h2", "trace-title");
     title.textContent = "Reasoning";
     this.count = el("span", "trace-detail");
     header.append(title, this.count);
+    root.addEventListener("toggle", () => {
+      // Only a real click counts: opening it ourselves must not pin it. The
+      // flag is cleared *here* rather than after the assignment, because
+      // `toggle` is dispatched asynchronously - clearing it straight after
+      // setting `open` meant every one of our own opens read as the user's,
+      // and the trace then never folded itself away again.
+      if (this.programmatic) this.programmatic = false;
+      else this.pinned = true;
+    });
 
     const scroll = el("div", "trace-scroll");
     this.list = el("ol", "trace-list is-top");
@@ -57,12 +79,25 @@ export class TraceView {
     this.root.append(header, scroll);
   }
 
+  private programmatic = false;
+
+  /** Open or close without the toggle listener reading it as the user's doing. */
+  private setOpen(open: boolean): void {
+    const node = this.root as HTMLDetailsElement;
+    if (node.open === open) return;
+    this.programmatic = true;
+    node.open = open;
+  }
+
   reset(): void {
     this.stages.clear();
     this.active = null;
     this.list.replaceChildren();
     this.list.classList.add("is-top");
-    this.count.textContent = "";
+    this.count.textContent = "Working…";
+    this.startedAt = performance.now();
+    this.root.classList.add("is-running");
+    if (!this.pinned) this.setOpen(true);
   }
 
   handle(event: string, data: any): void {
@@ -107,10 +142,13 @@ export class TraceView {
           String(data.message ?? data.code ?? "Something went wrong"),
           "trace-error",
         );
-        this.stopSpinners();
+        // A failure is the one time the reasoning is the answer, so it stays
+        // open and the stage that failed stays unfolded.
+        this.active?.root.classList.remove("is-collapsed");
+        this.finish(true);
         break;
       case "done":
-        this.stopSpinners();
+        this.finish(false);
         break;
     }
   }
@@ -128,17 +166,21 @@ export class TraceView {
     status.append(spinner(18));
 
     head.append(label, status);
+    const summary = el("p", "trace-stage-summary");
+    summary.hidden = true;
     const body = el("div", "trace-stage-body");
-    root.append(head, body);
+    root.append(head, summary, body);
 
     // Collapsing a finished stage keeps a long trace readable.
     head.addEventListener("click", () => root.classList.toggle("is-collapsed"));
 
     this.list.append(root);
-    const node: StageNode = { root, body, status, startedAt: performance.now() };
+    const node: StageNode = {
+      root, body, summary, status, startedAt: performance.now(),
+    };
     this.stages.set(name, node);
     this.active = node;
-    this.count.textContent = `${this.stages.size} stages`;
+    this.count.textContent = STAGE_LABELS[name] ?? name;
     root.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
@@ -153,10 +195,13 @@ export class TraceView {
 
     const detail = summarise(data);
     if (detail) {
-      const line = el("p", "trace-detail");
-      line.textContent = detail;
-      node.body.append(line);
+      node.summary.textContent = detail;
+      node.summary.hidden = false;
     }
+    // A finished stage folds to its one-line result. The thoughts, the code
+    // and the output are still there behind a click; leaving them all open
+    // buried the chart under a screen of transcript on every run.
+    node.root.classList.add("is-collapsed");
     if (this.active === node) this.active = null;
   }
 
@@ -214,6 +259,20 @@ export class TraceView {
     const line = el("li", className);
     line.textContent = text;
     this.list.append(line);
+  }
+
+  /** The run ended. Say what it took in one line, and get out of the way. */
+  private finish(failed: boolean): void {
+    this.stopSpinners();
+    this.root.classList.remove("is-running");
+    const stages = this.stages.size;
+    const elapsed = this.startedAt ? formatDuration(performance.now() - this.startedAt) : "";
+    this.count.textContent = failed
+      ? "Did not finish"
+      : [`${stages} ${stages === 1 ? "stage" : "stages"}`, elapsed]
+          .filter(Boolean)
+          .join(" · ");
+    if (!this.pinned && !failed) this.setOpen(false);
   }
 
   private stopSpinners(): void {

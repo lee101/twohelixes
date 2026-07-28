@@ -5,11 +5,13 @@
  * trace, one editor — and a runtime would cost more than it saves here.
  */
 
-import { ApiError, api, stream, type ChartConfig, type PipelineResult, type User } from "./api";
-import { ChartView, button, el } from "./chart";
+import { ApiError, api, stream, type ChartConfig, type PipelineResult, type PlotlyFigure, type User } from "./api";
+import { ChartView, button, el, renderFigure } from "./chart";
 import { logo, spinner } from "./helix";
 import { Builder } from "./builder";
 import { DashboardView } from "./dashboard";
+import { DashboardListView } from "./dashboards";
+import { SourcesPanel } from "./sources";
 import { TraceView } from "./trace";
 
 interface Sample {
@@ -20,7 +22,7 @@ interface Sample {
   rows: number;
 }
 
-type View = "chat" | "builder" | "dashboard";
+type View = "chat" | "builder" | "dashboard" | "dashboards";
 
 interface State {
   view: View;
@@ -31,10 +33,15 @@ interface State {
   lastQuestion: string;
   sources: { id: string; name: string; kind: string; supports_sql: boolean }[];
   activeSource: string | null;
+  /** The sample a signed-out visitor is trying. The only data the trial can
+   *  reach, so it is sent by key rather than attached to an account. */
+  activeSample: string | null;
   cancel: (() => void) | null;
   samples: Sample[];
   suggestions: string[];
   ran: boolean;
+  /** The visitor asked for the sign-in form before spending the trial. */
+  showSignIn: boolean;
 }
 
 const state: State = {
@@ -46,10 +53,12 @@ const state: State = {
   lastQuestion: "",
   sources: [],
   activeSource: null,
+  activeSample: null,
   cancel: null,
   samples: [],
   suggestions: [],
   ran: false,
+  showSignIn: false,
 };
 
 const root = document.getElementById("root")!;
@@ -57,6 +66,8 @@ const trace = new TraceView();
 const chart = new ChartView({
   onConfigChange: applyConfig,
   onRerun: (request) => ask(state.lastQuestion, request),
+  onPin: (result) => void pinToDashboard(result),
+  question: () => state.lastQuestion,
 });
 
 boot().catch((error) => showFatal(error));
@@ -67,8 +78,31 @@ async function boot(): Promise<void> {
   } catch {
     state.user = null;
   }
+
+  // A dataset page links here with the question it just showed. Arriving with
+  // an empty ask box after clicking "ask this yourself" loses the thread the
+  // visitor was following, and they have to retype what they just read.
+  const params = new URLSearchParams(window.location.search);
+  const sample = params.get("sample");
+  const question = params.get("q");
+  if (sample) state.activeSample = sample;
+  // Through state, not through the DOM: loadSources() and loadSamples() both
+  // re-render, and a value written straight onto the textarea is gone by the
+  // time either of them lands.
+  if (question) state.lastQuestion = question;
+
   render();
   if (state.user?.signed_in) void loadSources();
+  // The samples are what an anonymous visitor can ask about, so they have to
+  // load before sign-in rather than after it.
+  else void loadSamples();
+
+  if (question) {
+    document.querySelector<HTMLTextAreaElement>(".ask-input")?.focus();
+    // Prefilled, not submitted: the run costs the visitor an allowance, and
+    // spending it before they have even read the box is not theirs to spend.
+    history.replaceState(null, "", window.location.pathname);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -91,17 +125,64 @@ function header(): HTMLElement {
 
   const right = el("div", "app-header-right");
   if (state.user?.signed_in) {
-    const meta = el("span", "user-meta");
-    meta.textContent = state.user.paid
-      ? `${state.user.api_credits.toLocaleString()} credits`
-      : `${state.user.free_queries_left} free ${plural(state.user.free_queries_left, "query", "queries")} left`;
-    right.append(meta, themeToggle(), button("Sign out", signOut));
+    // Credits are a balance the account holder spends and can run out of, so
+    // it stays. A running total of free queries was a countdown to a wall in
+    // the corner of every screen, which is not what the header is for.
+    if (state.user.paid) {
+      const meta = el("span", "user-meta");
+      meta.textContent = `${state.user.api_credits.toLocaleString()} credits`;
+      right.append(meta);
+    }
+    right.append(themeToggle(), button("Sign out", signOut));
   } else {
-    right.append(themeToggle());
+    // A visitor who has decided to sign up should not have to spend the trial
+    // first to find the form.
+    right.append(
+      themeToggle(),
+      button("Sign in", () => {
+        state.showSignIn = true;
+        render();
+        document.querySelector<HTMLInputElement>(".signin-input")?.focus();
+      }),
+    );
   }
 
-  bar.append(brand, right);
+  bar.append(brand);
+  if (state.user?.signed_in) bar.append(nav());
+  bar.append(right);
   return bar;
+}
+
+/**
+ * Where you are and where else you can be. Before this the dashboard existed
+ * but was only reachable from a test hook, which is the same as not existing.
+ */
+function nav(): HTMLElement {
+  const wrap = el("nav", "app-nav");
+  wrap.setAttribute("aria-label", "Sections");
+
+  const items: { label: string; view: View; go: () => void }[] = [
+    { label: "Ask", view: "chat", go: () => { state.view = "chat"; render(); } },
+    {
+      label: "Dashboards",
+      view: "dashboards",
+      go: () => void openDashboardList(),
+    },
+  ];
+
+  for (const item of items) {
+    const node = el("button", "app-nav-item") as HTMLButtonElement;
+    node.type = "button";
+    node.textContent = item.label;
+    const here =
+      state.view === item.view ||
+      (item.view === "dashboards" && state.view === "dashboard");
+    node.classList.toggle("is-active", here);
+    if (here) node.setAttribute("aria-current", "page");
+    node.addEventListener("click", item.go);
+    wrap.append(node);
+  }
+  return wrap;
 }
 
 // Same mark and the same storage key as the marketing header, so the control
@@ -143,8 +224,13 @@ function prefersDark(): boolean {
 
 function main(): HTMLElement {
   const wrap = el("main", "app-main");
-  if (!state.user?.signed_in) {
-    wrap.append(signInPanel());
+  // Anonymous visitors get the product, not a form. They can ask one question
+  // on the sample data; the sign-in panel appears when they have seen it work,
+  // which is the only moment an email is worth asking for.
+  if (!state.user?.signed_in && (state.ran || state.showSignIn)) {
+    wrap.append(
+      signInPanel(state.ran ? "You have seen it work. Keep going?" : ""),
+    );
     return wrap;
   }
 
@@ -158,6 +244,11 @@ function main(): HTMLElement {
   if (state.view === "dashboard" && state.dashboard) {
     wrap.classList.add("app-main-wide");
     wrap.append(state.dashboard.root);
+    return wrap;
+  }
+  if (state.view === "dashboards") {
+    wrap.classList.add("app-main-wide");
+    wrap.append(dashboardList().root);
     return wrap;
   }
 
@@ -219,6 +310,20 @@ function starterPanel(): HTMLElement {
 }
 
 async function attachSample(sample: Sample, node: HTMLButtonElement): Promise<void> {
+  // Signed out, there is no account to attach anything to. The sample is sent
+  // by key with the question instead, which is exactly what the trial allows.
+  if (!state.user?.signed_in) {
+    state.activeSample = sample.key;
+    state.suggestions = sample.questions.slice(0, 4);
+    render();
+    const box = document.querySelector<HTMLTextAreaElement>(".ask-input");
+    if (box) {
+      box.value = sample.questions[0] ?? "";
+      box.focus();
+    }
+    return;
+  }
+
   node.disabled = true;
   const meta = node.querySelector<HTMLElement>(".sample-meta");
   if (meta) meta.textContent = "Loading…";
@@ -267,13 +372,13 @@ async function loadSamples(): Promise<void> {
   }
 }
 
-function signInPanel(): HTMLElement {
+function signInPanel(prompt = ""): HTMLElement {
   const panel = el("section", "signin");
   const heading = el("h1");
-  heading.textContent = "Sign in to start asking";
+  heading.textContent = prompt || "Sign in to start asking";
   const lede = el("p", "signin-lede");
   lede.textContent =
-    "New accounts get three free queries. Anonymous requests are not accepted — that is what keeps the free tier available for real users.";
+    "An email, and nothing else — no password, no card. Then point it at your own data.";
 
   const form = el("form", "signin-form") as HTMLFormElement;
   const input = document.createElement("input");
@@ -318,7 +423,7 @@ function askPanel(): HTMLElement {
   input.className = "ask-input";
   input.rows = 3;
   input.placeholder =
-    "Ask anything about your data — “which regions are shrinking, and by how much?”";
+    "Ask for a chart — “which regions are shrinking, and by how much?”";
   input.value = state.lastQuestion;
 
   const row = el("div", "ask-row");
@@ -334,7 +439,7 @@ function askPanel(): HTMLElement {
   });
   stop.hidden = !state.cancel;
 
-  row.append(sourcePicker(), submit, stop);
+  row.append(sourcePicker(), sourcesPanel().button(), submit, stop);
   form.append(input, row);
 
   // Enter submits; Shift+Enter is a newline.
@@ -380,11 +485,34 @@ function sourcePicker(): HTMLElement {
   return wrap;
 }
 
+let panel: SourcesPanel | null = null;
+
+/**
+ * One panel instance for the session: it owns two `<dialog>` elements appended
+ * to the body, so rebuilding it on every render would leak a pair each time.
+ */
+function sourcesPanel(): SourcesPanel {
+  panel ??= new SourcesPanel({
+    onChange: (sources, _datasets, selected) => {
+      state.sources = sources;
+      // Whatever was just added is almost certainly what the next question is
+      // about, so select it rather than making the user find it in the picker.
+      if (selected?.type === "source") state.activeSource = selected.id;
+      else if (sources.length === 1) state.activeSource = sources[0].id;
+      render();
+    },
+  });
+  return panel;
+}
+
 async function loadSources(): Promise<void> {
   try {
     const payload = await api.get<{ sources: State["sources"] }>("/v1/sources");
     state.sources = payload.sources ?? [];
-    if (!state.activeSource && state.sources.length === 1) {
+    // Not when a sample was named in the URL: someone who arrived from a
+    // dataset page asked about that dataset, not about whatever source they
+    // happen to have connected.
+    if (!state.activeSource && !state.activeSample && state.sources.length === 1) {
       // One source is not a choice. Pre-selecting it removes a step that only
       // ever has one right answer.
       state.activeSource = state.sources[0].id;
@@ -417,6 +545,7 @@ function ask(question: string, edit = ""): void {
     if (state.lastResult) body.config = state.lastResult.config;
   }
   if (state.activeSource) body.source_id = state.activeSource;
+  else if (state.activeSample) body.sample = state.activeSample;
 
   state.cancel = stream("/v1/query/stream", body, (event, data) => {
     trace.handle(event, data);
@@ -486,10 +615,26 @@ function showError(data: { code?: string; message?: string }): void {
   text.textContent = data.message ?? data.code ?? "Something went wrong";
   banner.append(text);
 
-  if (data.code === "free_quota_exhausted" || data.code === "insufficient_credits") {
+  // A wall that only says "no" is a wall. Each refusal carries the one action
+  // that clears it, and the two are different actions: a visitor who has used
+  // the trial needs an account, not a price list.
+  if (data.code === "signin_required" || data.code === "trial_used") {
+    banner.append(
+      button("Sign in — free", () => {
+        state.ran = false;
+        render();
+        document.querySelector<HTMLInputElement>(".signin-input")?.focus();
+      }),
+    );
+  } else if (
+    data.code === "out_of_allowance" ||
+    data.code === "free_quota_exhausted" ||
+    data.code === "insufficient_credits"
+  ) {
     const link = el("a", "btn btn-primary btn-small") as HTMLAnchorElement;
     link.href = "/pricing";
-    link.textContent = "Add credits";
+    link.textContent =
+      data.code === "insufficient_credits" ? "Add credits" : "See plans";
     banner.append(link);
   }
 
@@ -521,10 +666,6 @@ async function signOut(): Promise<void> {
   render();
 }
 
-function plural(n: number, one: string, many: string): string {
-  return n === 1 ? one : many;
-}
-
 // Restore the stored theme before first paint of dynamic content.
 const storedTheme = localStorage.getItem("th-theme");
 if (storedTheme) document.documentElement.setAttribute("data-theme", storedTheme);
@@ -538,6 +679,33 @@ if (storedTheme) document.documentElement.setAttribute("data-theme", storedTheme
   question: string,
   extra: Record<string, unknown> = {},
 ) => askWith(question, extra);
+
+/**
+ * The renderer, on its own. The chart benchmark draws every form through this
+ * rather than through a page of its own, so what it screenshots is the bundle,
+ * the theme tokens and the CSS a user gets - a harness with its own copy of
+ * Plotly would pass while the product was broken.
+ */
+/**
+ * The whole answer panel - chart, controls, warnings, export row - fed a
+ * result directly. The visual benchmark uses it to photograph every chart
+ * form inside the real card at real viewport widths, which is where clipping,
+ * wrapping and contrast problems actually live; a bare figure in a bare div
+ * does not have a card to overflow.
+ */
+(window as unknown as Record<string, unknown>).__thShowResult = async (
+  result: PipelineResult,
+) => {
+  state.lastResult = result;
+  state.ran = true;
+  render();
+  await chart.show(result);
+};
+
+(window as unknown as Record<string, unknown>).__thRenderFigure = (
+  host: HTMLElement,
+  figure: PlotlyFigure,
+) => renderFigure(host, figure);
 
 function askWith(question: string, extra: Record<string, unknown>): void {
   state.lastQuestion = question;
@@ -600,6 +768,108 @@ async function openBuilder(source: Record<string, unknown>): Promise<Builder> {
   await openDashboard(idOrToken, shared);
   return true;
 };
+
+let list: DashboardListView | null = null;
+
+function dashboardList(): DashboardListView {
+  list ??= new DashboardListView({ onOpen: (id) => void openDashboard(id) });
+  return list;
+}
+
+async function openDashboardList(): Promise<void> {
+  state.view = "dashboards";
+  state.dashboard = null;
+  render();
+  await dashboardList().load();
+}
+
+/**
+ * Put the chart that is on screen onto a dashboard.
+ *
+ * The chart already exists server-side by the time it is drawn, so this is an
+ * attach rather than a re-run: no second model call, no second charge for the
+ * same answer.
+ */
+async function pinToDashboard(result: PipelineResult): Promise<void> {
+  if (!state.user?.signed_in) {
+    showError({ code: "signin_required", message: "Sign in to keep charts on a dashboard." });
+    return;
+  }
+  if (!result.chart_id) {
+    showError({ code: "not_saved", message: "This chart was not saved, so it cannot be pinned." });
+    return;
+  }
+
+  try {
+    const payload = await api.get<{ dashboards: { id: string; title: string }[] }>(
+      "/v1/dashboards",
+    );
+    const existing = payload.dashboards ?? [];
+    // One dashboard is not a choice, and none is not a question - it is a
+    // dashboard waiting to be made.
+    const target = existing.length
+      ? await chooseDashboard(existing)
+      : await api.post<{ id: string }>("/v1/dashboards", { title: state.lastQuestion.slice(0, 80) });
+    if (!target) return;
+
+    await api.post(`/v1/dashboards/${target.id}/charts`, { chart_id: result.chart_id, w: 1 });
+    await openDashboard(target.id);
+  } catch (error) {
+    showError({ code: (error as ApiError).code, message: (error as Error).message });
+  }
+}
+
+/** Which board. A sheet, because a browser prompt cannot list anything. */
+function chooseDashboard(
+  options: { id: string; title: string }[],
+): Promise<{ id: string } | null> {
+  return new Promise((resolve) => {
+    const sheet = document.createElement("dialog");
+    sheet.className = "pick-sheet";
+    const heading = el("h2");
+    heading.textContent = "Add to which dashboard?";
+    const list = el("ul", "pick-list");
+
+    const close = (value: { id: string } | null) => {
+      sheet.close();
+      sheet.remove();
+      resolve(value);
+    };
+
+    for (const option of options) {
+      const item = el("li");
+      const node = el("button", "pick-item") as HTMLButtonElement;
+      node.type = "button";
+      node.textContent = option.title || "Untitled dashboard";
+      node.addEventListener("click", () => close({ id: option.id }));
+      item.append(node);
+      list.append(item);
+    }
+
+    const fresh = el("li");
+    const create = el("button", "pick-item is-new") as HTMLButtonElement;
+    create.type = "button";
+    create.textContent = "New dashboard";
+    create.addEventListener("click", async () => {
+      try {
+        const made = await api.post<{ id: string }>("/v1/dashboards", {
+          title: state.lastQuestion.slice(0, 80) || "Untitled dashboard",
+        });
+        close({ id: made.id });
+      } catch {
+        close(null);
+      }
+    });
+    fresh.append(create);
+    list.append(fresh);
+
+    const cancel = button("Cancel", () => close(null));
+    sheet.append(heading, list, cancel);
+    sheet.addEventListener("cancel", () => close(null));
+    document.body.append(sheet);
+    sheet.showModal();
+  });
+}
 
 async function openDashboard(idOrToken: string, shared = false): Promise<DashboardView> {
   const view = new DashboardView({ readOnly: shared });

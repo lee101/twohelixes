@@ -28,8 +28,21 @@
   var MAX_QUEUE = 50;
 
   var config = window[CONFIG_KEY] || {};
+  var privacySignal =
+    navigator.globalPrivacyControl === true ||
+    navigator.doNotTrack === '1' ||
+    window.doNotTrack === '1';
+  if (privacySignal || !config.siteId) {
+    window.th = function () {};
+    window.analytics = window.analytics || {
+      track: function () {},
+      page: function () {},
+      identify: function () {}
+    };
+    return;
+  }
   var endpoint = config.endpoint || 'https://twohelixes.com/v1/collect';
-  var siteId = config.siteId || location.hostname;
+  var siteId = config.siteId;
   var queue = [];
   var timer = null;
   var started = Date.now();
@@ -105,7 +118,7 @@
   }
 
   function baseEvent(name, props) {
-    return {
+    var event = {
       event: name,
       ts: Date.now(),
       client_id: clientId(),
@@ -113,7 +126,6 @@
       user_id: userId,
       page_location: location.href,
       page_path: location.pathname,
-      page_title: (document.title || '').slice(0, 255),
       referrer: document.referrer || '',
       utm_source: param('utm_source'),
       utm_medium: param('utm_medium'),
@@ -126,6 +138,21 @@
       engagement_ms: engagement,
       props: props || {}
     };
+    engagement = 0;
+    return event;
+  }
+
+  function sensitiveSheetOpen() {
+    try {
+      return Boolean(
+        document.querySelector(
+          '#signin-overlay[open],#checkout-overlay[open],.signin:not([hidden]),' +
+          '[data-sensitive-analytics]:not([hidden])'
+        )
+      );
+    } catch (e) {
+      return false;
+    }
   }
 
   function send(body, useBeacon) {
@@ -150,7 +177,7 @@
   }
 
   function flush(useBeacon) {
-    if (!queue.length) return;
+    if (!queue.length || !siteId) return;
     var events = queue.splice(0, queue.length);
     if (timer) {
       clearTimeout(timer);
@@ -174,16 +201,18 @@
   }
 
   var track = safe(function (name, props) {
-    if (!name) return;
+    if (!name || sensitiveSheetOpen()) return;
     enqueue(baseEvent(String(name).slice(0, 64), props));
   });
 
   var page = safe(function (props) {
+    if (sensitiveSheetOpen()) return;
     started = Date.now();
     enqueue(baseEvent('page_view', props));
   });
 
   var identify = safe(function (id, traits) {
+    if (sensitiveSheetOpen()) return;
     userId = id ? String(id).slice(0, 64) : null;
     var event = baseEvent('identify', traits);
     event.type = 'identify';
@@ -227,6 +256,9 @@
         var node = e.target;
         while (node && node.nodeName !== 'A') node = node.parentNode;
         if (!node || !node.href) return;
+        if (node.closest && node.closest(
+          '#signin-overlay,#checkout-overlay,.signin,[data-sensitive-analytics]'
+        )) return;
         var href = node.href;
         var isOutbound = node.hostname && node.hostname !== location.hostname;
         var isFile = /\.(pdf|zip|mp4|mp3|wav|csv|xlsx?|docx?|png|jpe?g|webp|svg)$/i.test(node.pathname || '');
@@ -243,9 +275,10 @@
       safe(function (e) {
         if (!e || !e.message) return;
         track('js_error', {
-          message: String(e.message).slice(0, 200),
-          source: String(e.filename || '').slice(0, 200),
-          line: e.lineno || 0
+          error_type: e.error && e.error.name ? String(e.error.name).slice(0, 80) : 'Error',
+          source_host: (function () {
+            try { return new URL(e.filename || '', location.href).host; } catch (err) { return ''; }
+          })()
         });
       })
     );

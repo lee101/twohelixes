@@ -1,12 +1,20 @@
-"""Rate limiting and free-query accounting.
+"""Rate limiting and the decision to let an operation run.
 
-The policy the product needs:
+Who pays is `entitlements`. This module answers the narrower question of
+whether the request may run at all, which is a different thing: an account with
+plenty of allowance can still be asking sixty times a minute.
 
-* anonymous callers get nothing that costs an LLM call - that is the bot gate;
-* a signed-in free user gets `FREE_QUERIES_PER_USER` full pipeline runs total,
-  under heavy per-minute/hour/day limits;
-* a paying caller spending API credits is not throttled beyond a global safety
-  valve, because they have already paid for the capacity.
+The policy:
+
+* an anonymous caller gets **one question a day, on our sample data**. It used
+  to be none at all, which is a sound bot gate and a terrible funnel - it asks
+  for an account before the product has done anything. One question is enough
+  to show the thing working and far too little to farm, and it is capped by
+  address, so a scraper is bounded by its address pool rather than its
+  patience;
+* a signed-in caller runs against their plan's allowance, then their credits;
+* a caller spending credits is not throttled beyond a global safety valve,
+  because they have already paid for the capacity.
 
 Counters live in SQLite so they survive a worker restart and are shared across
 worker processes - an in-process dict would let a 4-worker box serve 4x the
@@ -17,9 +25,10 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
-from twohelixes import config, store
+from twohelixes import config, entitlements, store
 
 log = logging.getLogger("twohelixes.ratelimit")
 
@@ -30,13 +39,22 @@ class Decision:
     reason: str = ""
     retry_after: int = 0
     detail: str = ""
+    # What would have been charged, so a refusal can say what to do about it
+    # rather than only that it happened.
+    quote: dict[str, Any] = field(default_factory=dict)
+    upgrade: str = ""
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "error": self.reason,
             "detail": self.detail,
             "retry_after": self.retry_after,
         }
+        if self.quote:
+            payload["quote"] = self.quote
+        if self.upgrade:
+            payload["upgrade"] = self.upgrade
+        return payload
 
 
 WINDOWS = (
@@ -44,6 +62,10 @@ WINDOWS = (
     ("hour", 3600, config.FREE_RATE_PER_HOUR),
     ("day", 86400, config.FREE_RATE_PER_DAY),
 )
+
+# Operations an anonymous caller may try. Anything that reaches a customer's
+# own data or costs real compute stays behind sign-in.
+ANON_OPERATIONS = ("chat_query",)
 
 
 def _count(identity: str, bucket: str, window: int) -> int:
@@ -68,88 +90,100 @@ def sweep(older_than: int = 86400 * 2) -> None:
     )
 
 
-def check(identity, operation: str) -> Decision:
+def anonymous_trial_left(identity: Any) -> int:
+    used = _count(f"ip:{getattr(identity, 'ip', '0.0.0.0')}", "anon", 86400)
+    return max(0, config.ANON_QUERIES_PER_DAY - used)
+
+
+def check(identity: Any, operation: str, *, sample_data: bool = False) -> Decision:
     """Decide whether `identity` may run `operation` right now."""
     key = identity.key
-    cost = config.CREDIT_COST.get(operation, 0)
 
     # Global valve applies to everyone, paid included.
     if _count(key, "any", 60) >= config.HARD_RATE_PER_MINUTE:
         return Decision(
-            False,
-            "rate_limited",
-            retry_after=60,
+            False, "rate_limited", retry_after=60,
             detail="Too many requests in the last minute.",
         )
 
     if not identity.signed_in:
-        return Decision(
-            False,
-            "signin_required",
-            detail=(
-                "Sign in to run queries. New accounts get "
-                f"{config.FREE_QUERIES_PER_USER} free queries."
-            ),
-        )
-
-    # Paying callers: gate on balance, not on counters.
-    if identity.paid:
-        if identity.api_credits < cost:
+        if operation not in ANON_OPERATIONS or config.ANON_QUERIES_PER_DAY <= 0:
             return Decision(
-                False,
-                "insufficient_credits",
-                detail=f"This operation costs {cost} credits.",
+                False, "signin_required",
+                detail="Sign in to run this.",
+                upgrade="signin",
+            )
+        if config.ANON_SAMPLE_DATA_ONLY and not sample_data:
+            return Decision(
+                False, "signin_required",
+                detail=(
+                    "Try it on the sample data first, or sign in to use your own - "
+                    "it takes an email and nothing else."
+                ),
+                upgrade="signin",
+            )
+        if anonymous_trial_left(identity) <= 0:
+            return Decision(
+                False, "trial_used",
+                detail=(
+                    "That is today's free question. An email gets you "
+                    f"{config.PLAN_ALLOWANCES['free']['chat_query']} charts a "
+                    "month on your own data, renewing, with no card."
+                ),
+                upgrade="signin",
             )
         return Decision(True)
 
-    # Free tier: lifetime allowance first, then the burst windows.
-    if identity.free_queries_used >= config.FREE_QUERIES_PER_USER:
+    quote = entitlements.quote(identity, operation)
+    if quote.payer == "blocked":
+        detail = (
+            "You have used this month's included charts. Add credits, or move "
+            "up a plan to raise the allowance."
+            if quote.reason == "out_of_allowance"
+            else f"This costs {quote.credits_required} credits."
+        )
         return Decision(
-            False,
-            "free_quota_exhausted",
-            detail=(
-                f"You have used all {config.FREE_QUERIES_PER_USER} free queries. "
-                "Add API credits to keep going."
-            ),
+            False, quote.reason or "insufficient_credits",
+            detail=detail, quote=quote.as_dict(), upgrade="plan",
         )
 
+    # Credits are the paid path: not throttled beyond the global valve, because
+    # the capacity has been bought.
+    if quote.payer == "credits":
+        return Decision(True, quote=quote.as_dict())
+
+    # Included allowance: keep the burst windows, so one account cannot turn a
+    # month of allowance into a minute of load.
     for bucket, window, limit in WINDOWS:
         if _count(key, bucket, window) >= limit:
             return Decision(
-                False,
-                "rate_limited",
-                retry_after=window,
-                detail=f"Free tier allows {limit} queries per {bucket}.",
+                False, "rate_limited", retry_after=window,
+                detail=f"Included usage allows {limit} queries per {bucket}.",
+                quote=quote.as_dict(),
             )
 
-    return Decision(True)
+    return Decision(True, quote=quote.as_dict())
 
 
-def consume(identity, operation: str) -> None:
+def consume(identity: Any, operation: str, ref: str = "") -> dict[str, Any]:
     """Charge for a successful operation.
 
-    Called only after the work succeeded, so a failed pipeline does not burn a
-    user's free allowance.
+    Called only after the work succeeded, so a failed pipeline does not burn
+    anyone's allowance or credits.
     """
     key = identity.key
     record(key, "any")
 
     if not identity.signed_in:
-        return
+        record(f"ip:{getattr(identity, 'ip', '0.0.0.0')}", "anon")
+        return {"payer": "trial"}
 
-    if identity.paid:
-        from twohelixes import credits
+    quote = entitlements.charge(identity, operation, ref=ref)
 
-        cost = config.CREDIT_COST.get(operation, 0)
-        if cost:
-            credits.deduct(identity.user_id, cost, reason=operation)
-            identity.api_credits = max(0, identity.api_credits - cost)
-        return
+    if quote.payer == "allowance":
+        for bucket, _, _ in WINDOWS:
+            record(key, bucket)
+    elif quote.payer == "credits":
+        identity.api_credits = max(0, identity.api_credits - quote.credits_required)
 
-    for bucket, _, _ in WINDOWS:
-        record(key, bucket)
-    identity.free_queries_used += 1
-    store.execute(
-        "UPDATE users SET free_queries_used = free_queries_used + 1 WHERE id = ?",
-        (identity.user_id,),
-    )
+    return quote.as_dict()

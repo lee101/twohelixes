@@ -48,6 +48,65 @@ export interface PlotlyFigure {
   config?: Record<string, unknown>;
 }
 
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  parent_id: string | null;
+}
+
+export interface WorkbookSheet {
+  name: string;
+  rows?: number;
+  columns?: number;
+}
+
+export interface DatasetShape {
+  header_row: number;
+  dropped_rows: number;
+  notes: string[] | string;
+  confidence: number | string;
+  sheets: Array<string | WorkbookSheet>;
+}
+
+export interface LibraryDataset {
+  id: string;
+  name: string;
+  folder_id: string | null;
+  rows: number;
+  columns: number;
+  shape: DatasetShape | null;
+  shared: boolean;
+  description?: string;
+}
+
+export interface LibrarySource {
+  id: string;
+  name: string;
+  kind: string;
+  folder_id: string | null;
+  status: string;
+}
+
+export interface LibraryResponse {
+  folders: LibraryFolder[];
+  datasets: LibraryDataset[];
+  sources: LibrarySource[];
+}
+
+export interface DatasetPreview {
+  schema: Array<{ name: string; type: string }>;
+  rows: unknown[][];
+  shape: DatasetShape | null;
+}
+
+export interface DatasetRestructure {
+  header_row: number;
+  skip_rows: number;
+  sheet: string | null;
+  renames: Record<string, string>;
+  types: Record<string, string>;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -87,13 +146,71 @@ async function request<T>(
   return payload as T;
 }
 
+function upload<T>(file: File, onProgress: (percent: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 20));
+    };
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error(`Could not read ${file.name}`));
+        return;
+      }
+
+      const separator = reader.result.indexOf(",");
+      const content = separator >= 0 ? reader.result.slice(separator + 1) : reader.result;
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/v1/upload");
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Content-Type", "application/json");
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress(20 + Math.round((event.loaded / event.total) * 79));
+        }
+      };
+      xhr.onerror = () => reject(new Error("The upload could not reach the server"));
+      xhr.onload = () => {
+        const text = xhr.responseText;
+        let payload: unknown = null;
+        try {
+          payload = text ? JSON.parse(text) : null;
+        } catch {
+          payload = text;
+        }
+
+        if (xhr.status < 200 || xhr.status >= 300) {
+          const body = payload as { error?: string; detail?: string } | null;
+          reject(
+            new ApiError(
+              xhr.status,
+              body?.error ?? "http_error",
+              body?.detail ?? body?.error ?? `HTTP ${xhr.status}`,
+            ),
+          );
+          return;
+        }
+        onProgress(100);
+        resolve(payload as T);
+      };
+      xhr.send(JSON.stringify({ filename: file.name, content_base64: content }));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) }),
+  patch: <T>(path: string, body?: unknown) =>
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body ?? {}) }),
   put: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PUT", body: JSON.stringify(body ?? {}) }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  upload: <T>(file: File, onProgress: (percent: number) => void) =>
+    upload<T>(file, onProgress),
 
   me: () => request<User>("/v1/me"),
   signIn: (email: string) => request<User>("/v1/auth/signin", {
@@ -101,6 +218,49 @@ export const api = {
     body: JSON.stringify({ email }),
   }),
   signOut: () => request<{ signed_out: boolean }>("/v1/auth/signout", { method: "POST" }),
+
+  library: () => request<LibraryResponse>("/v1/library"),
+  createFolder: (name: string, parentId: string | null) =>
+    request<LibraryFolder>("/v1/folders", {
+      method: "POST",
+      body: JSON.stringify({ name, parent_id: parentId }),
+    }),
+  updateFolder: (id: string, change: { name?: string; parent_id?: string | null }) =>
+    request<LibraryFolder>(`/v1/folders/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(change),
+    }),
+  deleteFolder: (id: string) =>
+    request<void>(`/v1/folders/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  updateDataset: (
+    id: string,
+    change: { name?: string; folder_id?: string | null; description?: string },
+  ) =>
+    request<LibraryDataset>(`/v1/datasets/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(change),
+    }),
+  updateSource: (id: string, change: { name?: string; folder_id?: string | null }) =>
+    request<LibrarySource>(`/v1/sources/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(change),
+    }),
+  restructureDataset: (id: string, change: DatasetRestructure) =>
+    request<DatasetPreview>(`/v1/datasets/${encodeURIComponent(id)}/restructure`, {
+      method: "POST",
+      body: JSON.stringify(change),
+    }),
+  previewDataset: (id: string, rows = 20) =>
+    request<DatasetPreview>(
+      `/v1/datasets/${encodeURIComponent(id)}/preview?rows=${encodeURIComponent(rows)}`,
+    ),
+  shareDataset: (id: string) =>
+    request<{ url: string }>(`/v1/datasets/${encodeURIComponent(id)}/share`, {
+      method: "POST",
+      body: "{}",
+    }),
+  unshareDataset: (id: string) =>
+    request<void>(`/v1/datasets/${encodeURIComponent(id)}/share`, { method: "DELETE" }),
 };
 
 export type SseHandler = (event: string, data: any) => void;

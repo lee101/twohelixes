@@ -6,21 +6,21 @@
  * edits, disables or deletes. Neither has to ask the other, and a human edit
  * never spends a query - only asking the agent does.
  *
- * Every change re-previews server-side, which keeps one implementation of the
- * transformation rather than a client copy that drifts.
+ * The server remains authoritative for every chart. An opt-in worker may
+ * reshape typed inline rows first, but any uncertainty returns to the original
+ * full server preview.
  */
 
 import { api, type ChartConfig } from "./api";
 import { CHART_TYPES, button, el, renderFigure } from "./chart";
+import {
+  LocalReshaper,
+  localReshapeEnabled,
+  setLocalReshapeEnabled,
+} from "./reshape/client";
+import type { LocalReshapeResult, SchemaColumn, Step } from "./reshape/protocol";
 
-export interface Step {
-  id: string;
-  type: string;
-  params: Record<string, any>;
-  note?: string;
-  author?: "agent" | "human";
-  enabled?: boolean;
-}
+export type { Step } from "./reshape/protocol";
 
 interface ColumnInfo {
   name: string;
@@ -74,6 +74,12 @@ export interface BuilderSource {
   data?: Record<string, unknown>[];
 }
 
+export interface BuilderOptions {
+  /** Save the chart onto this dashboard, and tell the caller when it lands. */
+  dashboardId?: string;
+  onSaved?: (chartId: string) => void;
+}
+
 export class Builder {
   readonly root: HTMLElement;
 
@@ -86,6 +92,10 @@ export class Builder {
   private lastPreview: PreviewResponse | null = null;
   private pending = false;
   private queued = false;
+  private previewVersion = 0;
+  private localSourcePrepared = false;
+  private localSourceResult: LocalReshapeResult | { ok: true } | null = null;
+  private readonly localReshaper = new LocalReshaper();
 
   private readonly fieldList: HTMLElement;
   private readonly shelves: HTMLElement;
@@ -94,15 +104,29 @@ export class Builder {
   private readonly status: HTMLElement;
   private readonly askInput: HTMLInputElement;
 
-  constructor() {
+  constructor(private readonly options: BuilderOptions = {}) {
     this.root = el("section", "builder");
 
     // --- left rail: the columns you have -------------------------------
     const rail = el("aside", "builder-rail");
     const fieldsTitle = el("h3", "builder-heading");
     fieldsTitle.textContent = "Columns";
+    const localControl = el("label", "builder-local-toggle");
+    const localToggle = document.createElement("input");
+    localToggle.type = "checkbox";
+    localToggle.checked = localReshapeEnabled();
+    const localLabel = el("span");
+    localLabel.textContent = "Reshape previews in this browser (experimental)";
+    localControl.append(localToggle, localLabel);
+    localToggle.addEventListener("change", () => {
+      setLocalReshapeEnabled(localToggle.checked);
+      this.localSourcePrepared = false;
+      this.localSourceResult = null;
+      if (!localToggle.checked) this.localReshaper.dispose();
+      void this.preview();
+    });
     this.fieldList = el("ul", "field-list");
-    rail.append(fieldsTitle, this.fieldList);
+    rail.append(fieldsTitle, localControl, this.fieldList);
 
     // --- centre: chart and channels ------------------------------------
     const centre = el("div", "builder-centre");
@@ -140,9 +164,10 @@ export class Builder {
 
     const exports = el("div", "builder-exports");
     exports.append(
-      button("Notebook", () => this.exportNotebook()),
+      button("Notebook (.ipynb)", () => this.exportNotebook("ipynb")),
+      button("marimo", () => this.exportNotebook("marimo")),
       button("Show code", () => this.toggleCode()),
-      button("Save", () => this.save()),
+      button(options.dashboardId ? "Add to dashboard" : "Save", () => this.save()),
     );
 
     side.append(planTitle, undoRow, this.stepList, askForm, exports);
@@ -157,6 +182,9 @@ export class Builder {
     this.steps = [];
     this.history = [];
     this.future = [];
+    this.localReshaper.dispose();
+    this.localSourcePrepared = false;
+    this.localSourceResult = null;
 
     this.setStatus("Reading the data…");
     try {
@@ -525,6 +553,7 @@ export class Builder {
 
   /** Re-run the plan. Coalesced: a burst of edits produces one request. */
   private async preview(): Promise<void> {
+    const version = ++this.previewVersion;
     if (this.pending) {
       this.queued = true;
       return;
@@ -533,12 +562,9 @@ export class Builder {
     this.setStatus("Updating…");
 
     try {
-      const response = await api.post<PreviewResponse>("/v1/builder/preview", {
-        ...this.source,
-        steps: this.steps,
-        config: this.config,
-        mode: document.documentElement.getAttribute("data-theme") ?? "light",
-      });
+      const outcome = await this.previewLocalThenRender(version);
+      if (version !== this.previewVersion) return;
+      const response = outcome.response;
 
       this.lastPreview = response;
 
@@ -550,7 +576,9 @@ export class Builder {
       }
 
       if (response.config) this.config = response.config;
-      if (response.figure) await renderFigure(this.plot, response.figure);
+      if (response.figure && !outcome.rendered) {
+        await renderFigure(this.plot, response.figure);
+      }
       this.renderSteps(response.descriptions ?? []);
       this.renderShelves();
 
@@ -568,6 +596,84 @@ export class Builder {
         void this.preview();
       }
     }
+  }
+
+  private previewBackend(): Promise<PreviewResponse> {
+    return api.post<PreviewResponse>("/v1/builder/preview", {
+      ...this.source,
+      steps: this.steps,
+      config: this.config,
+      mode: document.documentElement.getAttribute("data-theme") ?? "light",
+    });
+  }
+
+  private async backendPreviewOutcome(): Promise<{
+    response: PreviewResponse;
+    rendered: false;
+  }> {
+    return { response: await this.previewBackend(), rendered: false };
+  }
+
+  private async previewLocalThenRender(
+    version: number,
+  ): Promise<{ response: PreviewResponse; rendered: boolean }> {
+    if (!localReshapeEnabled()) {
+      return this.backendPreviewOutcome();
+    }
+
+    try {
+      const sourceReady = await this.ensureLocalSource();
+      if (!sourceReady.ok) {
+        return this.backendPreviewOutcome();
+      }
+      const shaped = await this.localReshaper.reshape(this.steps);
+      if (!shaped.ok) {
+        return this.backendPreviewOutcome();
+      }
+      const response = await api.post<PreviewResponse>("/v1/builder/preview", {
+        data: shaped.rows,
+        steps: [],
+        config: this.config,
+        mode: document.documentElement.getAttribute("data-theme") ?? "light",
+      });
+      if (version !== this.previewVersion) {
+        return { response, rendered: false };
+      }
+      if (!response.ok || !response.figure) {
+        return this.backendPreviewOutcome();
+      }
+      await renderFigure(this.plot, response.figure);
+      return {
+        response: {
+          ...response,
+          steps: this.steps,
+          elapsed_ms: (response.elapsed_ms ?? 0) + shaped.elapsedMs,
+          warnings: [...shaped.warnings, ...(response.warnings ?? [])],
+        },
+        rendered: true,
+      };
+    } catch {
+      return this.backendPreviewOutcome();
+    }
+  }
+
+  private async ensureLocalSource(): Promise<LocalReshapeResult | { ok: true }> {
+    if (this.localSourcePrepared) {
+      return this.localSourceResult ?? { ok: false, fallbackReason: "unsupported_source" };
+    }
+    this.localSourcePrepared = true;
+    const rows = this.source.data;
+    if (!Array.isArray(rows)) {
+      this.localSourceResult = { ok: false, fallbackReason: "unsupported_source" };
+      return this.localSourceResult;
+    }
+    const schema: SchemaColumn[] = this.columns.map((column) => ({
+      name: column.name,
+      dtype: column.dtype,
+      nulls: column.nulls,
+    }));
+    this.localSourceResult = await this.localReshaper.setRows(rows, schema);
+    return this.localSourceResult;
   }
 
   private async ask(): Promise<void> {
@@ -609,16 +715,18 @@ export class Builder {
         steps: this.steps,
         config: this.config,
         figure: this.lastPreview?.figure,
+        dashboard_id: this.options.dashboardId,
       });
       this.setStatus(`Saved as ${response.chart_id.slice(0, 8)}`);
+      this.options.onSaved?.(response.chart_id);
     } catch (error) {
       this.setStatus((error as Error).message, true);
     }
   }
 
-  private async exportNotebook(): Promise<void> {
+  private async exportNotebook(format: "ipynb" | "marimo"): Promise<void> {
     try {
-      const response = await fetch("/v1/builder/notebook", {
+      const response = await fetch(`/v1/builder/notebook?format=${format}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -628,11 +736,16 @@ export class Builder {
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
+      const name = format === "ipynb" ? "chart.ipynb" : "chart.py";
       link.href = url;
-      link.download = "chart.py";
+      link.download = name;
       link.click();
       URL.revokeObjectURL(url);
-      this.setStatus("Notebook downloaded — run it with `marimo edit chart.py`");
+      this.setStatus(
+        format === "ipynb"
+          ? `Downloaded ${name} — open it in Jupyter, or run it here`
+          : `Downloaded ${name} — run it with \`marimo edit ${name}\``,
+      );
     } catch (error) {
       this.setStatus((error as Error).message, true);
     }

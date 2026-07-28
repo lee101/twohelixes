@@ -33,6 +33,9 @@ VALID_TYPES = {
     "candlestick",
     "sankey",
     "treemap",
+    "sunburst",
+    "bubble",
+    "map",
     "funnel",
     "waterfall",
     "stat",
@@ -42,7 +45,9 @@ VALID_TYPES = {
 # Above this many categories a pie is unreadable; above the bar limit the tail
 # is folded into "Other".
 # Forms with a dedicated builder in charts/forms.py.
-FORM_BUILDERS = frozenset({"sankey", "treemap", "funnel", "waterfall", "box"})
+FORM_BUILDERS = frozenset(
+    {"sankey", "treemap", "sunburst", "bubble", "map", "funnel", "waterfall", "box"}
+)
 
 MAX_PIE_SLICES = 6
 MAX_BAR_CATEGORIES = 24
@@ -107,6 +112,18 @@ def validate_config(
         elif categories > MAX_PIE_SLICES:
             out["chart_type"] = "bar"
             _note(emit, f"{categories} slices is too many for a pie; using bars.")
+
+    if chart_type == "map":
+        from twohelixes.charts import forms
+
+        if forms.detect_map(frame, out) is None:
+            chart_type = "bar"
+            out["chart_type"] = chart_type
+            _note(
+                emit,
+                "No valid latitude/longitude pair or country column was found; "
+                "using a bar chart.",
+            )
 
     if chart_type == "bar" and _has_long_labels(frame, out.get("x")):
         out["chart_type"] = "hbar"
@@ -175,6 +192,22 @@ def _refresh_stale_labels(config: dict, frame, emit=None) -> None:
     title = str(config.get("title") or "")
     if not title:
         return
+
+    # A title that names the grouping it no longer groups by. Changing the x
+    # channel changes what the chart is *about*, and "Net Amount by Region"
+    # over a chart of channels is confidently wrong in exactly the way this
+    # function exists to prevent. Only a "by <column>" clause naming some
+    # *other* column of this frame is rewritten, so prose someone wrote by
+    # hand ("Revenue by segment leader") is left alone.
+    if x and str(x) in columns:
+        _, _, tail = title.lower().partition(" by ")
+        if tail and tail.strip() != tools.humanise(str(x)).lower():
+            named = any(tools.humanise(c).lower() == tail.strip() for c in columns)
+            if named:
+                _note(emit, f"Title said 'by {tail.strip()}', which is not the x axis.")
+                config["title"] = _auto_title(config, frame, measure)
+                return
+
     lowered = title.lower()
     if friendly in lowered or measure.lower() in lowered:
         return
@@ -238,9 +271,27 @@ def _scales_differ(frame: Any, columns: list[str], ratio: float = 20.0) -> bool:
 
 def heuristic_config(frame: Any, question: str) -> dict[str, Any]:
     """Pick a defensible chart from column roles alone."""
+    from twohelixes.charts import forms
+
     time_column = tools.find_time_column(frame)
     measures = tools.find_measures(frame)
     categories = tools.find_categories(frame)
+
+    geographic = forms.detect_map(frame)
+    if geographic and geographic["kind"] == "points":
+        coordinate_columns = {geographic["lat"], geographic["lon"]}
+        map_measures = [measure for measure in measures if measure not in coordinate_columns]
+        map_categories = [category for category in categories if category not in coordinate_columns]
+        measure = map_measures[0] if map_measures else None
+        return {
+            "chart_type": "map",
+            "x": None,
+            "y": measure,
+            "color": map_categories[0] if map_categories else None,
+            "agg": None,
+            "title": "Locations",
+            "y_title": tools.humanise(measure) if measure else "",
+        }
 
     if not measures:
         # Nothing to measure: show the distribution of the first category.
@@ -353,6 +404,12 @@ def build(
             }
         },
     }
+    if chart_type == "hbar":
+        # The traces swap the channels; the titles have to swap with them, or
+        # the value axis is labelled with the category's name and the chart
+        # says the opposite of what it draws.
+        layout["xaxis"], layout["yaxis"] = layout["yaxis"], layout["xaxis"]
+
     if config.get("stacked"):
         layout["barmode"] = "stack"
 
@@ -509,7 +566,11 @@ def _wide_traces(
         traces.append(
             {
                 "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
-                "mode": "lines" if chart_type in ("line", "area") else None,
+                # Without an explicit markers mode a grouped scatter inherits
+                # Plotly's default of lines+markers and joins its points in
+                # data order, drawing a zigzag that reads as a trend the data
+                # does not have.
+                "mode": _scatter_mode(chart_type),
                 "fill": "tozeroy" if chart_type == "area" else None,
                 "x": values_x,
                 "y": _column(frame, name),
@@ -524,7 +585,7 @@ def _wide_traces(
         traces.append(
             {
                 "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
-                "mode": "lines" if chart_type in ("line", "area") else None,
+                "mode": _scatter_mode(chart_type),
                 "x": values_x,
                 "y": summed.tolist(),
                 "name": palette.OTHER_LABEL,
@@ -572,7 +633,7 @@ def _grouped_traces(
         traces.append(
             {
                 "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
-                "mode": "lines" if chart_type in ("line", "area") else None,
+                "mode": _scatter_mode(chart_type),
                 "fill": "tozeroy" if chart_type == "area" else None,
                 "x": _column(subset, x),
                 "y": _column(subset, y),
@@ -590,7 +651,7 @@ def _grouped_traces(
             traces.append(
                 {
                     "type": "bar" if chart_type in ("bar", "hbar") else "scatter",
-                    "mode": "lines" if chart_type in ("line", "area") else None,
+                    "mode": _scatter_mode(chart_type),
                     "x": _column(grouped, x),
                     "y": _column(grouped, y),
                     "name": palette.OTHER_LABEL,
@@ -607,6 +668,14 @@ def _grouped_traces(
             if trace.get(key) is None:
                 trace.pop(key, None)
     return traces
+
+
+def _scatter_mode(chart_type: str) -> str | None:
+    if chart_type in ("line", "area"):
+        return "lines"
+    if chart_type in ("scatter", "bubble"):
+        return "markers"
+    return None
 
 
 def _heatmap(frame: Any, config: dict[str, Any], warnings: list[str]) -> list[dict[str, Any]]:

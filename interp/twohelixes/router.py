@@ -168,6 +168,10 @@ def delete(pattern: str) -> Callable[[Handler], Handler]:
     return route("DELETE", pattern)
 
 
+def patch(pattern: str) -> Callable[[Handler], Handler]:
+    return route("PATCH", pattern)
+
+
 def stream(pattern: str) -> Callable[[StreamHandler], StreamHandler]:
     def decorate(fn: StreamHandler) -> StreamHandler:
         _stream_routes[pattern] = fn
@@ -194,6 +198,7 @@ def build() -> None:
         connectors,
         dashboards,
         datasets,
+        library,
         notebooks,
         pages,
         query,

@@ -1,0 +1,54 @@
+# Runtime dependencies, resolved into this repo's own virtualenvs by
+# `scripts/setup-venvs.sh` - not borrowed from askfelix's.
+#
+# Two environments, because the AOT binary embeds CPython 3.12 and
+# `pixi run python` is 3.13. See CLAUDE.md; pointing either at the other's
+# site-packages produces the misleading numpy "source directory" error.
+
+# --- core ------------------------------------------------------------------
+numpy
+pandas
+pyarrow
+plotly
+
+# --- the model gateway -----------------------------------------------------
+openai
+httpx
+
+# --- connectors ------------------------------------------------------------
+duckdb
+sqlalchemy
+# psycopg 3, not 2: `dict_row`, real type adaptation, and a `ClientCursor`
+# that can render the SQL a statement would send - which is what the SQL
+# type-check step uses.
+psycopg[binary]
+pymysql
+elasticsearch
+pymongo
+
+# --- files people upload ---------------------------------------------------
+openpyxl
+odfpy
+xlrd
+pyxlsb
+dbfread
+legacy-doc
+striprtf
+# Optional at import time: document uploads explain how to enable this when it
+# is absent. Install this file into .venv (3.12 server) and .venv-13 (3.13
+# tests) to enable bounded PDF, Office, HTML, Markdown, EPUB, and MSG imports.
+markitdown[pdf,docx,pptx,outlook]>=0.1.6
+
+# --- sample data and statistics -------------------------------------------
+scikit-learn
+statsmodels
+
+# --- billing ---------------------------------------------------------------
+stripe
+
+# --- notebooks -------------------------------------------------------------
+marimo
+
+# --- on-device embeddings (no torch; numpy only) --------------------------
+# Installed from the sibling checkout by scripts/setup-venvs.sh:
+#   uv pip install -e ../pybed
