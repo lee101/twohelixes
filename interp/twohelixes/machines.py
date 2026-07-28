@@ -19,9 +19,14 @@ CPU classes are *included* in a subscription (the plan's machine-hours draw down
 first). GPU classes never are: an included GPU hour costs more than the entire
 Plus plan, so it cannot be bundled at any allowance a subscriber would notice.
 
-RunPod costs were read from the provider's own API on 2026-07-28 (the run that
-found L40S 15% above what this file used to claim, which had put it under the
-margin floor). Hetzner costs are list prices of the same date, and every one can be overridden
+Every cost below was read from the provider's own API on 2026-07-28 by
+`scripts/check-machine-prices.py`, not copied off a marketing page. Both runs
+found drift in the numbers that had been typed in by hand: L40S was 15% above
+what this file claimed (which had put it under the margin floor), and every
+Hetzner class was 26-56% under, because those list prices had moved since
+whoever wrote them down. Hetzner figures are the monthly cap over 730 hours -
+the price of anything left running, which is the case that decides whether this
+makes money - converted at USD_PER_EUR. Every one can be overridden
 from the environment (`TWOHELIXES_MACHINE_COST_<ID>`, US cents per hour) so a
 price change is a config edit rather than a deploy. `scripts/check-machine-prices.py`
 re-reads them from the provider APIs and reports drift — the number that must
@@ -164,7 +169,7 @@ CATALOG: tuple[MachineClass, ...] = (
         label="CPU Small",
         provider="hetzner",
         provider_ref="cpx21",
-        cost_cents_per_hour=1.3,  # CPX21 €7.55/mo ≈ $8.60 / 730h
+        cost_cents_per_hour=1.64,  # CPX21 €10.99/mo capped -> €0.0151/h -> $0.0164
         vcpu=3, ram_gb=4, disk_gb=80,
         included=True,
         min_plan="plus",
@@ -175,7 +180,7 @@ CATALOG: tuple[MachineClass, ...] = (
         label="CPU Medium",
         provider="hetzner",
         provider_ref="cpx41",
-        cost_cents_per_hour=4.0,  # CPX41 €26.85/mo ≈ $29 / 730h
+        cost_cents_per_hour=5.67,  # CPX41 €37.99/mo capped -> €0.0520/h
         vcpu=8, ram_gb=16, disk_gb=240,
         included=True,
         min_plan="plus",
@@ -186,7 +191,7 @@ CATALOG: tuple[MachineClass, ...] = (
         label="CPU Large",
         provider="hetzner",
         provider_ref="cpx51",
-        cost_cents_per_hour=8.0,  # CPX51 €54.90/mo ≈ $59 / 730h
+        cost_cents_per_hour=12.47,  # CPX51 €83.49/mo capped -> €0.1144/h
         vcpu=16, ram_gb=32, disk_gb=360,
         included=True,
         min_plan="pro",
@@ -197,7 +202,7 @@ CATALOG: tuple[MachineClass, ...] = (
         label="CPU Dedicated",
         provider="hetzner",
         provider_ref="ccx33",
-        cost_cents_per_hour=17.0,  # CCX33 €109/mo ≈ $118 / 730h
+        cost_cents_per_hour=24.34,  # CCX33 €162.99/mo capped -> €0.2233/h
         vcpu=8, ram_gb=32, disk_gb=240,
         included=False,  # dedicated vCPU costs 13x the shared class
         min_plan="pro",
@@ -469,6 +474,11 @@ def reap_orphans(*, dry_run: bool = False, now: float | None = None) -> dict[str
     the database write, a manual test someone forgot.
 
     Without this, one lost H100 costs $67 a day, silently, forever.
+
+    It only ever considers instances this app named or labelled. The provider
+    accounts are shared with codex-infinity-site, so "anything I cannot account
+    for" would be a reaper that deletes another product's servers - the one
+    mistake here that is worse than the leak it fixes.
     """
     from twohelixes.notebooks import compute
 
@@ -499,7 +509,8 @@ def reap_orphans(*, dry_run: bool = False, now: float | None = None) -> dict[str
             if age < ORPHAN_GRACE_SECONDS:
                 spared.append({"provider": provider, "id": handle, "why": "too new"})
                 continue
-            entry = {"provider": provider, "id": handle, "age_seconds": round(age)}
+            entry = {"provider": provider, "id": handle, "name": inst.get("name", ""),
+                     "age_seconds": round(age)}
             if dry_run:
                 killed.append({**entry, "dry_run": True})
                 continue

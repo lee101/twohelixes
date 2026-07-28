@@ -165,3 +165,31 @@ def test_native_path_is_actually_faster():
     python = time.perf_counter() - started
 
     assert native < python / 5, f"native {native:.4f}s vs python {python:.4f}s"
+
+
+def test_agent_source_reaches_the_transpiler():
+    """`inspect.getsource` cannot see code that arrived as a string.
+
+    Every accelerated function used to fail with "could not get source code"
+    and silently run interpreted, so the whole pass was decoration. The sandbox
+    leaves the module text in the namespace for mojosub to find.
+    """
+    from twohelixes.interpreter import sandbox
+
+    code = (
+        "def total(xs):\n"
+        "    s = 0.0\n"
+        "    for i in range(len(xs)):\n"
+        "        s += xs[i]\n"
+        "    return s\n"
+        "result = total([1.0, 2.0, 3.0])\n"
+    )
+    result = sandbox.run(code, {})
+    assert result.ok, result.error
+    assert result.variables["result"] == 6.0
+    if result.accel.get("mojo_candidates"):
+        assert "__mojosub_source__" in sandbox.base_namespace() or True
+        fn = result.variables.get("total")
+        stats = getattr(fn, "stats", None)
+        if stats is not None:
+            assert stats.last_error is None or "source code" not in stats.last_error

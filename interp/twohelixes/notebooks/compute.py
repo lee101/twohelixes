@@ -259,12 +259,18 @@ def runpod_create(name: str, token: str, gpu_type: str = "") -> dict[str, Any]:
     }
 
 
-def runpod_list() -> list[dict[str, Any]]:
-    """Every pod on the account, normalised like `hetzner_list`.
+# Every instance this app creates is named with this prefix, and nothing
+# without it is ever ours to destroy: the RunPod key belongs to an account
+# shared with codex-infinity-site, whose pods must survive our reaper.
+NAME_PREFIX = "th-nb-"
 
-    RunPod has no label selector, so this returns everything the key can see -
-    which is what the reaper wants anyway: a pod we cannot account for is a pod
-    costing us money whether or not we tagged it.
+
+def runpod_list(ours_only: bool = True) -> list[dict[str, Any]]:
+    """Pods on the account, normalised like `hetzner_list`.
+
+    RunPod has no label selector - the REST API returns everything the key can
+    see - so ours are identified by name prefix, client side. `ours_only=False`
+    is for looking, never for reaping.
     """
     api_key = config.get("RUNPOD_API_KEY")
     if not api_key:
@@ -286,6 +292,7 @@ def runpod_list() -> list[dict[str, Any]]:
             "raw": p,
         }
         for p in pods
+        if not ours_only or str(p.get("name", "")).startswith(NAME_PREFIX)
     ]
 
 
@@ -329,7 +336,7 @@ def start_remote(provider: str, user_id: str, session_id: str, source: str,
     except Exception:  # noqa: BLE001
         log.warning("could not stage notebook source to R2; booting empty")
 
-    name = f"th-nb-{session_id[:10]}"
+    name = f"{NAME_PREFIX}{session_id[:10]}"
 
     provider_ref = getattr(machine, "provider_ref", "") or ""
 

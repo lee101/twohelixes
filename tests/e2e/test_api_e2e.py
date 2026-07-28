@@ -259,6 +259,58 @@ def test_a_query_is_charged_once_and_shows_up_in_the_ledger(server: Any, account
     assert after["ledger"][0]["delta"] == -spent
 
 
+def test_the_machine_catalogue_is_served_and_priced(server: Any, account: dict):
+    """The picker and the pricing page read one catalogue, through the binary."""
+    status, body = server.get("/v1/notebook/machines")
+    assert status == 200, body
+    rows = {m["id"]: m for m in body["machines"]}
+    assert rows["cpu-small"]["included"] is True
+    assert rows["gpu-4090"]["included"] is False
+    # Derived, not typed: a GPU minute costs more than a CPU minute or the
+    # rate card is not doing its job.
+    assert rows["gpu-4090"]["credits_per_minute"] > rows["cpu-small"]["credits_per_minute"]
+    assert body["included_minutes"] > 0, "a paid plan includes machine time"
+    assert rows["gpu-h100"]["min_plan"] == "pro"
+
+
+def test_a_machine_the_plan_cannot_have_is_refused_before_it_is_provisioned(
+    server: Any, account: dict
+):
+    """The Plus account here must not be able to start an H100.
+
+    Refused at the gate, so the failure costs nothing: past this point the
+    next thing that happens is a provisioning call we would be billed for.
+    """
+    status, body = server.post(
+        "/v1/notebook/sessions",
+        {"source": "print(1)", "machine": "gpu-h100"},
+    )
+    assert status == 403, body
+    assert body["error"] == "machine_not_allowed"
+
+
+def test_an_unknown_machine_is_a_400_not_a_default(server: Any, account: dict):
+    """Falling back to a default here would bill for something nobody asked for."""
+    status, body = server.post(
+        "/v1/notebook/sessions", {"source": "print(1)", "machine": "gpu-unobtainium"}
+    )
+    assert status == 400, body
+    assert body["error"] == "unknown_machine"
+
+
+def test_a_gpu_needs_runway_in_the_balance_before_it_starts(server: Any, account: dict):
+    """A balance that covers one minute does not cover the gap to reclaim."""
+    server.grant_credits(2, account["email"])
+    server.sign_in(account["email"])
+    status, body = server.post(
+        "/v1/notebook/sessions", {"source": "print(1)", "machine": "gpu-4090"}
+    )
+    assert status == 402, body
+    assert body["error"] == "credits_required"
+    server.grant_credits(5000, account["email"])
+    server.sign_in(account["email"])
+
+
 def test_an_agent_run_is_refused_without_the_credits_to_finish_it(server: Any, account: dict):
     """The base fee is not the whole cost, so the base fee is not the check.
 

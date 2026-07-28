@@ -372,6 +372,14 @@ def run(
             accelerated = accel.accelerate(body_tree)
         except Exception as exc:  # noqa: BLE001 - acceleration is never required
             log.debug("acceleration pass failed: %s", exc)
+        if accelerated:
+            # The transpiler reads the function's source, and `inspect.getsource`
+            # cannot see anything defined by `exec` of a string - which is all
+            # agent code. Without this every accelerated function failed with
+            # "could not get source code" and silently ran interpreted, so the
+            # whole pass was decoration. mojosub looks for this name in the
+            # namespace the function was defined in.
+            namespace["__mojosub_source__"] = ast.unparse(body_tree)
 
     watchdog = _Watchdog(timeout)
     try:

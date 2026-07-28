@@ -651,6 +651,44 @@ not the median (`config.MEASURED_COST_CENTS` records what was measured, and
 `tests/test_entitlements.py` fails if a price drops below its cost or a plan
 stops being profitable at full utilisation).
 
+### The accelerator was decoration until the source reached it
+
+`accel.py` decorates eligible agent functions with mojosub's `@jit`. It never
+compiled a single one in production: agent code is `exec`'d from a string, and
+mojosub read the function's source with `inspect.getsource`, which raises
+`OSError: could not get source code` for anything that has no file. Every
+accelerated function recorded that error once and ran interpreted for ever,
+which looks exactly like the feature not existing.
+
+The sandbox now leaves the module text in the namespace as
+`__mojosub_source__`, which is where mojosub looks. Measured on a drawdown loop
+over 400,000 numpy floats, which is the shape the agent actually writes:
+
+| | per call |
+| --- | --- |
+| CPython | 197 ms |
+| compiled | 0.7 ms |
+| whole `sandbox.run`, before | ~130 ms |
+| whole `sandbox.run`, after | ~15 ms |
+
+Two mojosub changes made that reachable rather than theoretical, both upstream
+in the open-source repo:
+
+* **Warm start.** A fresh `JitFunction` per request meant the hot gate
+  (4 calls) was never crossed, so the library compiled by the previous request
+  sat unread. The cache now remembers the inferred return type beside the
+  library, so a unit that is already built dispatches natively on call one.
+* **Verification is remembered.** `verify=True` costs a full interpreted run;
+  doing it once per *process* meant doing it on every request, which capped a
+  280x kernel at 1.4x. The verdict is now stored with the library, along with
+  the opposite verdict: a variant that disagreed with CPython or measured
+  slower than it is retired, and no other worker re-discovers that.
+
+Pass numpy arrays. A Python list is copied across the ABI, and on 200k elements
+that copy costs more than the loop - measured at 30ms native against 17ms
+interpreted. mojosub retires such a variant on its own now, but the faster
+answer is not to hand it a list.
+
 ## Which model, and whether a model at all
 
 Three tiers of decision, and they are not the same decision:

@@ -184,12 +184,46 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Any:
     client.log_path = log_path
     yield client
 
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
+    _stop(process, port)
     log_file.close()
+
+
+def _stop(process: subprocess.Popen, port: int) -> None:
+    """Kill the whole process group, not just the parent.
+
+    The server forks `SO_REUSEPORT` workers, so terminating the parent leaves
+    children holding the listening socket - each one a stray process with an
+    open SQLite handle. Two dozen of those accumulate over a few suite runs,
+    and the symptom is the *next* run failing to boot with "database is
+    locked", which reads like a bug in the server. `start_new_session=True`
+    above put them in their own group precisely so this can signal all of them.
+    """
+    import signal
+
+    try:
+        group = os.getpgid(process.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(group, sig)
+        except ProcessLookupError:
+            break
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            continue
+        # The parent is gone; give the workers a moment to follow it before
+        # checking, since they die on the same signal.
+        time.sleep(0.2)
+        if not _port_in_use(port):
+            return
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket() as probe:
+        probe.settimeout(0.3)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 class Client:

@@ -290,3 +290,44 @@ def test_meter_remote_handles_are_read_from_every_open_meter():
 
 def test_catalog_is_json_serialisable():
     json.dumps(machines.catalog_for("pro"))
+
+
+def test_reaper_never_touches_another_products_pods(monkeypatch):
+    """The RunPod account is shared with codex-infinity-site.
+
+    Their pods are not named `th-nb-*`, and destroying one would be a far worse
+    failure than the leak this reaper exists to stop.
+    """
+    from twohelixes.notebooks import compute
+
+    monkeypatch.setenv("RUNPOD_API_KEY", "test")
+    old = time.time() - 86400
+    # The real lister filters by name; this asserts the filter, not the caller.
+    pods = [
+        {"id": "pod-theirs", "name": "codex-infinity-worker-3", "desiredStatus": "RUNNING",
+         "createdAt": old},
+        {"id": "pod-ours", "name": "th-nb-abc123", "desiredStatus": "RUNNING", "createdAt": old},
+    ]
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return pods
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **kw):
+            return _Response()
+
+    monkeypatch.setattr(compute, "_client", _Client)
+    assert [p["id"] for p in compute.runpod_list()] == ["pod-ours"]
+    assert {p["id"] for p in compute.runpod_list(ours_only=False)} == {"pod-ours", "pod-theirs"}
