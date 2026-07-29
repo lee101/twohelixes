@@ -368,6 +368,12 @@ def run(
 
     accelerated: list[str] = []
     if body_tree is not None:
+        # Kept so the run can be repeated without acceleration if the
+        # accelerated one raises. `accelerate` rewrites in place, so this has
+        # to be a separate parse rather than the same object.
+        plain_tree = ast.parse(code)
+        if tail_expr is not None:
+            plain_tree = ast.Module(body=plain_tree.body[:-1], type_ignores=[])
         try:
             accelerated = accel.accelerate(body_tree)
         except Exception as exc:  # noqa: BLE001 - acceleration is never required
@@ -381,17 +387,43 @@ def run(
             # namespace the function was defined in.
             namespace["__mojosub_source__"] = ast.unparse(body_tree)
 
+    def _execute(tree: ast.Module | None, ns: dict[str, Any], out: io.StringIO):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            if tree is not None:
+                if tree.body:
+                    exec(compile(tree, "<agent>", "exec"), ns, ns)  # noqa: S102
+            elif body.strip():
+                exec(compile(body, "<agent>", "exec"), ns, ns)  # noqa: S102
+            if tail_expr:
+                return eval(compile(tail_expr, "<agent>", "eval"), ns, ns)  # noqa: S307
+        return None
+
+    fell_back = False
     watchdog = _Watchdog(timeout)
     try:
         watchdog.start()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stdout):
-            if body_tree is not None:
-                if body_tree.body:
-                    exec(compile(body_tree, "<agent>", "exec"), namespace, namespace)  # noqa: S102
-            elif body.strip():
-                exec(compile(body, "<agent>", "exec"), namespace, namespace)  # noqa: S102
-            if tail_expr:
-                value = eval(compile(tail_expr, "<agent>", "eval"), namespace, namespace)  # noqa: S307
+        try:
+            value = _execute(body_tree, namespace, stdout)
+        except BaseException:
+            # Acceleration is an optimisation, so it is never allowed to be the
+            # reason a run fails. mojosub falls back per function, but the
+            # decoration itself, the transpiler, or a compiled variant can
+            # still raise something the interpreter would not have - and the
+            # agent must not see an error the plain Python it wrote does not
+            # produce. Re-run once, unaccelerated, from a clean namespace.
+            # Not on a timeout: the watchdog's exception means the budget is
+            # already spent, and a second run would spend it twice.
+            if not accelerated or watchdog.expired:
+                raise
+            log.info("accelerated run failed, retrying interpreted: %s",
+                     _first_line(traceback.format_exc()))
+            fell_back = True
+            stdout = io.StringIO()
+            namespace = base_namespace()
+            if variables:
+                namespace.update(variables)
+            _auto_import(code, namespace)
+            value = _execute(plain_tree, namespace, stdout)
     except BaseException as exc:  # noqa: BLE001 - report everything to the agent
         return RunResult(
             ok=False,
@@ -401,19 +433,32 @@ def run(
             traceback=_clean_traceback(),
             duration_ms=int((time.time() - started) * 1000),
             variables=_user_names(namespace),
+            accel={"mojo_fallback": True} if fell_back else {},
         )
     finally:
         watchdog.stop()
 
     names = _user_names(namespace)
+    if fell_back:
+        # The names in this namespace came from the interpreted run, so the
+        # jit wrappers' own counters are gone with the namespace that held
+        # them. Report the fallback, not stale numbers.
+        stats = {"mojo_candidates": accelerated, "mojo_fallback": True}
+    else:
+        stats = _accel_stats(names, accelerated)
     return RunResult(
         ok=True,
         stdout=stdout.getvalue(),
         duration_ms=int((time.time() - started) * 1000),
         value=value,
         variables=names,
-        accel=_accel_stats(names, accelerated),
+        accel=stats,
     )
+
+
+def _first_line(text: str) -> str:
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 def _accel_stats(names: dict[str, Any], accelerated: list[str]) -> dict[str, Any]:

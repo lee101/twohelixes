@@ -689,6 +689,24 @@ that copy costs more than the loop - measured at 30ms native against 17ms
 interpreted. mojosub retires such a variant on its own now, but the faster
 answer is not to hand it a list.
 
+**Sometimes CPython wins, and the point is to find that out cheaply.** mojosub
+races the two tiers rather than judging them on a single timed sample: each
+trial call runs both and the slower one is dropped. It stops early the instant
+one side is ahead by 4x - which is the usual case, so a 200x kernel pays one
+extra interpreted call - and only a close result runs the full three samples,
+decided on the median. A single pair of timings is not evidence: the first
+native call pays a page-in against an interpreted call that just warmed the
+caches for it, and the verdict is permanent. The outcome is written to the
+cache beside the library, so no other worker re-races anything.
+
+**The run falls back to plain Python if the accelerated one raises.** mojosub
+falls back per function, but the decoration, the transpiler or a compiled
+variant can still raise something the interpreter would not have, and the agent
+must not see an error the Python it wrote does not produce. `sandbox.run`
+repeats the run once, unaccelerated, from a clean namespace, and reports
+`accel.mojo_fallback`. Not on a timeout - the watchdog firing means the shared
+pipeline budget is already spent, and a second run would spend it twice.
+
 ## Which model, and whether a model at all
 
 Three tiers of decision, and they are not the same decision:

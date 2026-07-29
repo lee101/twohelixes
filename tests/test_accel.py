@@ -193,3 +193,44 @@ def test_agent_source_reaches_the_transpiler():
         stats = getattr(fn, "stats", None)
         if stats is not None:
             assert stats.last_error is None or "source code" not in stats.last_error
+
+
+def test_a_broken_accelerator_falls_back_to_plain_python(monkeypatch):
+    """Acceleration is never allowed to be the reason a run fails.
+
+    mojosub falls back per function, but the decoration itself can raise -
+    and then the agent sees an error the plain Python it wrote does not
+    produce. The run is repeated once, unaccelerated, from a clean namespace.
+    """
+    def exploding(fn):
+        def boom(*args, **kwargs):
+            raise RuntimeError("jit exploded")
+        return boom
+
+    monkeypatch.setattr(accel, "enabled", lambda: True)
+    # The decorator is bound into the base namespace at warm time, and
+    # `base_namespace()` hands out a copy - so the patch has to go into the
+    # original or every run gets the real jit back.
+    sandbox.base_namespace()
+    monkeypatch.setitem(sandbox._BASE_NAMESPACE, accel.DECORATOR, exploding)
+
+    code = LOOPY + "\nresult = score([1.0, -2.0, 3.0], 0.0)\n"
+    result = sandbox.run(code)
+
+    assert result.ok, result.error
+    assert result.variables["result"] == pytest.approx(1.0 * 2 + 3.0 * 2 + 2.0)
+    assert result.accel.get("mojo_fallback") is True
+
+
+def test_the_fallback_does_not_double_the_time_budget(monkeypatch):
+    """A run killed by the watchdog has already spent the budget; repeating it
+    would spend it twice and outlive the deadline the pipeline shares."""
+    monkeypatch.setattr(accel, "enabled", lambda: True)
+
+    code = LOOPY + "\nwhile True:\n    score([1.0], 0.0)\n"
+    started = time.perf_counter()
+    result = sandbox.run(code, timeout=1.0)
+    elapsed = time.perf_counter() - started
+
+    assert not result.ok
+    assert elapsed < 2.5, f"took {elapsed:.1f}s, so it ran twice"
