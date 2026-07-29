@@ -221,11 +221,16 @@ struct Loop(Movable):
         _ = sys_close(fd)
 
     def _unregister_stream(mut self, fd: Int32):
-        var keep = List[Int32]()
+        """Tombstone the entry rather than removing it.
+
+        `drop` reaches here from inside `pump_streams`' own loop over this
+        list, so removing an element would shift the elements the loop has not
+        reached yet. Marking never changes the length; `pump_streams` compacts
+        the tombstones away when it finishes.
+        """
         for k in range(len(self.streaming)):
-            if self.streaming[k] != fd:
-                keep.append(self.streaming[k])
-        self.streaming = keep^
+            if self.streaming[k] == fd:
+                self.streaming[k] = -1
 
     def readable(mut self, fd: Int32) raises:
         """Read, then serve every complete request sitting in the buffer.
@@ -243,8 +248,10 @@ struct Loop(Movable):
             var have = self.conns[i].inlen
             var cap = len(self.conns[i].inbuf)
             if cap < have + READ_CHUNK:
-                for _ in range(have + READ_CHUNK - cap):
-                    self.conns[i].inbuf.append(0)
+                # One resize, not 16384 appends. The append loop ran on every
+                # read of every request and was the loop's largest per-request
+                # cost that had nothing to do with the request.
+                self.conns[i].inbuf.resize(have + READ_CHUNK, 0)
             var n = sys_read(fd, self.conns[i].inbuf, have, READ_CHUNK)
             if n == 0:
                 self.drop(fd)
@@ -431,9 +438,14 @@ struct Loop(Movable):
         if len(self.streaming) == 0:
             return
 
-        var active = List[Int32]()
+        # Compacted in place. This runs every 5ms for as long as any stream is
+        # open, so allocating a replacement list per tick allocated hundreds of
+        # times per second for the entire life of a 60-second pipeline run.
+        var w = 0
         for k in range(len(self.streaming)):
             var fd = self.streaming[k]
+            if fd < 0:
+                continue          # tombstoned by a `drop` since the last tick
             var i = Int(fd)
             if self.conns[i].state != ST_STREAM:
                 continue
@@ -458,9 +470,10 @@ struct Loop(Movable):
                     self.drop(fd)
                     continue
             if self.conns[i].state == ST_STREAM:
-                active.append(fd)
+                self.streaming[w] = fd
+                w += 1
 
-        self.streaming = active^
+        self.streaming.resize(w, 0)
 
     def run(mut self) raises:
         ignore_sigpipe()
@@ -513,33 +526,33 @@ def _append_extra_headers(mut resp: Response, extra: StringSlice):
     var b = extra.as_bytes()
     var i = 0
     var name = String("")
-    var value = String("")
     var in_string = False
     var reading_name = True
-    var current = String("")
+    # The token is a slice of `extra`, not a String grown one character at a
+    # time - that cost a reallocation per byte of every header the Python layer
+    # set, and every streaming response sets several.
+    var start = 0
 
     while i < len(b):
         var c = b[i]
         if c == 34:  # quote
             if in_string:
+                var token = StringSlice(unsafe_from_utf8=b[start:i])
                 if reading_name:
-                    name = current
+                    name = String(token)
                 else:
-                    value = current
-                    if name != "" and _header_is_safe(value):
-                        resp.add_header(name, value)
+                    if name != "" and _header_is_safe(token):
+                        resp.add_header(name, token)
                     name = String("")
-                current = String("")
                 in_string = False
             else:
                 in_string = True
-                current = String("")
-        elif in_string:
-            current += chr(Int(c))
-        elif c == 58:  # colon
-            reading_name = False
-        elif c == 44:  # comma
-            reading_name = True
+                start = i + 1
+        elif not in_string:
+            if c == 58:  # colon
+                reading_name = False
+            elif c == 44:  # comma
+                reading_name = True
         i += 1
 
 

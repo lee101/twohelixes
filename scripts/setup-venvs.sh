@@ -22,6 +22,7 @@ cd "$ROOT"
 
 PYBED="${PYBED_DIR:-$ROOT/../pybed}"
 MOJOSUB="${MOJOSUB_DIR:-$ROOT/../mojosub}"
+MOJOPLOTLY="${MOJOPLOTLY_DIR:-$ROOT/../mojo-plotly}"
 GOBED="${GOBED_DIR:-$ROOT/../gobed}"
 MODEL_DIR="$ROOT/models/embed"
 
@@ -74,6 +75,27 @@ build_env() {
     uv pip install --python "$path/bin/python" --reinstall-package mojosub "$MOJOSUB"
   else
     warn "no mojosub checkout at $MOJOSUB - interpreter acceleration stays off"
+  fi
+
+  # mojo-plotly supplies the LTTB downsample that keeps a million-row line
+  # under 4000 points. Its shared library is built HERE, not on first use:
+  # `mojoplotly` compiles lazily, and a five-second `mojo build` inside a
+  # request is not acceptable. charts/decimate.py checks the .so exists and
+  # falls back to a stride rather than triggering a build.
+  if [ -d "$MOJOPLOTLY" ]; then
+    uv pip install --python "$path/bin/python" --reinstall-package mojoplotly "$MOJOPLOTLY"
+    # Build in the checkout (which has the sources) and copy the result next
+    # to the installed package. A non-editable install has no `src/`, so the
+    # library has to travel with it; `decimate.available()` looks here.
+    if (cd "$MOJOPLOTLY" && pixi run mojo build --emit shared-lib -I src src/capi.mojo -o build/capi.so >/dev/null 2>&1); then
+      local site
+      site="$("$path/bin/python" -c 'import mojoplotly,os;print(os.path.dirname(mojoplotly.__file__))')"
+      cp "$MOJOPLOTLY/build/capi.so" "$site/capi.so"
+    else
+      warn "mojo-plotly kernel would not build - charts use the stride fallback"
+    fi
+  else
+    warn "no mojo-plotly checkout at $MOJOPLOTLY - charts use the stride fallback"
   fi
 }
 

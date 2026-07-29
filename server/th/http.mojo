@@ -71,12 +71,20 @@ def ascii_eq_ci(buf: Span[UInt8, _], s: Slice, literal: StringSlice) -> Bool:
 
 
 def slice_str(buf: Span[UInt8, _], s: Slice) -> String:
+    """The bytes of `s` as a String, in one copy.
+
+    This used to build the string a character at a time with `chr(byte)`, which
+    is a reallocation per byte on a path this takes for every request path,
+    query and body - a megabyte upload paid a million of them. It was also
+    wrong for anything but ASCII: `chr` of each byte is a latin-1 decode, so a
+    UTF-8 body arrived at the Python layer as mojibake ("café" -> "cafÃ©").
+    The bytes are already UTF-8; they are handed over as they are.
+    """
     if s.length <= 0:
         return String("")
-    var out = String("")
-    for i in range(s.length):
-        out += chr(Int(buf[s.start + i]))
-    return out
+    return String(
+        StringSlice(unsafe_from_utf8=buf[s.start : s.start + s.length])
+    )
 
 
 struct Request(Movable):
@@ -363,67 +371,98 @@ struct Response(Movable):
 
     def set_body_str(mut self, s: StringSlice):
         self.body.clear()
-        var b = s.as_bytes()
-        for i in range(len(b)):
-            self.body.append(b[i])
+        self.body.extend(s.as_bytes())
 
     def set_body_bytes(mut self, s: Span[UInt8, _]):
         self.body.clear()
-        for i in range(len(s)):
-            self.body.append(s[i])
+        self.body.extend(s)
 
     def append_body(mut self, s: StringSlice):
-        var b = s.as_bytes()
-        for i in range(len(b)):
-            self.body.append(b[i])
+        self.body.extend(s.as_bytes())
 
 
 def append_str(mut out: List[UInt8], s: StringSlice):
-    var b = s.as_bytes()
+    # `extend` is one bounds check and one memcpy. Appending byte by byte cost
+    # a bounds check and a capacity test per byte, and every response body in
+    # the product goes through here.
+    out.extend(s.as_bytes())
+
+
+def _needs_escape(b: Span[UInt8, _]) -> Bool:
     for i in range(len(b)):
-        out.append(b[i])
+        var c = b[i]
+        if c == 34 or c == 92 or c < 32:
+            return True
+    return False
+
+
+def _escape_into(mut out: List[UInt8], b: Span[UInt8, _], lower: Bool):
+    """Append `b` to `out`, JSON-escaped, optionally ASCII-lowercased.
+
+    Almost no header value contains a character that needs escaping, so the
+    common case is a single `extend` and no per-byte work at all. Bytes above
+    127 are passed through: they are already UTF-8 and JSON takes them as they
+    are.
+    """
+    if not lower and not _needs_escape(b):
+        out.extend(b)
+        return
+    for i in range(len(b)):
+        var c = _lower(b[i]) if lower else b[i]
+        if c == 34:
+            out.extend('\\"'.as_bytes())
+        elif c == 92:
+            out.extend("\\\\".as_bytes())
+        elif c == 10:
+            out.extend("\\n".as_bytes())
+        elif c == 13:
+            out.extend("\\r".as_bytes())
+        elif c == 9:
+            out.extend("\\t".as_bytes())
+        elif c < 32:
+            out.extend("\\u00".as_bytes())
+            var hi = c >> 4
+            var lo = c & 15
+            out.append(UInt8(48 + hi) if hi < 10 else UInt8(87 + hi))
+            out.append(UInt8(48 + lo) if lo < 10 else UInt8(87 + lo))
+        else:
+            out.append(c)
 
 
 def json_escape(value: StringSlice) -> String:
     """Escape a string for embedding in JSON."""
-    var out = String("")
     var b = value.as_bytes()
-    for i in range(len(b)):
-        var c = b[i]
-        if c == 34:
-            out += '\\"'
-        elif c == 92:
-            out += "\\\\"
-        elif c == 10:
-            out += "\\n"
-        elif c == 13:
-            out += "\\r"
-        elif c == 9:
-            out += "\\t"
-        elif c < 32:
-            out += "\\u00"
-            var hi = c >> 4
-            var lo = c & 15
-            out += chr(Int(48 + hi) if hi < 10 else Int(87 + hi))
-            out += chr(Int(48 + lo) if lo < 10 else Int(87 + lo))
-        else:
-            out += chr(Int(c))
-    return out
+    if not _needs_escape(b):
+        return String(value)
+    var out = List[UInt8]()
+    out.reserve(len(b) + 16)
+    _escape_into(out, b, False)
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
 def headers_json(buf: Span[UInt8, _], req: Request) -> String:
-    """Serialize request headers as a JSON object for the Python layer."""
-    var out = String("{")
+    """Serialize request headers as a JSON object for the Python layer.
+
+    Built as bytes and converted once. The previous version made two Strings
+    per header - a `slice_str` copy and a `.lower()` copy - and then grew a
+    third by concatenation, so a 20-header request allocated more than 40
+    times before the Python layer saw anything.
+    """
+    var out = List[UInt8]()
+    out.reserve(512)
+    out.append(123)  # {
     for i in range(req.header_count):
         if i > 0:
-            out += ","
-        out += '"'
-        out += json_escape(slice_str(buf, req.headers[i].name).lower())
-        out += '":"'
-        out += json_escape(slice_str(buf, req.headers[i].value))
-        out += '"'
-    out += "}"
-    return out
+            out.append(44)  # ,
+        out.append(34)
+        var name = req.headers[i].name
+        _escape_into(out, buf[name.start : name.start + name.length], True)
+        out.extend('":"'.as_bytes())
+        var value = req.headers[i].value
+        _escape_into(out, buf[value.start : value.start + value.length], False)
+        out.append(34)
+    out.append(125)  # }
+    return String(StringSlice(unsafe_from_utf8=Span(out)))
 
 
 def method_name(method: Int) -> StringSlice[ImmStaticOrigin]:

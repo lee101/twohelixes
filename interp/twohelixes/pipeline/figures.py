@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from twohelixes.charts import palette
+from twohelixes.charts import decimate, palette
 from twohelixes.interpreter import tools
 
 log = logging.getLogger("twohelixes.pipeline.figures")
@@ -394,6 +394,10 @@ def build(
             )
 
     traces = _traces(working, config, chart_type, mode, warnings)
+    # A line over half a million rows is half a million points of JSON drawn
+    # onto 900 pixels. Thinning happens here rather than in each builder so
+    # grouped and pivoted traces are covered by the same rule.
+    traces = decimate.thin(traces, warnings)
     layout: dict[str, Any] = {
         "title": {"text": config.get("title") or ""},
         "xaxis": {"title": {"text": config.get("x_title") or (tools.humanise(x) if x else "")}},

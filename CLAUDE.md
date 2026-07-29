@@ -27,6 +27,35 @@ never blocks another connection.
 
 ## Hard-won facts
 
+**Nothing on the request path may touch a byte at a time.** `slice_str` built
+its String with `chr(byte)` in a loop, which is a reallocation per byte and
+runs once each for the path, the query and the *whole body*; `readable` grew
+the read buffer with 16,384 individual `append(0)` calls per read;
+`headers_json` made two Strings per header and grew a third by concatenation.
+Measured against the same binary with only those loops replaced by `extend` /
+`resize` / one-shot construction, on a POST through the bridge:
+
+| body | before | after |
+| --- | ---: | ---: |
+| 64 KiB | 1.65-2.84 ms | 0.23-0.48 ms |
+| 1 MiB | 25.4-32.0 ms | 3.25-3.58 ms |
+
+Small requests are unchanged - at 7,700 rps on a loaded box the difference is
+inside the noise, and claiming otherwise would be reading drift as a result.
+
+That `chr(byte)` loop was also a **latin-1 decode**, so every non-ASCII request
+reached the Python layer as mojibake: a UTF-8 body `café` arrived as `cafÃ©`.
+The bytes are already UTF-8 and are now handed over unchanged.
+`server/test_http.mojo` holds that, and the rest of the parse/serialize
+contract, with real assertions - `smoke.mojo` only prints, so nothing it does
+can fail a build.
+
+**`pump_streams` iterates the list `drop` mutates.** It runs every 5 ms for the
+life of every stream, so it compacts `self.streaming` in place rather than
+allocating a replacement per tick - and `_unregister_stream` therefore
+*tombstones* an entry with -1 instead of removing it, because removing one
+would shift the entries the loop has not reached yet.
+
 **The AOT binary embeds CPython 3.12, but `mojo run` uses 3.13.** This is the
 single most confusing thing in the repo. `pixi run mojo build` produces a
 binary linked against Python 3.12, so it needs this repo's **`.venv`**
@@ -238,6 +267,34 @@ know the viewer's OS theme, so without this a light-rendered chart is
 unreadable on a dark page. Inline SVG inherits the page's custom properties, so
 one copy is correct in both themes with no JavaScript; the literal hex stays as
 the fallback so a downloaded standalone file still looks right.
+
+## Fewer points, same chart
+
+A line over 500,000 rows is 500,000 points of JSON drawn onto about 900 pixels.
+`charts/decimate.py` runs LTTB (largest-triangle-three-buckets) over any
+oversized scatter trace after `_traces` builds it - once, centrally, so grouped
+and pivoted traces are covered by the same rule rather than each builder having
+its own. Measured on a 500,000-point series: 4,000 points, **9.8 MB of
+serialized series down to 78 KB**, and the outlier spike still in it.
+
+The kernel is `mojo-plotly`'s, 4.6x over the vectorised numpy LTTB. Same rules
+as every accelerator here, plus one of its own:
+
+- **it never compiles anything.** mojo-plotly builds its `.so` lazily on first
+  use, which is fine for a script and unacceptable inside a request.
+  `scripts/setup-venvs.sh` builds it and copies it beside the installed
+  package; `available()` checks the file exists and gives up if it does not.
+  (A non-editable install has no `src/`, so mojo-plotly's own default path
+  names a library that cannot exist - hence `MOJOPLOTLY_LIB`, added upstream.)
+- the fallback is a stride, which is *worse*: it loses exactly the narrow
+  spikes LTTB exists to keep. That is why the note says which one ran.
+- **it always says what it did.** "Drew 4,000 of 500,000 points, sampled
+  preserving peaks." A chart quietly drawn from a twentieth of the data is the
+  silent tail the chart rules forbid.
+
+Bars are never thinned: a bar per category *is* the chart, and dropping bars
+drops data. Markers get a higher budget than lines, because a marker is
+individually visible where a line's pixels are shared.
 
 ## Always a chart
 
