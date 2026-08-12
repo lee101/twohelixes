@@ -127,6 +127,27 @@ def test_markdown_table_is_extracted(tmp_path: Path) -> None:
     assert result.frame["installs"].tolist() == [120, 180]
 
 
+def test_markdown_is_read_directly_without_markitdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "slop.md"
+    path.write_text(
+        "# Notes\n\nThis Markdown must not be converted.\n\n"
+        "A second paragraph keeps the document frame substantive.\n\n"
+        "## Findings\n\nA third paragraph makes the import visibly non-empty.\n"
+    )
+
+    def fail_conversion(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("Markdown should bypass document conversion")
+
+    monkeypatch.setattr(document_ingest, "_convert_to_markdown", fail_conversion)
+
+    result = ingest_path(path, allow_agent=False)
+
+    assert result.report.dataset_kind == "document"
+    assert "This Markdown must not be converted." in " ".join(result.frame["text"])
+
+
 def test_document_without_tables_becomes_document_dataset(tmp_path: Path) -> None:
     path = tmp_path / "brief.md"
     path.write_text(

@@ -24,6 +24,7 @@ DOCUMENT_SUFFIXES = {
     ".html",
     ".htm",
     ".md",
+    ".markdown",
     ".rtf",
     ".epub",
     ".msg",
@@ -126,6 +127,7 @@ def _convert_to_markdown(path: Path, *, deadline: float | None) -> str:
             raise DocumentImportError(
                 "The document converter could not be started."
             ) from None
+
         def stop() -> None:
             """Kill the whole session, not just the child we started.
 
@@ -192,6 +194,20 @@ def _convert_to_markdown(path: Path, *, deadline: float | None) -> str:
             raise DocumentImportError(
                 "The document conversion produced no readable text."
             ) from None
+
+
+def _read_markdown(path: Path) -> str:
+    """Read Markdown as-is; Markdown is already the converter's output format."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise DocumentImportError("The Markdown document could not be read.") from exc
+    if len(data) > MAX_MARKDOWN_BYTES:
+        raise DocumentImportError("The Markdown document exceeds the import size limit.")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise DocumentImportError("The Markdown document is not valid UTF-8.") from exc
 
 
 def _split_pipe_row(line: str) -> list[str]:
@@ -381,13 +397,14 @@ def _document_frame(markdown: str) -> pd.DataFrame:
 def read_document_sheets(
     path: Path, *, deadline: float | None = None
 ) -> dict[str, pd.DataFrame]:
-    markdown = _convert_to_markdown(path, deadline=deadline)
+    is_markdown = path.suffix.casefold() in {".md", ".markdown"}
+    markdown = _read_markdown(path) if is_markdown else _convert_to_markdown(path, deadline=deadline)
     tables = _extract_markdown_tables(markdown)
     if tables:
         sheets = dict(tables)
         for frame in sheets.values():
             frame.attrs["_twohelixes_notes"] = [
-                f"Converted the document to Markdown and found {len(tables)} table"
+                f"{'Read Markdown directly and found' if is_markdown else 'Converted the document to Markdown and found'} {len(tables)} table"
                 f"{'s' if len(tables) != 1 else ''}."
             ]
         return sheets
