@@ -49,6 +49,19 @@ async function me(force = false): Promise<Me> {
 }
 
 // --------------------------------------------------------------------------
+// Shared stylesheet — marketing inlines the server design system; this file
+// carries the pastel token overrides so marketing and the app stay aligned.
+// --------------------------------------------------------------------------
+
+function ensureSharedStyles(): void {
+  if (document.querySelector('link[href="/static/styles.css"]')) return;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = "/static/styles.css";
+  document.head.append(link);
+}
+
+// --------------------------------------------------------------------------
 // Overlay plumbing
 // --------------------------------------------------------------------------
 
@@ -297,6 +310,7 @@ function wireCopy(): void {
 }
 
 function wire(): void {
+  ensureSharedStyles();
   wireSignIn();
   wireTheme();
   wireCopy();
