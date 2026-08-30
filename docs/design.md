@@ -59,7 +59,8 @@ paper tone reads considered, and it is easier on the eye over a long session.
 The page is roughly 80% neutral surface and 20% accent-bearing interaction or
 data. That is a composition rule, not permission to lower text contrast:
 visualbench resolves the real browser tokens and enforces 4.5:1 for every text
-role on page and panel surfaces.
+role on page and panel surfaces. Browser console errors fail the run too; a
+page whose script or stylesheet failed to load is not a passing screenshot.
 
 ### Two rules people get wrong
 
@@ -273,9 +274,9 @@ caption states what the chart demonstrates, not what it contains.
 2. Do headings use the tracking for their size?
 3. Is any text wearing a series colour?
 4. Does it work in dark mode — *checked*, not assumed?
-5. Does `visualbench` report zero horizontal overflow, zero broken images and
-   zero token contrast failures at 390px, run against the nginx front rather
-   than the app port?
+5. Does `visualbench` report zero horizontal overflow, broken images, browser
+   console errors and token contrast failures at 390px, run against the nginx
+   front rather than the app port?
 6. Do the charts pass `defaults.audit()`?
 7. Are the chart tick labels still ~11px at 390px, or has the render size
    drifted back up?

@@ -60,10 +60,12 @@ run() {
 if [ "$CHECK_ONLY" = 1 ]; then
   missing=0
   check_command() {
-    if command -v "$1" >/dev/null 2>&1; then
+    # Version-manager shims can be on PATH even when no usable version has
+    # been selected.  Running the cheapest real command catches that state.
+    if command -v "$1" >/dev/null 2>&1 && "$1" --version >/dev/null 2>&1; then
       printf 'ok       command %s\n' "$1"
     else
-      printf 'missing  command %s\n' "$1"
+      printf 'missing  usable command %s\n' "$1"
       missing=1
     fi
   }
@@ -92,11 +94,12 @@ if [ "$CHECK_ONLY" = 1 ]; then
   fi
   if [ "$DO_BROWSER" = 1 ] && [ "$DO_PYTHON" = 1 ] && [ "$PYTHON_MODE" != "runtime" ]; then
     if [ -x "$ROOT/.venv-13/bin/python" ] && \
-       "$ROOT/.venv-13/bin/python" -m playwright install --dry-run chromium \
+       "$ROOT/.venv-13/bin/python" -c \
+         'from pathlib import Path; from playwright.sync_api import sync_playwright; p = sync_playwright().start(); executable = Path(p.chromium.executable_path); p.stop(); raise SystemExit(not executable.is_file())' \
          >/dev/null 2>&1; then
-      printf 'ok       Playwright Chromium metadata\n'
+      printf 'ok       Playwright Chromium binary\n'
     else
-      printf 'missing  Playwright Chromium metadata\n'
+      printf 'missing  Playwright Chromium binary\n'
       missing=1
     fi
   fi

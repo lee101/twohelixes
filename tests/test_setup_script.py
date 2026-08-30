@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,13 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "setup.sh"
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
+def _run(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(SETUP), *args],
         cwd=ROOT,
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
@@ -48,3 +50,22 @@ def test_unknown_options_fail_with_a_useful_message() -> None:
     assert result.returncode == 2
     assert "unknown option" in result.stderr
     assert "Usage: ./setup.sh" in result.stderr
+
+
+def test_check_rejects_a_broken_version_manager_shim(tmp_path: Path) -> None:
+    bun = tmp_path / "bun"
+    bun.write_text("#!/bin/sh\nexit 1\n")
+    bun.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+
+    result = _run("--check", "--skip-python", "--skip-browser", env=env)
+
+    assert result.returncode == 1
+    assert "missing  usable command bun" in result.stdout
+
+
+def test_browser_check_verifies_the_executable_not_install_metadata() -> None:
+    source = SETUP.read_text()
+    assert "chromium.executable_path" in source
+    assert "executable.is_file()" in source
+    assert "playwright install --dry-run" not in source

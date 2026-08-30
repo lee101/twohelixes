@@ -224,7 +224,23 @@ def main() -> int:
     for row in failures[:6]:
         print(f"  {row['page']}: {str(row['error'])[:120]}")
 
-    return 1 if (overflows or failures or imgs or contrast or empty or spills or blank) else 0
+    return 1 if _report_has_failures(report) else 0
+
+
+def _report_has_failures(report: list[dict[str, object]]) -> bool:
+    """Keep the printed diagnostics and process exit status in agreement."""
+    for row in report:
+        if row.get("error") or row.get("broken_images") or row.get("contrast_failures"):
+            return True
+        if row.get("console_errors") or row.get("empty_plot"):
+            return True
+        if isinstance(row.get("h_overflow_px"), int) and row["h_overflow_px"] > 1:
+            return True
+        if isinstance(row.get("spill_px"), int) and row["spill_px"] > 1:
+            return True
+        if isinstance(row.get("tile_marks"), int) and row["tile_marks"] < 10:
+            return True
+    return False
 
 
 def _contrast_audit(page) -> list[str]:
