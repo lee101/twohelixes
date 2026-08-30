@@ -44,18 +44,22 @@ Chrome is *not* the chart palette and can change without revalidation.
 
 | Token | Light | Dark | Use |
 |---|---|---|---|
-| `--surface-1` | `#fcfcfb` | `#1a1a19` | page background |
-| `--panel` | `#ffffff` | `#1f1f1e` | cards, figures, sheets |
-| `--panel-2` | `#f7f7f5` | `#252523` | inset areas, table hover |
-| `--border` | `#e6e5e1` | `#302f2d` | default hairline |
-| `--border-strong` | `#d5d4cf` | `#3d3c39` | hover, inputs |
+| `--surface-1` | `#f5f3ef` | `#1a1917` | page background |
+| `--panel` | `#faf9f6` | `#22201e` | cards, figures, sheets |
+| `--panel-2` | `#edeae4` | `#2a2724` | inset areas, table hover |
+| `--border` | `#e2ded6` | `#35322e` | default hairline |
+| `--border-strong` | `#cfc9be` | `#454139` | hover, inputs |
 | `--text-primary` | `#0b0b0b` | `#ffffff` | headings, values |
 | `--text-secondary` | `#52514e` | `#c3c2b7` | body |
-| `--text-muted` | `#7a7973` | `#8f8e85` | captions, axis labels |
+| `--text-muted` | `#6d6c66` | `#8f8e85` | captions, UI labels |
 
-The neutrals are **warm** (`#fcfcfb`, not `#ffffff`; `#1a1a19`, not `#000`).
+The neutrals are **warm** (`#f5f3ef`, not `#ffffff`; `#1a1917`, not `#000`).
 A pure-grey UI next to saturated chart colours reads clinical; a bone-white
 paper tone reads considered, and it is easier on the eye over a long session.
+The page is roughly 80% neutral surface and 20% accent-bearing interaction or
+data. That is a composition rule, not permission to lower text contrast:
+visualbench resolves the real browser tokens and enforces 4.5:1 for every text
+role on page and panel surfaces.
 
 ### Two rules people get wrong
 
@@ -217,7 +221,8 @@ clips instead of wrapping and cannot know the viewport from the server.
 
 ## 9. Component rules worth stating
 
-**Buttons.** Primary is accent-filled with `sh-1`, lifting to `sh-2` on hover.
+**Buttons.** Primary uses the darker action stop from the same blue ramp, so
+white text clears 4.5:1; it has `sh-1`, lifting to `sh-2` on hover.
 Ghost is `--panel` with a `--border-strong` hairline. Never more than one
 primary in a viewport region.
 
@@ -268,8 +273,9 @@ caption states what the chart demonstrates, not what it contains.
 2. Do headings use the tracking for their size?
 3. Is any text wearing a series colour?
 4. Does it work in dark mode — *checked*, not assumed?
-5. Does `visualbench` report zero horizontal overflow **and zero broken
-   images** at 390px, run against the nginx front rather than the app port?
+5. Does `visualbench` report zero horizontal overflow, zero broken images and
+   zero token contrast failures at 390px, run against the nginx front rather
+   than the app port?
 6. Do the charts pass `defaults.audit()`?
 7. Are the chart tick labels still ~11px at 390px, or has the render size
    drifted back up?

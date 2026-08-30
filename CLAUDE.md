@@ -95,7 +95,10 @@ hazard on a pipelined connection. The loop is iterative for both reasons.
 ```bash
 # Environments — once. Builds .venv (3.12, the server) and .venv-13 (3.13,
 # tests), installs ../pybed, and copies the int8 embedding model from ../gobed.
-./scripts/setup-venvs.sh
+./setup.sh
+
+# Verify an existing bootstrap without changing it
+./setup.sh --check
 
 # Build the server (~20s)
 cd server && pixi run mojo build main.mojo -o ../build/twohelixes-server
