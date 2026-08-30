@@ -25,6 +25,7 @@ Run with the server already up (the chart pass needs `interp` importable):
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import sys
 import time
@@ -52,6 +53,8 @@ PAGES = [
     ("datasets", "/datasets"),
     ("dataset-detail", "/datasets/orders"),
     ("dataset-example", "/datasets/orders/net-revenue-by-region-over-time"),
+    ("blog", "/blog"),
+    ("blog-hosting", "/blog/codex-infinity-hosting"),
     ("app", "/app"),
 ]
 
@@ -145,6 +148,7 @@ def main() -> int:
                             ".filter(i => i.complete && i.naturalWidth === 0)"
                             ".map(i => i.currentSrc || i.src)"
                         )
+                        contrast = _contrast_audit(page)
                         report.append(
                             {
                                 "page": label,
@@ -153,6 +157,7 @@ def main() -> int:
                                 "file": shot.name,
                                 "h_overflow_px": overflow,
                                 "broken_images": broken,
+                                "contrast_failures": contrast,
                                 "console_errors": list(errors),
                             }
                         )
@@ -190,6 +195,7 @@ def main() -> int:
     console = [r for r in report if r.get("console_errors")]
     failures = [r for r in report if r.get("error")]
     imgs = [r for r in report if r.get("broken_images")]
+    contrast = [r for r in report if r.get("contrast_failures")]
 
     print(f"captured {len([r for r in report if r.get('file')])} screenshots -> {OUT}")
     print(f"horizontal overflow: {len(overflows)}")
@@ -209,6 +215,9 @@ def main() -> int:
     print(f"broken images: {len(imgs)}")
     for row in imgs[:6]:
         print(f"  {row['page']} {row['viewport']}: {row['broken_images'][:3]}")
+    print(f"token contrast failures: {len(contrast)}")
+    for row in contrast[:6]:
+        print(f"  {row['page']} {row['theme']} {row['viewport']}: {row['contrast_failures']}")
     print(f"console errors: {len(console)}")
     for row in console[:6]:
         print(f"  {row['page']} {row['viewport']}: {row['console_errors'][:2]}")
@@ -216,7 +225,72 @@ def main() -> int:
     for row in failures[:6]:
         print(f"  {row['page']}: {str(row['error'])[:120]}")
 
-    return 1 if (overflows or failures or imgs or empty or spills or blank) else 0
+    return 1 if _report_has_failures(report) else 0
+
+
+def _report_has_failures(report: list[dict[str, object]]) -> bool:
+    """Keep the printed diagnostics and process exit status in agreement."""
+    for row in report:
+        if row.get("error") or row.get("broken_images") or row.get("contrast_failures"):
+            return True
+        if row.get("console_errors") or row.get("empty_plot"):
+            return True
+        if isinstance(row.get("h_overflow_px"), int) and row["h_overflow_px"] > 1:
+            return True
+        if isinstance(row.get("spill_px"), int) and row["spill_px"] > 1:
+            return True
+        if isinstance(row.get("tile_marks"), int) and row["tile_marks"] < 10:
+            return True
+    return False
+
+
+def _contrast_audit(page) -> list[str]:
+    """Check the text roles promised by the design system in the real browser.
+
+    Custom properties can contain nested ``var()`` and ``color-mix()`` values,
+    so a Python hex-colour check can disagree with what Chromium paints. Tiny
+    probe elements make the browser resolve the final foreground/background;
+    visualbench then enforces WCAG's 4.5:1 floor for normal text.
+    """
+    return page.evaluate(
+        """() => {
+          const pairs = [
+            ['primary/page', 'var(--text-primary)', 'var(--surface-1)'],
+            ['secondary/page', 'var(--text-secondary)', 'var(--surface-1)'],
+            ['muted/page', 'var(--text-muted)', 'var(--surface-1)'],
+            ['primary/panel', 'var(--text-primary)', 'var(--panel)'],
+            ['secondary/panel', 'var(--text-secondary)', 'var(--panel)'],
+            ['muted/panel', 'var(--text-muted)', 'var(--panel)'],
+            ['link/page', 'var(--accent)', 'var(--surface-1)'],
+            ['link/panel', 'var(--accent)', 'var(--panel)'],
+            ['button', '#ffffff', 'var(--action)'],
+          ];
+          const rgb = (value) => {
+            const match = value.match(/[\\d.]+/g);
+            return match ? match.slice(0, 3).map(Number) : [0, 0, 0];
+          };
+          const luminance = (value) => {
+            const channels = rgb(value).map((n) => {
+              const v = n / 255;
+              return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+            });
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+          };
+          const failures = [];
+          for (const [name, foreground, background] of pairs) {
+            const probe = document.createElement('span');
+            probe.style.cssText = `position:fixed;left:-9999px;color:${foreground};background:${background}`;
+            document.body.append(probe);
+            const style = getComputedStyle(probe);
+            const a = luminance(style.color);
+            const b = luminance(style.backgroundColor);
+            const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+            probe.remove();
+            if (ratio < 4.5) failures.push(`${name} ${ratio.toFixed(2)}:1`);
+          }
+          return failures;
+        }"""
+    )
 
 
 def _capture_query(browser, args) -> list[dict[str, object]]:
@@ -961,6 +1035,15 @@ def _write_index(report: list[dict[str, object]]) -> None:
     cards = []
     for row in report:
         if not row.get("file"):
+            if row.get("error"):
+                label = html_lib.escape(str(row.get("page", "unknown")))
+                detail = html_lib.escape(str(row["error"]))
+                cards.append(
+                    "<article style='padding:12px;border:1px solid #e34948;"
+                    "border-radius:8px;background:#fff'>"
+                    f"<b style='color:#e34948'>{label} · navigation failure</b>"
+                    f"<pre style='white-space:pre-wrap'>{detail}</pre></article>"
+                )
             continue
         flag = ""
         if isinstance(row.get("h_overflow_px"), int) and row["h_overflow_px"] > 1:
@@ -968,10 +1051,18 @@ def _write_index(report: list[dict[str, object]]) -> None:
         if row.get("broken_images"):
             flag += (f" <b style='color:#e34948'>"
                      f"{len(row['broken_images'])} broken img</b>")
+        if row.get("contrast_failures"):
+            flag += (f" <b style='color:#e34948'>"
+                     f"{len(row['contrast_failures'])} contrast failures</b>")
+        if row.get("console_errors"):
+            flag += (f" <b style='color:#e34948'>"
+                     f"{len(row['console_errors'])} console errors</b>")
         if row.get("empty_plot"):
             flag += " <b style='color:#e34948'>empty plot</b>"
         if isinstance(row.get("spill_px"), int) and row["spill_px"] > 1:
             flag += f" <b style='color:#e34948'>spills {row['spill_px']}px</b>"
+        if isinstance(row.get("tile_marks"), int) and row["tile_marks"] < 10:
+            flag += " <b style='color:#e34948'>blank tile</b>"
         cards.append(
             f"<figure style='margin:0'><figcaption style='font:12px system-ui;"
             f"padding:6px 0'>{row['page']} · {row['theme']} · {row['viewport']} {flag}"

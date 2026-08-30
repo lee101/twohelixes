@@ -22,6 +22,7 @@ NAV = (
     ("/features", "Features"),
     ("/datasets", "Datasets"),
     ("/pricing", "Pricing"),
+    ("/blog", "Blog"),
     ("/docs", "Docs"),
 )
 
@@ -47,21 +48,22 @@ button{{font:inherit;color:inherit}}
 :root{{
   color-scheme:light;
   {light_vars};
-  --panel:#ffffff;
-  --panel-2:#f7f7f5;
-  --border:#e6e5e1;
-  --border-strong:#d5d4cf;
-  /* One accent for the whole product, and it is the brand hue - which is the
-     same colour as the first chart series, so the page and the chart in it
-     belong to each other. Nothing outside data and status carries a second
-     hue: an earlier version used the green series for bullets, badges and GET
-     methods, which made a two-colour site out of a one-colour brand. */
-  --accent:var(--brand);
+  --panel:#faf9f6;
+  --panel-2:#edeae4;
+  --border:#e2ded6;
+  --border-strong:#cfc9be;
+  /* One hue for the whole product. Chrome uses the deeper stop so ordinary
+     link text clears 4.5:1; the first chart series uses the brighter stop so
+     marks remain distinguishable. It is one blue ramp, with contrast deciding
+     the stop rather than a second decorative colour. */
+  --accent:var(--brand-deep);
   --accent-strong:var(--brand-deep);
+  --action:#256abf;
   --accent-soft:color-mix(in srgb,var(--brand) 10%,transparent);
   --accent-ring:color-mix(in srgb,var(--brand) 35%,transparent);
   /* Reserved for real status. Not chrome. */
   --ok:var(--status-good);
+  --text-muted:#6d6c66;
 
   /* One spacing scale, used everywhere. */
   --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem;
@@ -84,12 +86,13 @@ button{{font:inherit;color:inherit}}
   :root:not([data-theme="light"]){{
     color-scheme:dark;
     {dark_vars};
-    --panel:#1f1f1e;
-    --panel-2:#252523;
-    --border:#302f2d;
-    --border-strong:#3d3c39;
-    --accent:var(--brand);
+    --panel:#22201e;
+    --panel-2:#2a2724;
+    --border:#35322e;
+    --border-strong:#454139;
+    --accent:var(--brand-light);
     --accent-strong:var(--brand-light);
+    --action:#256abf;
     --accent-soft:color-mix(in srgb,var(--brand) 16%,transparent);
     --accent-ring:color-mix(in srgb,var(--brand) 45%,transparent);
     --sh-1:0 1px 2px rgba(0,0,0,.4);
@@ -100,9 +103,10 @@ button{{font:inherit;color:inherit}}
 :root[data-theme="dark"]{{
   color-scheme:dark;
   {dark_vars};
-  --panel:#1f1f1e; --panel-2:#252523;
-  --border:#302f2d; --border-strong:#3d3c39;
+  --panel:#22201e; --panel-2:#2a2724;
+  --border:#35322e; --border-strong:#454139;
   --accent-strong:var(--brand-light);
+  --accent:var(--brand-light); --action:#256abf;
   --accent-soft:color-mix(in srgb,var(--brand) 16%,transparent);
   --accent-ring:color-mix(in srgb,var(--brand) 45%,transparent);
   --sh-1:0 1px 2px rgba(0,0,0,.4);
@@ -184,8 +188,8 @@ nav.main a[aria-current]{{color:var(--text-primary);font-weight:600}}
   transition:transform .12s ease,box-shadow .15s ease,background .15s,border-color .15s}}
 .btn:hover{{text-decoration:none}}
 .btn:active{{transform:translateY(1px)}}
-.btn-primary{{background:var(--accent);color:#fff;box-shadow:var(--sh-1)}}
-.btn-primary:hover{{box-shadow:var(--sh-2);filter:brightness(1.06)}}
+.btn-primary{{background:var(--action);color:#fff;box-shadow:var(--sh-1)}}
+.btn-primary:hover{{background:#1c5cab;box-shadow:var(--sh-2)}}
 .btn-ghost{{border-color:var(--border-strong);color:var(--text-primary);
   background:var(--panel)}}
 .btn-ghost:hover{{border-color:var(--text-muted);box-shadow:var(--sh-1)}}
@@ -294,7 +298,7 @@ section h2{{font-size:clamp(1.45rem,3vw,2rem);letter-spacing:-.02em;
 .plan:hover{{box-shadow:var(--sh-2);transform:translateY(-2px)}}
 .plan.highlight{{border-color:var(--accent);box-shadow:var(--sh-2)}}
 .plan.highlight::after{{content:"Most popular";position:absolute;top:-10px;
-  left:var(--s5);background:var(--accent);color:#fff;font-size:.7rem;
+  left:var(--s5);background:var(--action);color:#fff;font-size:.7rem;
   font-weight:660;padding:.18rem .55rem;border-radius:var(--r-full);
   letter-spacing:.02em}}
 .plan h3{{font-size:1rem;font-weight:640}}
@@ -619,6 +623,31 @@ header.site,main,footer.site{{position:relative;z-index:1}}
 .band{{background:var(--panel-2);border-block:1px solid var(--border)}}
 .kicker{{font-size:.74rem;font-weight:660;letter-spacing:.09em;
   text-transform:uppercase;color:var(--text-muted);margin-bottom:.55rem}}
+
+/* --- editorial pages ------------------------------------------------ */
+.article{{max-width:760px}}
+.article-head{{padding-bottom:var(--s5);border-bottom:1px solid var(--border)}}
+.article-head h1{{max-width:19ch}}
+.article-meta{{display:flex;gap:var(--s3);flex-wrap:wrap;margin-top:var(--s4);
+  color:var(--text-muted);font-size:.84rem}}
+.prose{{font-size:1rem;color:var(--text-secondary)}}
+.prose > * + *{{margin-top:var(--s5)}}
+.prose h2{{color:var(--text-primary);font-size:clamp(1.3rem,2.5vw,1.75rem);
+  letter-spacing:-.02em;margin-top:var(--s7);margin-bottom:0}}
+.prose h3{{color:var(--text-primary);font-size:1.05rem;margin-top:var(--s6)}}
+.prose p,.prose li{{max-width:68ch}}
+.prose ul{{display:grid;gap:var(--s3);padding-left:1.2rem;list-style:disc}}
+.prose li::marker{{color:var(--accent)}}
+.prose a{{text-decoration:underline;text-underline-offset:.18em}}
+.prose .callout{{max-width:none;padding:var(--s5);background:var(--accent-soft);
+  border:1px solid var(--accent-ring);border-radius:var(--r-lg);
+  color:var(--text-primary)}}
+.post-list{{display:grid;gap:var(--s4)}}
+.post-card{{display:block;color:inherit}}
+.post-card:hover{{text-decoration:none}}
+.post-card time{{display:block;color:var(--text-muted);font-size:.8rem;
+  margin-bottom:var(--s2)}}
+.post-card p{{margin-top:var(--s2)}}
 """
 
 
@@ -719,8 +748,8 @@ def _page(
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{html.escape(title)}</title>
 <meta name="description" content="{html.escape(description)}">
-<meta name="theme-color" content="#fcfcfb" media="(prefers-color-scheme:light)">
-<meta name="theme-color" content="#1a1a19" media="(prefers-color-scheme:dark)">
+<meta name="theme-color" content="#f5f3ef" media="(prefers-color-scheme:light)">
+<meta name="theme-color" content="#1a1917" media="(prefers-color-scheme:dark)">
 <link rel="canonical" href="{site}{html.escape(path)}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{site}{html.escape(path)}">
@@ -734,6 +763,7 @@ def _page(
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 {_THEME_BOOT}
 <style>{_css()}</style>
+<link rel="stylesheet" href="/static/styles.css">
 {head}
 </head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}">
 <a class="skip" href="#content">Skip to content</a>
@@ -751,7 +781,8 @@ def _page(
   <span>twoHelixes — charts of your data, from a sentence</span>
   <nav aria-label="Footer">
     <a href="/features">Features</a><a href="/datasets">Datasets</a>
-    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/app">App</a>
+    <a href="/pricing">Pricing</a><a href="/blog">Blog</a>
+    <a href="/docs">Docs</a><a href="/app">App</a>
   </nav>
 </div></footer>
 <script type="module" src="/static/marketing.js"></script>
@@ -1538,6 +1569,133 @@ def analytics_parity(ctx: router.Context) -> router.Result:
             "An honest GA4 to twoHelixes analytics capability map.",
             body,
             "/docs/analytics-parity",
+        )
+    )
+
+
+@router.get("/blog")
+def blog(ctx: router.Context) -> router.Result:
+    body = """
+<main id="content">
+<section class="page-head"><div class="shell article">
+  <p class="kicker">Blog</p>
+  <h1>Notes from building twoHelixes</h1>
+  <p class="sub">The engineering decisions, operating lessons and design
+  constraints behind a data product that has to show its working.</p>
+</div></section>
+<section><div class="shell article post-list">
+  <a class="card post-card" href="/blog/codex-infinity-hosting">
+    <time datetime="2026-08-30">30 August 2026</time>
+    <h2>Why we build on Codex Infinity</h2>
+    <p>What a persistent cloud workspace changes when the product crosses
+    Mojo, Python, TypeScript, browsers and production operations.</p>
+  </a>
+</div></section>
+</main>"""
+    return router.html(
+        _page(
+            "Blog — twoHelixes",
+            "Engineering and design notes from building twoHelixes.",
+            body,
+            "/blog",
+        )
+    )
+
+
+@router.get("/blog/codex-infinity-hosting")
+def codex_infinity_hosting(ctx: router.Context) -> router.Result:
+    path = "/blog/codex-infinity-hosting"
+    title = "Why we build on Codex Infinity"
+    description = (
+        "How Codex Infinity gives twoHelixes a persistent cloud engineering "
+        "workspace for builds, browser tests and careful production work."
+    )
+    site = config.site_url().rstrip("/")
+    structured = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "BlogPosting",
+            "headline": title,
+            "datePublished": "2026-08-30",
+            "dateModified": "2026-08-30",
+            "description": description,
+            "mainEntityOfPage": f"{site}{path}",
+            "author": {"@type": "Organization", "name": "twoHelixes"},
+            "publisher": {"@type": "Organization", "name": "twoHelixes"},
+        },
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    body = """
+<main id="content">
+<section class="page-head"><div class="shell article article-head">
+  <p class="kicker">Infrastructure</p>
+  <h1>Why we build on Codex Infinity</h1>
+  <p class="sub">A good agent host is not a chat window attached to a fresh
+  container. It is a real engineering workspace: persistent, inspectable and
+  capable of proving that a change works before it leaves the machine.</p>
+  <div class="article-meta"><time datetime="2026-08-30">30 August 2026</time>
+    <span>6 minute read</span></div>
+</div></section>
+<section><article class="shell article prose">
+  <p>twoHelixes crosses more boundaries than its quiet interface suggests. A
+  request enters a Mojo HTTP server, crosses once into Python, may shape a
+  frame with native numerical libraries, and ends in a TypeScript chart that
+  must behave at phone and desktop widths. Building that reliably needs the
+  whole system close at hand.</p>
+
+  <p class="callout"><a href="https://codex-infinity.com">Codex Infinity</a>
+  is our cloud engineering host. Its persistent workspaces let an automated
+  coding agent inspect the existing branch, preserve work already in progress,
+  run the real toolchain and leave behind a reviewable commit.</p>
+
+  <h2>Persistence changes the quality of the work</h2>
+  <p>Disposable sandboxes encourage disposable fixes. In a persistent
+  workspace, the repository history, dependency caches, test environments and
+  benchmark output survive long enough to become evidence. An agent can read
+  why a strange choice exists before changing it. That matters here: the Mojo
+  binary embeds Python 3.12 while the test runner uses Python 3.13, and treating
+  those environments as interchangeable produces a convincing but incorrect
+  dependency error.</p>
+
+  <h2>The browser is part of the test suite</h2>
+  <p>Unit tests can prove that a chart figure is valid. They cannot prove that
+  its legend clears the title, that a dashboard tile keeps drawing during an
+  edit, or that muted copy still has enough contrast in dark mode. The cloud
+  workspace can build the frontend, start the actual server and run Playwright
+  through visualbench at real viewport sizes. Screenshots are useful, but the
+  benchmark also measures overflow, missing images, empty plots and contrast;
+  the report can fail even when a capture looks tidy at a glance.</p>
+
+  <h2>Operations stay explicit</h2>
+  <p>The same workspace holds the nginx configuration, systemd unit and deploy
+  script beside the application. That makes operational constraints reviewable
+  as code. Streaming endpoints disable proxy buffering. Static binary assets
+  bypass the Python bridge. Deploys build before they switch the running
+  service. None of those choices should live only in somebody's shell history.</p>
+
+  <h2>What we still insist on</h2>
+  <ul>
+    <li>Agents read the repository and current branch before editing.</li>
+    <li>Existing work is merged forward, not silently replaced.</li>
+    <li>Setup is scripted and idempotent rather than remembered.</li>
+    <li>Tests run in proportion to the change, including a real browser when
+    visual behavior changes.</li>
+    <li>The finished work is a focused commit a human can inspect or revert.</li>
+  </ul>
+
+  <p>Codex Infinity gives us the durable machine and the automation surface.
+  The repository supplies the constraints, checks and institutional memory.
+  The useful result comes from both: enough autonomy to finish the work, and
+  enough evidence that finishing did not merely mean stopping.</p>
+</article></section>
+</main>"""
+    return router.html(
+        _page(
+            f"{title} — twoHelixes",
+            description,
+            body,
+            path,
+            f'<script type="application/ld+json">{structured}</script>',
         )
     )
 

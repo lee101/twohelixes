@@ -1,8 +1,8 @@
 /* Shared visual system + app chrome.
  *
- * Marketing pages inline the base design system from `routes/pages.py::_css()`
- * and load this file via `marketing.ts`; the app shell links it after the
- * inline block. Token overrides here keep both surfaces on one restrained
+ * Marketing pages and the app shell inline the base design system from
+ * `routes/pages.py::_css()` and link this file in the document head. Token
+ * overrides here keep both surfaces on one restrained
  * pastel palette (~80% warm neutrals, ~20% brand accent) without forking
  * chart series or status hues.
  */

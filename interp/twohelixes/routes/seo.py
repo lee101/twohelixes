@@ -22,6 +22,8 @@ PAGES: tuple[tuple[str, str, str], ...] = (
     ("/pricing", "weekly", "0.8"),
     ("/datasets", "weekly", "0.7"),
     ("/docs", "weekly", "0.6"),
+    ("/blog", "weekly", "0.6"),
+    ("/blog/codex-infinity-hosting", "monthly", "0.5"),
 )
 
 # Paths a crawler gains nothing from and we lose something by exposing.

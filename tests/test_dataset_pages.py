@@ -230,7 +230,7 @@ def test_the_sitemap_lists_every_page_that_exists() -> None:
     namespace = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     locations = [node.text or "" for node in root.iter(f"{namespace}loc")]
 
-    for path in ("/", "/features", "/pricing", "/docs", "/datasets"):
+    for path in ("/", "/features", "/pricing", "/docs", "/datasets", "/blog"):
         assert any(loc.endswith(path) for loc in locations), path
     for sample in samples.SAMPLES:
         assert any(loc.endswith(f"/datasets/{sample.key}") for loc in locations)
