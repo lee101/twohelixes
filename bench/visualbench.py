@@ -25,6 +25,7 @@ Run with the server already up (the chart pass needs `interp` importable):
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import sys
 import time
@@ -1034,6 +1035,15 @@ def _write_index(report: list[dict[str, object]]) -> None:
     cards = []
     for row in report:
         if not row.get("file"):
+            if row.get("error"):
+                label = html_lib.escape(str(row.get("page", "unknown")))
+                detail = html_lib.escape(str(row["error"]))
+                cards.append(
+                    "<article style='padding:12px;border:1px solid #e34948;"
+                    "border-radius:8px;background:#fff'>"
+                    f"<b style='color:#e34948'>{label} · navigation failure</b>"
+                    f"<pre style='white-space:pre-wrap'>{detail}</pre></article>"
+                )
             continue
         flag = ""
         if isinstance(row.get("h_overflow_px"), int) and row["h_overflow_px"] > 1:
@@ -1044,10 +1054,15 @@ def _write_index(report: list[dict[str, object]]) -> None:
         if row.get("contrast_failures"):
             flag += (f" <b style='color:#e34948'>"
                      f"{len(row['contrast_failures'])} contrast failures</b>")
+        if row.get("console_errors"):
+            flag += (f" <b style='color:#e34948'>"
+                     f"{len(row['console_errors'])} console errors</b>")
         if row.get("empty_plot"):
             flag += " <b style='color:#e34948'>empty plot</b>"
         if isinstance(row.get("spill_px"), int) and row["spill_px"] > 1:
             flag += f" <b style='color:#e34948'>spills {row['spill_px']}px</b>"
+        if isinstance(row.get("tile_marks"), int) and row["tile_marks"] < 10:
+            flag += " <b style='color:#e34948'>blank tile</b>"
         cards.append(
             f"<figure style='margin:0'><figcaption style='font:12px system-ui;"
             f"padding:6px 0'>{row['page']} · {row['theme']} · {row['viewport']} {flag}"
