@@ -91,6 +91,46 @@ def _catalogue_entry(key: str) -> dict[str, Any] | None:
     return entry
 
 
+def _matching_samples(query: str = "") -> list[Any]:
+    """Rank the built-in catalogue with a cheap, deterministic text search."""
+    wanted = [part.casefold() for part in (query or "").split() if part.strip()]
+    if not wanted:
+        return list(samples.SAMPLES)
+
+    ranked: list[tuple[int, int, Any]] = []
+    for position, sample in enumerate(samples.SAMPLES):
+        fields = [
+            sample.key,
+            sample.name,
+            sample.description,
+            sample.source,
+            *sample.questions,
+        ]
+        haystack = " ".join(str(field) for field in fields).casefold()
+        if not all(term in haystack for term in wanted):
+            continue
+        score = sum(
+            8 if term in sample.key.casefold() else
+            6 if term in sample.name.casefold() else
+            3 if term in sample.description.casefold() else
+            1
+            for term in wanted
+        )
+        ranked.append((score, -position, sample))
+    ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    return [sample for _score, _position, sample in ranked]
+
+
+def _api_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Expose the catalog under the field names used by askfelix as well."""
+    out = dict(entry)
+    out["id"] = out["key"]
+    out["row_count"] = out["rows"]
+    out["interesting_queries"] = out["questions"]
+    out["file_name"] = f'{out["key"]}.parquet'
+    return out
+
+
 # --------------------------------------------------------------------------
 # Markup helpers
 # --------------------------------------------------------------------------
@@ -176,10 +216,13 @@ def _mode(ctx: router.Context) -> str:
 def index(ctx: router.Context) -> router.Result:
     mode = _mode(ctx)
     site = config.site_url().rstrip("/")
+    query = (ctx.q("q", "") or "").strip()
+    listed_samples = _matching_samples(query)
+    dataset_count = len(samples.SAMPLES)
 
     cards = ""
     items: list[dict[str, Any]] = []
-    for position, sample in enumerate(samples.SAMPLES, start=1):
+    for position, sample in enumerate(listed_samples, start=1):
         entry = _catalogue_entry(sample.key) or {}
         lead = examples.lead(sample.key)
         markup = ""
@@ -211,6 +254,15 @@ def index(ctx: router.Context) -> router.Result:
             }
         )
 
+    search_message = (
+        f'match &ldquo;{_esc(query)}&rdquo;' if query else "available to browse"
+    )
+    empty_markup = (
+        '<p class="dataset-empty">No datasets matched that search. '
+        'Try a topic, metric, or chart type.</p>'
+        if not listed_samples
+        else ""
+    )
     structured = {
         "@context": "https://schema.org",
         "@type": "DataCatalog",
@@ -237,7 +289,8 @@ def index(ctx: router.Context) -> router.Result:
 <section class="page-head"><div class="shell">
   <p class="kicker">Datasets</p>
   <h1>Datasets you can ask questions of right now</h1>
-  <p class="sub">Nine datasets are loaded into every account &mdash; four open
+  <p class="sub">{dataset_count} datasets are loaded into every account &mdash; four
+  curated business datasets shared with askfelix, four open
   reference sets everyone benchmarks against, five generated to have the shapes
   real business data has: seasonality, a long tail, a funnel, a cohort. Every
   chart below was drawn by the live pipeline from the real rows, and every one
@@ -245,7 +298,16 @@ def index(ctx: router.Context) -> router.Result:
 </div></section>
 
 <section><div class="shell">
+  <form class="dataset-search" method="get" action="/datasets" role="search">
+    <label for="dataset-search-input">Find a dataset</label>
+    <div><input id="dataset-search-input" name="q" type="search"
+      value="{_esc(query)}" placeholder="Try energy, funnel, or refunds"
+      autocomplete="off"><button class="btn btn-primary btn-small" type="submit">Search</button></div>
+  </form>
+  <p class="dataset-search-result">{len(listed_samples)} of {dataset_count} datasets
+    {search_message}.</p>
   <div class="ds-grid">{cards}</div>
+  {empty_markup}
 </div></section>
 
 <section class="band"><div class="shell">
@@ -262,7 +324,7 @@ def index(ctx: router.Context) -> router.Result:
     return router.html(
         _page(
             "Sample datasets with worked example charts — twoHelixes",
-            "Nine sample datasets with schemas, rows, and example charts drawn "
+            "Thirteen sample datasets with schemas, rows, and example charts drawn "
             "by the live pipeline with their reasoning traces attached.",
             body,
             "/datasets",
@@ -555,8 +617,27 @@ def _dataset_jsonld(sample: Any, frame: Any, site: str) -> dict[str, Any]:
 @router.get("/v1/samples/catalog")
 def list_datasets(ctx: router.Context) -> router.Result:
     """Everything the pages show, as JSON. Public: the data is public."""
-    entries = [e for e in (_catalogue_entry(s.key) for s in samples.SAMPLES) if e]
-    return router.json_result({"datasets": entries})
+    query = (ctx.q("q", "") or "").strip()
+    limit = max(1, min(200, ctx.q_int("limit", len(samples.SAMPLES))))
+    entries = [
+        _api_entry(entry)
+        for entry in (_catalogue_entry(s.key) for s in _matching_samples(query)[:limit])
+        if entry
+    ]
+    return router.json_result({"datasets": entries, "count": len(entries), "query": query})
+
+
+@router.get("/api/datasets")
+def api_datasets(ctx: router.Context) -> router.Result:
+    """Compatibility catalog endpoint for the public browse/search surface."""
+    query = (ctx.q("q", "") or "").strip()
+    limit = max(1, min(200, ctx.q_int("limit", len(samples.SAMPLES))))
+    entries = [
+        _api_entry(entry)
+        for entry in (_catalogue_entry(s.key) for s in _matching_samples(query)[:limit])
+        if entry
+    ]
+    return router.json_result({"entries": entries, "count": len(entries), "query": query})
 
 
 @router.get("/v1/samples/{key}/dataset")
@@ -564,7 +645,7 @@ def get_dataset(ctx: router.Context) -> router.Result:
     entry = _catalogue_entry(ctx.params["key"])
     if entry is None:
         return router.error(404, "unknown_dataset")
-    return router.json_result(entry)
+    return router.json_result(_api_entry(entry))
 
 
 @router.get("/v1/samples/{key}/download.csv")

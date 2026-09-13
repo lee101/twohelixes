@@ -8,7 +8,7 @@ GA4 report.
 | GA4 concept | twoHelixes concept | Verdict | Exact boundary |
 | --- | --- | --- | --- |
 | Property / web data stream | Analytics site | Partial | A site is one owned domain and event namespace. There are no app streams or multi-stream properties. Sites can be shared with an existing twoHelixes team. |
-| Measurement ID | Write key | At parity | The public write key selects the registered site at collection time. Unknown IDs are discarded; they never create a namespace. |
+| Measurement ID | Write key | At parity | The public write key selects the registered site at collection time. `POST /mp/collect` accepts the GA4 Measurement Protocol event envelope. Unknown IDs are discarded; they never create a namespace. |
 | `gtag` / `dataLayer` | `th.js` and the Segment aliases | Partial | Page, track and identify calls plus queued `th` calls are supported. The generic `dataLayer` command/config/plugin surface is not. |
 | GA4 event and event parameters | `event_name` and `props` | At parity | GA-style names and scalar/nested JSON parameters are retained, subject to collector size limits. |
 | `user_pseudo_id` | `client_id` | Deliberately different | It is a random first-party localStorage value, not a Google cookie or cross-site identifier. DNT and GPC disable collection before an ID is created. |
@@ -17,8 +17,9 @@ GA4 report.
 | Conversions / key events | Conventional key-event names in engaged-session reporting | Partial | `purchase`, `sign_up`, `generate_lead`, and `conversion` count as key events. There is no per-site custom key-event registry or attribution report. |
 | Audiences | None | Not supported | There is no persistent segment membership, activation, or advertising export. Dataset filters can answer cohort questions without creating an audience object. |
 | UTM and traffic-source attribution | Session-scoped `utm_*` plus referrer fields | Partial | URL, GA shorthand and Segment campaign fields are accepted; the first campaign values survive later session events and self-referrals are excluded. Channel grouping, ad-click IDs, and cross-session last-non-direct attribution are absent. |
-| Explorations | Chat queries and editable dashboards | Deliberately different | twoHelixes uses questions and charts rather than GA’s free-form exploration canvas. New event names receive a structural starter dashboard without a model call. |
+| Explorations | Chat queries and editable dashboards | Deliberately different | twoHelixes uses questions and charts rather than GA’s free-form exploration canvas. Repeated event names receive a structural starter dashboard without a model call; rare custom names remain discoverable in the schema catalog without spawning unbounded work. |
 | BigQuery export | `/v1/analytics/export` and the datasets library | Partial | The authenticated endpoint returns a bounded Segment-shaped raw batch that can enter the datasets library. It is not a continuous linked warehouse export and has no intraday tables. |
+| Data thresholds | Weighted adaptive sampling | Deliberately different | Collection starts unsampled. Above the configured client/server rate ceilings, low-value streams are sampled with inverse weights while identity, group, purchase, sign-up, refund, login, and error events stay intact. Event/page totals are estimated; unique users and sessions are explicitly observed rather than modelled. |
 
 ## Event namespaces that predate ownership
 

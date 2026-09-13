@@ -33,7 +33,10 @@ class Result:
         elif self.body is None:
             payload = ""
         elif isinstance(self.body, (bytes, bytearray)):
-            payload = self.body.decode("utf-8", "replace")
+            # The bridge is string-only. Latin-1 is the reversible 1:1 carrier
+            # for binary response bytes; Mojo converts it back for binary
+            # content types instead of UTF-8-encoding the code points.
+            payload = bytes(self.body).decode("latin-1")
         else:
             payload = str(self.body)
         extra = json.dumps(self.headers) if self.headers else ""

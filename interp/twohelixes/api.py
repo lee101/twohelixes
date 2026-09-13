@@ -29,10 +29,11 @@ def _widen_dlopen() -> None:
     """Load C extensions with RTLD_GLOBAL.
 
     We are an *embedded* interpreter inside the Mojo binary, not the `python`
-    executable, and libpython here is loaded RTLD_LOCAL. Under that default,
-    numpy's `_multiarray_umath` cannot resolve libpython symbols and numpy
-    reports the misleading "do not import numpy from its source directory";
-    pandas then fails behind it. Widening the flag before the first heavy
+    executable. The service preloads libpython globally; this flag keeps later
+    extension-module loads global too, so numpy's `_multiarray_umath` can
+    resolve libpython symbols instead of reporting the misleading
+    "do not import numpy from its source directory". Pandas then fails behind
+    it. Widening the flag before the first heavy
     import is what makes the shared askfelix environment usable from Mojo.
     """
     import os
@@ -94,7 +95,8 @@ def boot() -> str:
 
     showcase.warm()
 
-    # The dataset examples read Parquet and draw nineteen charts, which is a
+    # The dataset examples read Parquet and draw the lead chart for every
+    # sample, which is a
     # second and a half a worker - too long to put in front of the first
     # request to /healthz, and unnecessary because every page renders lazily
     # anyway. The thread only front-runs the first visitor.
@@ -131,7 +133,42 @@ def dispatch(
                 "detail": traceback.format_exc(limit=3).splitlines()[-1],
             }
         )
-        return ("500", "application/json; charset=utf-8", "", payload)
+        extra = ""
+        if path in {
+            "/v1/collect",
+            "/v1/batch",
+            "/v1/track",
+            "/v1/page",
+            "/v1/screen",
+            "/v1/identify",
+            "/v1/group",
+            "/v1/alias",
+            "/mp/collect",
+            "/track",
+            "/import",
+            "/engage",
+            "/groups",
+            "/2/httpapi",
+            "/batch",
+            "/identify",
+        }:
+            # Collection is intentionally cross-origin. If its handler fails,
+            # omitting CORS here makes the browser hide the useful HTTP 500
+            # behind a misleading "blocked by CORS" message.
+            try:
+                request_headers = json.loads(headers) if headers else {}
+            except (TypeError, ValueError):
+                request_headers = {}
+            origin = str(request_headers.get("origin") or "*")
+            extra = json.dumps(
+                {
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Headers": "authorization, content-type",
+                    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                    "Vary": "Origin",
+                }
+            )
+        return ("500", "application/json; charset=utf-8", extra, payload)
 
 
 def stream_start(path: str, query: str, body: str, headers: str) -> str:

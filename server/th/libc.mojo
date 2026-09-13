@@ -33,7 +33,6 @@ comptime EINPROGRESS: Int32 = 115
 
 comptime SIGPIPE: Int32 = 13
 comptime SIG_IGN: Int = 1
-
 # sizeof(struct epoll_event) on x86-64 with __attribute__((packed)): 12 bytes.
 comptime EPOLL_EVENT_SIZE: Int = 12
 # sizeof(struct sockaddr_in)

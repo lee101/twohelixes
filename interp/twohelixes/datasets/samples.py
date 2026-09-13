@@ -13,6 +13,9 @@ Two kinds, deliberately:
   generated deterministically from a fixed seed, because the shapes that
   matter for this product (a time series with seasonality, a long-tailed
   category, a funnel, a cohort) are exactly what the reference sets lack.
+* **Curated shared data** (shipping, e-commerce, energy and air quality) -
+  checked-in fixtures shared with askfelix, so the two public catalogues can
+  demonstrate the same interesting questions and rows.
 
 Everything is materialised once to Parquet and registered as DuckDB views, so
 the SQL editor and the chart pipeline both see them through the same
@@ -294,6 +297,29 @@ def _energy() -> Any:
     return pd.DataFrame(rows)
 
 
+def _curated_csv(filename: str) -> Any:
+    """Load a checked-in fixture shared with the askfelix sample catalogue."""
+    import pandas as pd
+
+    return pd.read_csv(Path(__file__).with_name("fixtures") / filename)
+
+
+def _shipping_crisis() -> Any:
+    return _curated_csv("hormuz-shipping-crisis.csv")
+
+
+def _ecommerce_funnel() -> Any:
+    return _curated_csv("ecommerce-funnel.csv")
+
+
+def _energy_transition() -> Any:
+    return _curated_csv("energy-transition.csv")
+
+
+def _city_air_quality() -> Any:
+    return _curated_csv("city-air-quality.csv")
+
+
 # --------------------------------------------------------------------------
 # Catalogue
 # --------------------------------------------------------------------------
@@ -405,6 +431,67 @@ SAMPLES: list[Sample] = [
             "compare mean radius by diagnosis",
         ],
     ),
+    Sample(
+        key="shipping_crisis",
+        name="Hormuz shipping crisis",
+        description=(
+            "Daily transits, oil and LNG flows, insurance and carrier status "
+            "through a strait closure, with the key events annotated."
+        ),
+        build=_shipping_crisis,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "line chart of daily ship transits with the closure marked",
+            "scatter Brent crude vs transit share of pre-war average",
+            "area chart of cumulative vessels attacked over the timeline",
+            "which carriers kept operating during the crisis?",
+        ],
+    ),
+    Sample(
+        key="ecommerce_funnel",
+        name="E-commerce funnel",
+        description=(
+            "Visitors to purchases by channel and device, with signup rates, "
+            "trial conversion and order values."
+        ),
+        build=_ecommerce_funnel,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "funnel chart of visitors signups trials and purchases",
+            "sankey from channel to device to purchases weighted by revenue",
+            "boxplot of average order value by device",
+        ],
+    ),
+    Sample(
+        key="energy_transition",
+        name="Energy transition",
+        description=(
+            "Renewable share, generation mix, storage and grid emissions by "
+            "region and year."
+        ),
+        build=_energy_transition,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "line chart of renewable share by year and region",
+            "stacked area of solar wind and hydro generation over time",
+            "scatter renewable share vs grid emissions coloured by region",
+        ],
+    ),
+    Sample(
+        key="city_air_quality",
+        name="City air quality",
+        description=(
+            "Monthly PM2.5, NO2 and ozone for world cities with temperature and "
+            "respiratory visits."
+        ),
+        build=_city_air_quality,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "which cities have the worst PM2.5?",
+            "does air pollution track respiratory visits?",
+            "seasonality of ozone by climate zone",
+        ],
+    ),
 ]
 
 BY_KEY = {s.key: s for s in SAMPLES}
@@ -427,10 +514,24 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
     for sample in SAMPLES:
         target = path_for(sample.key)
         try:
+            shared_fixture = sample.source == "Curated (shared with askfelix)"
             if force or not target.exists():
                 frame = sample.build()
                 frame.to_parquet(target, index=False)
                 log.info("built sample %s: %d rows", sample.key, len(frame))
+            elif shared_fixture:
+                # Curated fixtures are checked in rather than generated. Read
+                # the existing cache once and refresh it if a deployment has
+                # replaced the shared CSV since the last materialization.
+                import pandas as pd
+
+                frame = sample.build()
+                cached = pd.read_parquet(target)
+                if not cached.equals(frame):
+                    frame.to_parquet(target, index=False)
+                    log.info("refreshed shared sample %s: %d rows", sample.key, len(frame))
+                else:
+                    frame = cached
             else:
                 import pandas as pd
 

@@ -48,6 +48,16 @@ build_env() {
   say "Building $path (python $version)"
   uv venv --python "$version" "$path"
   uv pip install --python "$path/bin/python" -r requirements.txt
+  if [ "$version" = "3.12" ]; then
+    # std.python resolves CPython symbols from the process. The AOT binary is
+    # not linked to libpython, so keep a stable repo-local copy for systemd's
+    # LD_PRELOAD instead of depending on pyenv/uv's versioned install path.
+    local libpython
+    libpython="$("$path/bin/python" -c 'import os,sysconfig; print(os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY")))')"
+    [ -f "$libpython" ] || die "runtime libpython not found at $libpython"
+    mkdir -p "$path/lib"
+    cp -L "$libpython" "$path/lib/libpython3.12.so.1.0"
+  fi
   # The test environment gets pytest and a browser driver; the runtime one
   # must not - a server that can launch chromium is a server that will.
   [ "$dev" = 1 ] && uv pip install --python "$path/bin/python" -r requirements-dev.txt
@@ -133,6 +143,7 @@ fetch_model
 say "Done"
 cat <<EOF
     server   TWOHELIXES_SITE_PACKAGES=$ROOT/.venv/lib/python3.12/site-packages
+    preload  LD_PRELOAD=$ROOT/.venv/lib/libpython3.12.so.1.0
     tests    PYTHONPATH=interp:$ROOT/.venv-13/lib/python3.13/site-packages
     model    $MODEL_DIR
 EOF

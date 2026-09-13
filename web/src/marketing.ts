@@ -9,8 +9,11 @@
  * are still ordinary links to /app and the hosted checkout still works.
  */
 
+import { identify, track } from "./analytics";
+
 interface Me {
   signed_in: boolean;
+  user_id?: string | null;
   email: string;
   paid: boolean;
   api_credits: number;
@@ -101,6 +104,7 @@ function closeAll(): void {
 
 /** Resolves when the user is signed in, or rejects if they dismiss it. */
 function requireSignIn(reason = ""): Promise<Me> {
+  track("sign_in_started", { surface: "marketing", reason: reason ? "gated_action" : "cta" });
   return new Promise((resolve, reject) => {
     const note = $("#signin-reason");
     if (note) note.textContent = reason;
@@ -133,6 +137,8 @@ function wireSignIn(): void {
       const user = await api<Me>("/v1/auth/signin", { email: input.value.trim() });
       cachedMe = user;
       close("signin-overlay");
+      identify(user.user_id);
+      track("sign_in_completed", { surface: "marketing" });
       refreshHeader(user);
       pendingAuth?.resolve(user);
       pendingAuth = null;
@@ -201,6 +207,12 @@ async function startCheckout(opts: {
     // the buyer to a sign-in page and losing the purchase.
     await requireSignIn("Sign in to continue — it takes a moment.");
   }
+
+  track("checkout_started", {
+    surface: "marketing",
+    pack: opts.pack ?? "",
+    plan: opts.plan ?? "",
+  });
 
   const key = document.body.dataset.stripeKey || "";
   const mount = $("#checkout-mount");
@@ -369,7 +381,10 @@ function wire(): void {
   });
 
   // Reflect an existing session without blocking first paint.
-  void me().then(refreshHeader);
+  void me().then((user) => {
+    identify(user.user_id);
+    refreshHeader(user);
+  });
 }
 
 if (document.readyState === "loading") {

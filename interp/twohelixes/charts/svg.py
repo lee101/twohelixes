@@ -22,7 +22,7 @@ from twohelixes.charts import palette
 
 log = logging.getLogger("twohelixes.charts.svg")
 
-SUPPORTED = frozenset({"bar", "hbar", "line", "area", "scatter", "pie"})
+SUPPORTED = frozenset({"bar", "hbar", "line", "area", "scatter", "pie", "funnel"})
 
 FONT = "Inter, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
 
@@ -164,6 +164,8 @@ def render(
 
     if kind == "pie":
         parts.extend(_pie(traces[0], box, face, mode))
+    elif kind == "funnel":
+        parts.extend(_funnel(traces[0], box, face, mode))
     else:
         parts.extend(_cartesian(traces, kind, box, face, layout, mode))
 
@@ -598,6 +600,44 @@ def _pie(
             f"{html.escape(label)} {value / total * 100:.0f}%</text>"
         )
         angle = end
+    return parts
+
+
+def _funnel(
+    trace: dict[str, Any], box: Box, face: palette.Surface, mode: str
+) -> list[str]:
+    """Draw an ordered funnel without sending the public page to Kaleido."""
+    labels = [str(v) for v in (trace.get("y") or [])]
+    values = _numbers(trace.get("x"))
+    pairs = [(label, value) for label, value in zip(labels, values) if math.isfinite(value)]
+    if not pairs:
+        return [_empty_text(box, face, "No values")]
+
+    maximum = max((value for _label, value in pairs), default=0.0)
+    if maximum <= 0:
+        return [_empty_text(box, face, "No values")]
+
+    left = box.left + box.plot_width * 0.08
+    right = box.left + box.plot_width * 0.92
+    centre = (left + right) / 2
+    slot = box.plot_height / max(1, len(pairs))
+    bar_height = min(42.0, slot * 0.72)
+    parts: list[str] = []
+    for index, (label, value) in enumerate(pairs):
+        width = max(26.0, (right - left) * value / maximum)
+        y = box.top + slot * index + (slot - bar_height) / 2
+        x = centre - width / 2
+        colour = palette.series_color(index, mode)
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{width:.1f}" '
+            f'height="{bar_height:.1f}" rx="5" fill="{colour}" '
+            f'stroke="{face.background}" stroke-width="2"/>'
+        )
+        parts.append(
+            f'<text x="{centre:.1f}" y="{y + bar_height / 2 + 4:.1f}" '
+            f'font-size="11" font-weight="600" fill="{face.background}" '
+            f'text-anchor="middle">{html.escape(label)} {_format_tick(value)}</text>'
+        )
     return parts
 
 

@@ -6,6 +6,7 @@
  */
 
 import { ApiError, api, stream, type ChartConfig, type PipelineResult, type PlotlyFigure, type User } from "./api";
+import { identify, track } from "./analytics";
 import { ChartView, button, el, renderFigure } from "./chart";
 import { logo, spinner } from "./helix";
 import { Builder } from "./builder";
@@ -75,6 +76,7 @@ boot().catch((error) => showFatal(error));
 async function boot(): Promise<void> {
   try {
     state.user = await api.me();
+    identify(state.user.user_id);
   } catch {
     state.user = null;
   }
@@ -140,6 +142,7 @@ function header(): HTMLElement {
     right.append(
       themeToggle(),
       button("Sign in", () => {
+        track("sign_in_started", { surface: "app_header" });
         state.showSignIn = true;
         render();
         document.querySelector<HTMLInputElement>(".signin-input")?.focus();
@@ -403,6 +406,8 @@ function signInPanel(prompt = ""): HTMLElement {
     try {
       state.user = await api.signIn(input.value.trim());
       render();
+      identify(state.user.user_id);
+      track("sign_in_completed", { surface: "app" });
       void loadSources();
     } catch (exc) {
       error.hidden = false;
@@ -547,18 +552,28 @@ function ask(question: string, edit = ""): void {
   if (state.activeSource) body.source_id = state.activeSource;
   else if (state.activeSample) body.sample = state.activeSample;
 
+  track("query_started", {
+    surface: "app",
+    mode: edit ? "edit" : "new",
+    sample: state.activeSample ?? "",
+    source: state.activeSource ?? "",
+  });
+
   state.cancel = stream("/v1/query/stream", body, (event, data) => {
     trace.handle(event, data);
 
     if (event === "result") {
       state.lastResult = data as PipelineResult;
+      track("query_completed", { surface: "app", chart: Boolean(state.lastResult.chart_id) });
       void chart.show(state.lastResult).then(revealChart);
     } else if (event === "user") {
       state.user = data as User;
+      identify(state.user.user_id);
       root.replaceChild(header(), root.firstChild!);
     } else if (event === "done") {
       state.cancel = null;
     } else if (event === "error") {
+      track("query_failed", { surface: "app" });
       showError(data);
       state.cancel = null;
     }
@@ -655,6 +670,8 @@ function showFatal(error: unknown): void {
 
 async function signOut(): Promise<void> {
   await api.signOut().catch(() => undefined);
+  track("sign_out", { surface: "app" });
+  identify(null);
   state.user = null;
   state.lastResult = null;
   state.sources = [];
@@ -720,12 +737,16 @@ function askWith(question: string, extra: Record<string, unknown>): void {
     ...extra,
   };
 
+  track("query_started", { surface: "app_test_hook", mode: "new" });
+
   state.cancel = stream("/v1/query/stream", body, (event, data) => {
     trace.handle(event, data);
     if (event === "result") {
       state.lastResult = data as PipelineResult;
+      track("query_completed", { surface: "app_test_hook", chart: Boolean(state.lastResult.chart_id) });
       void chart.show(state.lastResult);
     } else if (event === "done" || event === "error") {
+      if (event === "error") track("query_failed", { surface: "app_test_hook" });
       state.cancel = null;
     }
   });

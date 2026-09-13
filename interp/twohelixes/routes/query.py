@@ -55,6 +55,49 @@ def _load_frames(identity: Any, ctx: router.Context) -> dict[str, Any]:
         frames["inline"] = pd.DataFrame(inline)
         return frames
 
+    analytics_site_id = str(ctx.field("analytics_site_id") or "").strip()
+    if analytics_site_id:
+        import pandas as pd
+
+        from twohelixes.routes import teams
+
+        if not identity.user_id or not teams.can_read(
+            identity.user_id, "analytics_site", analytics_site_id
+        ):
+            raise PermissionError("analytics site is not available to this account")
+        try:
+            days = max(1, min(int(ctx.field("days") or 30), 365))
+            limit = max(100, min(int(ctx.field("limit") or 50_000), 100_000))
+        except (TypeError, ValueError):
+            days, limit = 30, 50_000
+        rows = store.rows_to_dicts(
+            store.query(
+                "SELECT e.ts, e.event_name, e.client_id, e.session_id, e.user_id,"
+                " COALESCE(e.user_id, i.user_id, e.client_id) AS person_id,"
+                " e.page_path, e.referrer_host, e.utm_source, e.utm_medium,"
+                " e.utm_campaign, e.device, e.browser, e.os, e.country,"
+                " e.engagement_ms, e.sample_rate, e.sample_weight, e.source,"
+                " e.external_id, e.props FROM analytics_events e"
+                " LEFT JOIN analytics_identities i"
+                " ON i.site_id = e.site_id AND i.client_id = e.client_id"
+                " WHERE e.site_id = ? AND e.ts >= ?"
+                " ORDER BY e.ts DESC LIMIT ?",
+                (analytics_site_id, time.time() - days * 86400, limit),
+            )
+        )
+        rows.reverse()
+        for row in rows:
+            row["ts"] = pd.to_datetime(float(row["ts"]), unit="s", utc=True)
+            props = store.load_json(row.pop("props", None), {})
+            if isinstance(props, dict):
+                for key, value in list(props.items())[:50]:
+                    clean = "".join(c if c.isalnum() or c == "_" else "_" for c in str(key))
+                    row[f"prop_{clean[:64]}"] = value
+        if not rows:
+            raise ValueError("this analytics site has no events in the requested window")
+        frames["analytics_events"] = pd.DataFrame(rows)
+        return frames
+
     source_id = ctx.field("source_id")
     sql = ctx.field("sql")
     if source_id and sql:

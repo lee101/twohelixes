@@ -597,6 +597,106 @@ EXAMPLES: list[Example] = [
         found="diagnosis and mean_radius.",
         reason="One measure across two groups: bars.",
     ),
+    # -- shared curated data ----------------------------------------------
+    Example(
+        dataset="shipping_crisis",
+        slug="transits-through-the-closure",
+        question="line chart of daily ship transits with the closure marked",
+        headline="Daily transits through the strait, pre-war to crisis",
+        finding=(
+            "Traffic falls from a stable pre-war baseline to a small fraction "
+            "of normal after the closure, with only a cautious recovery later."
+        ),
+        transform=('df["day"] = pd.to_datetime(df["date"]); '
+                   'result = df[["day", "daily_ship_transits", "period_type"]]'),
+        config={
+            "chart_type": "line",
+            "x": "day",
+            "y": "daily_ship_transits",
+            "color": "period_type",
+            "title": "Daily ship transits through Hormuz",
+            "x_title": "Date",
+            "y_title": "Ship transits per day",
+        },
+        found="date, daily_ship_transits and period_type mark the baseline and crisis.",
+        reason=(
+            "A time series makes the discontinuity legible; the period split keeps "
+            "the closure context visible without inventing a second scale."
+        ),
+    ),
+    Example(
+        dataset="ecommerce_funnel",
+        slug="funnel-by-stage",
+        question="funnel chart of visitors signups trials and purchases",
+        headline="The acquisition funnel, all channels",
+        finding=(
+            "Each stage is summed across the cohorts, so the width of the funnel "
+            "shows where potential customers leave the journey."
+        ),
+        transform=('result = pd.DataFrame({"stage": ["Visitors", "Signups", '
+                   '"Trials", "Purchases"], "count": [df["visitors"].sum(), '
+                   'df["signups"].sum(), df["trials_started"].sum(), '
+                   'df["purchases"].sum()]})'),
+        config={
+            "chart_type": "funnel",
+            "x": "stage",
+            "y": "count",
+            "stage_order": ["Visitors", "Signups", "Trials", "Purchases"],
+            "title": "Visitors to purchases",
+            "x_title": "Stage",
+            "y_title": "Accounts",
+        },
+        found="the four ordered stage columns; channel and device are intentionally pooled.",
+        reason=(
+            "The question names an ordered journey, so a funnel preserves stage "
+            "order instead of ranking the stages by size."
+        ),
+    ),
+    Example(
+        dataset="energy_transition",
+        slug="renewable-share-by-region-over-time",
+        question="line chart of renewable share by year and region",
+        headline="Renewable share of electricity by region",
+        finding=(
+            "Every region moves along the same year axis, making the different "
+            "starting points and rates of change easy to compare."
+        ),
+        transform=('df["year_date"] = pd.to_datetime(df["year"].astype(str) + "-01-01"); '
+                   'result = df[["year_date", "region", "renewable_share_pct"]]'),
+        config={
+            "chart_type": "line",
+            "x": "year_date",
+            "y": "renewable_share_pct",
+            "color": "region",
+            "title": "Renewable share by region",
+            "x_title": "Year",
+            "y_title": "Renewable share (%)",
+        },
+        found="year, region and renewable_share_pct; the generation components answer a different cut.",
+        reason="A percentage over time with one line per region is a shared-axis line chart.",
+    ),
+    Example(
+        dataset="city_air_quality",
+        slug="worst-cities-by-pm25",
+        question="which cities have the worst PM2.5?",
+        headline="Cities ranked by average PM2.5",
+        finding=(
+            "Monthly observations are averaged by city and sorted from the most "
+            "polluted, so the ranking is not dominated by a single month."
+        ),
+        transform=('result = (df.groupby("city", as_index=False)["pm25_ug_m3"].mean() '
+                   '.sort_values("pm25_ug_m3", ascending=False))'),
+        config={
+            "chart_type": "hbar",
+            "x": "city",
+            "y": "pm25_ug_m3",
+            "title": "Average PM2.5 by city",
+            "x_title": "City",
+            "y_title": "PM2.5 (µg/m³)",
+        },
+        found="city and pm25_ug_m3; the ranking uses all twelve monthly observations.",
+        reason="City names are labels and PM2.5 is one measure, so sorted horizontal bars read best.",
+    ),
 ]
 
 BY_DATASET: dict[str, list[Example]] = {}
@@ -753,7 +853,7 @@ def lead(dataset: str) -> Example | None:
 def warm() -> None:
     """Pre-render the lead example of every dataset, both themes.
 
-    Only the leads: the index page shows those, and rendering all nineteen in
+    Only the leads: the index page shows those, and rendering every example in
     both themes at boot would delay the first request for charts most visitors
     never scroll to.
     """

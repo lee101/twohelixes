@@ -23,6 +23,7 @@ NAV = (
     ("/datasets", "Datasets"),
     ("/pricing", "Pricing"),
     ("/docs", "Docs"),
+    ("/blog", "Blog"),
 )
 
 
@@ -356,6 +357,17 @@ details.trace .body{{padding:0 var(--s4) var(--s4);display:grid;gap:.5rem}}
 
 .ds-grid{{display:grid;gap:var(--s5);grid-template-columns:1fr;
   margin-top:var(--s5)}}
+.dataset-search{{display:grid;gap:.45rem;max-width:42rem}}
+.dataset-search label{{font-size:.78rem;font-weight:650;color:var(--text-muted);
+  text-transform:uppercase;letter-spacing:.05em}}
+.dataset-search > div{{display:flex;gap:.55rem;align-items:center}}
+.dataset-search input{{min-width:0;flex:1;padding:.62rem .75rem;
+  border:1px solid var(--border-strong);border-radius:var(--r-sm);
+  background:var(--panel);color:var(--text-primary);font:inherit}}
+.dataset-search input::placeholder{{color:var(--text-muted)}}
+.dataset-search-result{{margin-top:.7rem;color:var(--text-muted);font-size:.84rem}}
+.dataset-empty{{margin-top:var(--s5);padding:var(--s5);border:1px dashed
+  var(--border-strong);border-radius:var(--r-md);color:var(--text-secondary)}}
 .ds-card{{background:var(--panel);border:1px solid var(--border);
   border-radius:var(--r-lg);padding:var(--s4);display:flex;
   flex-direction:column;gap:.6rem}}
@@ -751,7 +763,7 @@ def _page(
   <span>twoHelixes — charts of your data, from a sentence</span>
   <nav aria-label="Footer">
     <a href="/features">Features</a><a href="/datasets">Datasets</a>
-    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/app">App</a>
+    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/blog">Blog</a><a href="/app">App</a>
   </nav>
 </div></footer>
 <script type="module" src="/static/marketing.js"></script>
@@ -908,7 +920,7 @@ def home(ctx: router.Context) -> router.Result:
 
 <section class="band"><div class="shell">
   <p class="kicker">Worked examples</p>
-  <h2>Nine datasets, already loaded, already answered</h2>
+  <h2>{len(sample_data.SAMPLES)} datasets, already loaded, already answered</h2>
   <p class="lead-in">Every account starts with these. Each one has a page with
   its schema, its rows, and the charts the pipeline drew from them &mdash; with
   the reasoning behind every choice one click away. No account needed to read
@@ -1372,6 +1384,25 @@ ENDPOINTS = (
         '  -d \'{"q":"which regions are shrinking?"}\'',
     ),
     (
+        "POST", "/v1/query", "Ask about product analytics",
+        "Pass analytics_site_id instead of a warehouse source. The site is "
+        "owner/team checked, event properties become columns, and the result "
+        "is the same editable chart response as every other query.",
+        'curl -X POST https://twohelixes.com/v1/query \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY" \\\n'
+        '  -d \'{"q":"which pages lead to sign-in?",'
+        '"analytics_site_id":"netwrck.com","days":30}\'',
+    ),
+    (
+        "GET", "/v1/analytics/funnel", "Measure an ordered event flow",
+        "Counts sessions and users that reach two to twelve event steps in "
+        "event-time order. Sampled streams include observed and weighted "
+        "session counts rather than hiding the distinction.",
+        'curl "https://twohelixes.com/v1/analytics/funnel?'
+        'site_id=netwrck.com&days=30&steps=page_view,sign_in_started,sign_in_completed" \\\n'
+        '  -H "Authorization: Bearer $TWOHELIXES_KEY"',
+    ),
+    (
         "POST", "/v1/sql/generate", "Generate SQL",
         "Schema-aware SQL for a question. The statement is checked read-only "
         "before it is returned, and again before any driver executes it.",
@@ -1538,6 +1569,153 @@ def analytics_parity(ctx: router.Context) -> router.Result:
             "An honest GA4 to twoHelixes analytics capability map.",
             body,
             "/docs/analytics-parity",
+        )
+    )
+
+
+@router.get("/blog")
+def blog_index(ctx: router.Context) -> router.Result:
+    body = """
+<main id="content">
+<section class="page-head"><div class="shell">
+  <p class="kicker">Field notes</p>
+  <h1>Building the data product in public</h1>
+  <p class="sub">Implementation notes from the chart pipeline, analytics
+  collector, and the systems that keep both honest under real traffic.</p>
+</div></section>
+<section><div class="shell"><div class="grid">
+  <a class="card" href="/blog/open-product-analytics">
+    <p class="kicker">Analytics · 30 August 2026</p>
+    <h2 style="font-size:1.35rem">Product analytics should end in a question, not a report queue</h2>
+    <p>A first-party collector, GA4, Segment, Mixpanel, and Amplitude wire compatibility, adaptive
+    weighted sampling, and an open Go CLI that renders the answer in a terminal.</p>
+  </a>
+</div></div></section>
+</main>"""
+    return router.html(
+        _page(
+            "twoHelixes field notes",
+            "Engineering notes from the twoHelixes data and chart platform.",
+            body,
+            "/blog",
+        )
+    )
+
+
+@router.get("/blog/open-product-analytics")
+def open_product_analytics_blog(ctx: router.Context) -> router.Result:
+    path = "/blog/open-product-analytics"
+    article_schema = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@type": "BlogPosting",
+            "headline": "Product analytics should end in a question, not a report queue",
+            "datePublished": "2026-08-30",
+            "dateModified": "2026-08-30",
+            "author": {"@type": "Person", "name": "Lee Penkman"},
+            "publisher": {"@type": "Organization", "name": "twoHelixes"},
+            "mainEntityOfPage": config.site_url().rstrip("/") + path,
+        },
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    body = """
+<main id="content">
+<article>
+<section class="page-head"><div class="shell" style="max-width:52rem">
+  <p class="kicker">Analytics · 30 August 2026</p>
+  <h1>Product analytics should end in a question, not a report queue</h1>
+  <p class="sub">We connected Netwrck and eBank to the same first-party data
+  platform that draws their charts, then made the useful surface portable as
+  an open Go CLI.</p>
+</div></section>
+
+<section><div class="shell" style="max-width:52rem">
+  <p class="lead-in">The usual analytics stack collects an event, moves it
+  through two vendors, and leaves a person to translate a product question
+  into a report. twoHelixes now keeps those steps in one loop: collect the
+  event, ask the question, produce a chart, and keep the assumptions visible.</p>
+  <h2>One event model, five wire formats</h2>
+  <p class="sub">The native browser tracker, GA4 Measurement Protocol, Segment
+  Tracking API, Mixpanel event/profile APIs, and Amplitude HTTP V2 all land in
+  the same event model. Existing applications can keep their <code>gtag</code>,
+  <code>analytics.track</code>, or legacy
+  <code>trackEvent</code> calls while the storage and reporting stay first
+  party. Unknown write keys are discarded, and every reporting read checks the
+  site owner or team membership.</p>
+  <h2 style="margin-top:2rem">Sampling begins only when volume earns it</h2>
+  <p class="sub">Ordinary traffic is unsampled. When a client or SDK starts
+  emitting faster than its configured ceiling, low-value streams are sampled
+  with an inverse weight. Purchase, identity, sign-up, refund, login, and error
+  events remain intact. Decisions stay stable across a short session slice so
+  the retained data still describes a path rather than unrelated points.</p>
+  <p class="sub">That distinction matters: dropping every tenth event saves
+  writes but corrupts funnels. Keeping a weighted slice of a burst lets event
+  and page-view totals remain estimable, while the API reports both observed
+  and estimated session counts instead of pretending they are the same.</p>
+  <p class="sub">Upstream and server probabilities compose into one stored
+  weight. The collector never draws a second time against a probability the
+  browser already applied. That small detail is the difference between a
+  weighted estimate and silently undercounting a 10% sample by another 90%.</p>
+  <h2 style="margin-top:2rem">The chart agent can query the event stream</h2>
+  <p class="sub">An owned analytics site is now a data source for the normal
+  chart endpoint. A question such as “which pages lead to completed sign-ins?”
+  loads the bounded event window, exposes event properties as columns, and
+  returns the same editable Plotly figure as a warehouse or uploaded file. No
+  export-and-reimport ceremony is required.</p>
+  <p class="sub">A schema catalog discovers arbitrary custom event names,
+  property types, protocol sources, and observed versus estimated counts.
+  Identify mappings resolve anonymous history to a person, while typed group
+  profiles keep accounts and organisations separate from user traits.</p>
+  <p class="sub">Path discovery groups the journeys sessions actually took,
+  while revenue reporting stays separated by currency. There is no implicit
+  exchange rate hiding inside a total.</p>
+  <h2 style="margin-top:2rem">A terminal is a real rendering target</h2>
+  <p class="sub"><code>twohelixes-cli</code> is a standalone, standard-library
+  Go module. It triggers graph generation, prints summaries and recent events,
+  discovers custom-event schemas, builds ordered funnels, asks questions of analytics data, exports a
+  Segment-shaped batch, and renders Plotly bar, line, scatter, and pie traces
+  as Unicode terminal charts.</p>
+  <pre style="overflow:auto;background:var(--panel-2);border:1px solid var(--border);border-radius:var(--r-md);padding:1rem;margin-top:1rem"><code>twohelixes-cli analytics funnel --site netwrck.com \\
+  --steps page_view,sign_in_started,sign_in_completed
+
+twohelixes-cli analytics ask --site netwrck.com \\
+  "where do people leave the sign-in flow?"
+
+twohelixes-cli track --protocol amplitude --site thw_... \\
+  workspace_exported --props @event.json
+
+twohelixes-cli analytics paths --site netwrck.com --days 30
+twohelixes-cli analytics revenue --site netwrck.com --days 30</code></pre>
+  <p class="sub" style="margin-top:1rem">It has no third-party Go dependencies,
+  so it can move into its own public repository without dragging the private
+  service with it. The API key authorises reads; a separate site write key is
+  enough to send events.</p>
+  <h2 style="margin-top:2rem">What production taught us first</h2>
+  <p class="sub">The public Netwrck, eBank, and twoHelixes health paths were
+  all healthy during this pass. The more important finding was release drift:
+  production had already moved to password authentication while the inspected
+  checkout still described email-only sign-in. We did not bypass that boundary
+  to inspect a named account. The CLI therefore uses the stable API-key path,
+  and deployment verification now has to prove the auth and collector
+  contracts it is actually shipping.</p>
+</div></section>
+
+<section class="band"><div class="shell" style="max-width:52rem">
+  <h2>Try the data loop</h2>
+  <p class="lead-in">Connect a source or register an analytics site, ask one
+  concrete question, and keep the chart or take it back to the terminal.</p>
+  <a class="btn btn-primary" href="/app">Open twoHelixes</a>
+  <a class="btn btn-ghost" href="/docs/analytics-parity">Read the GA4 parity map</a>
+</div></section>
+</article>
+</main>"""
+    return router.html(
+        _page(
+            "Product analytics should end in a question — twoHelixes",
+            "First-party analytics with GA4, Segment, Mixpanel, and Amplitude compatibility, adaptive weighted sampling, agent queries, and an open Go CLI.",
+            body,
+            path,
+            f'<script type="application/ld+json">{article_schema}</script>',
         )
     )
 

@@ -56,10 +56,10 @@ allocating a replacement per tick - and `_unregister_stream` therefore
 *tombstones* an entry with -1 instead of removing it, because removing one
 would shift the entries the loop has not reached yet.
 
-**The AOT binary embeds CPython 3.12, but `mojo run` uses 3.13.** This is the
-single most confusing thing in the repo. `pixi run mojo build` produces a
-binary linked against Python 3.12, so it needs this repo's **`.venv`**
-(3.12) site-packages. Scripts run with `pixi run python` are 3.13 and need
+**The AOT binary uses CPython 3.12, but `mojo run` uses 3.13.** This is the
+single most confusing thing in the repo. The binary needs the runtime
+libpython preloaded (the setup script copies it into `.venv/lib`) and this
+repo's **`.venv`** (3.12) site-packages. Scripts run with `pixi run python` are 3.13 and need
 **`.venv-13`**. Point the wrong one at either and numpy fails with the
 misleading "you should not try to import numpy from its source directory" —
 the real error underneath is `No module named 'numpy.core._multiarray_umath'`,
@@ -548,7 +548,7 @@ server-rendered, and the same claim as the marketing charts: nothing on them
 is a mockup. `datasets/examples.py` holds one `Example` per question, and each
 one is executed - `figures.build` -> `defaults.apply` -> `defaults.audit` ->
 the native SVG exporter - at render time and cached per worker. A regression in
-the chart defaults changes nineteen public pages, and `tests/test_dataset_pages.py`
+the chart defaults changes the public dataset pages, and `tests/test_dataset_pages.py`
 asserts `audit()` comes back empty for every one of them in both themes.
 
 **The reasoning trace on those pages is derived, not written.** Row counts,

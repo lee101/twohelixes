@@ -17,9 +17,11 @@ comptime METHOD_PATCH: Int = 7
 comptime PARSE_INCOMPLETE: Int = 0
 comptime PARSE_OK: Int = 1
 comptime PARSE_ERROR: Int = 2
+comptime PARSE_TOO_LARGE: Int = 3
 
 comptime MAX_HEADERS: Int = 64
 comptime MAX_HEADER_BYTES: Int = 32 * 1024
+comptime MAX_CONTENT_LENGTH: Int = 64 * 1024 * 1024
 
 
 struct Slice(ImplicitlyCopyable, Movable):
@@ -94,7 +96,10 @@ struct Request(Movable):
     var target: Slice
     var path: Slice
     var query: Slice
-    var headers: List[HeaderRef]
+    # Header references have a small fixed upper bound. Keeping them inline
+    # avoids allocating and growing a heap-backed List on every request while
+    # retaining the same zero-copy slices into the connection buffer.
+    var headers: InlineArray[HeaderRef, MAX_HEADERS]
     var header_count: Int
     var body: Slice
     var content_length: Int
@@ -107,7 +112,7 @@ struct Request(Movable):
         self.target = Slice()
         self.path = Slice()
         self.query = Slice()
-        self.headers = List[HeaderRef]()
+        self.headers = InlineArray[HeaderRef, MAX_HEADERS](fill=HeaderRef())
         self.header_count = 0
         self.body = Slice()
         self.content_length = 0
@@ -120,7 +125,6 @@ struct Request(Movable):
         self.target = Slice()
         self.path = Slice()
         self.query = Slice()
-        self.headers.clear()
         self.header_count = 0
         self.body = Slice()
         self.content_length = 0
@@ -139,22 +143,22 @@ struct Request(Movable):
 
 
 def parse_method(buf: Span[UInt8, _], s: Slice) -> Int:
-    if s.length == 3:
-        if buf[s.start] == 71 and buf[s.start + 1] == 69:
-            return METHOD_GET
-        if buf[s.start] == 80 and buf[s.start + 1] == 85:
-            return METHOD_PUT
-    if s.length == 4:
-        if buf[s.start] == 80 and buf[s.start + 1] == 79:
-            return METHOD_POST
-        if buf[s.start] == 72:
-            return METHOD_HEAD
-    if s.length == 5 and buf[s.start] == 80:
-        return METHOD_PATCH
-    if s.length == 6 and buf[s.start] == 68:
+    # Exact comparisons matter here: treating every three-byte token starting
+    # with "GE" as GET makes a proxy and the origin disagree about framing.
+    if ascii_eq_ci(buf, s, "GET"):
+        return METHOD_GET
+    if ascii_eq_ci(buf, s, "POST"):
+        return METHOD_POST
+    if ascii_eq_ci(buf, s, "PUT"):
+        return METHOD_PUT
+    if ascii_eq_ci(buf, s, "DELETE"):
         return METHOD_DELETE
-    if s.length == 7 and buf[s.start] == 79:
+    if ascii_eq_ci(buf, s, "HEAD"):
+        return METHOD_HEAD
+    if ascii_eq_ci(buf, s, "OPTIONS"):
         return METHOD_OPTIONS
+    if ascii_eq_ci(buf, s, "PATCH"):
+        return METHOD_PATCH
     return METHOD_UNKNOWN
 
 
@@ -192,6 +196,8 @@ def parse_request(buf: Span[UInt8, _], avail: Int, mut req: Request) -> Int:
     if p >= head_end:
         return PARSE_ERROR
     req.method = parse_method(buf, Slice(m_start, p - m_start))
+    if req.method == METHOD_UNKNOWN:
+        return PARSE_ERROR
     p += 1
 
     var t_start = p
@@ -220,9 +226,11 @@ def parse_request(buf: Span[UInt8, _], avail: Int, mut req: Request) -> Int:
     var v_start = p + 1
     while p < head_end and buf[p] != 13:
         p += 1
-    var http_11 = False
-    if p - v_start >= 8:
-        http_11 = buf[v_start + 7] == 49  # "HTTP/1.1"
+    var version = Slice(v_start, p - v_start)
+    var http_11 = ascii_eq_ci(buf, version, "HTTP/1.1")
+    var http_10 = ascii_eq_ci(buf, version, "HTTP/1.0")
+    if not http_11 and not http_10:
+        return PARSE_ERROR
     req.keepalive = http_11
     p += 2  # skip CRLF
 
@@ -248,7 +256,7 @@ def parse_request(buf: Span[UInt8, _], avail: Int, mut req: Request) -> Int:
 
         if req.header_count >= MAX_HEADERS:
             return PARSE_ERROR
-        req.headers.append(HeaderRef(name, value))
+        req.headers[req.header_count] = HeaderRef(name, value)
         req.header_count += 1
 
     req.head_len = head_end
@@ -266,7 +274,23 @@ def parse_request(buf: Span[UInt8, _], avail: Int, mut req: Request) -> Int:
         req.expect_continue = True
 
     # Body.
-    var cl = req.header(buf, "content-length")
+    # Chunked bodies are not implemented. Rejecting them—and ambiguous
+    # duplicate lengths—keeps proxy and origin framing identical.
+    if req.has_header(buf, "transfer-encoding"):
+        return PARSE_ERROR
+
+    var cl = Slice()
+    for h in range(req.header_count):
+        if not ascii_eq_ci(buf, req.headers[h].name, "content-length"):
+            continue
+        if not cl.is_empty():
+            if req.headers[h].value.length != cl.length:
+                return PARSE_ERROR
+            for k in range(cl.length):
+                if buf[req.headers[h].value.start + k] != buf[cl.start + k]:
+                    return PARSE_ERROR
+        else:
+            cl = req.headers[h].value
     if cl.is_empty():
         req.content_length = 0
         req.body = Slice(head_end, 0)
@@ -277,7 +301,12 @@ def parse_request(buf: Span[UInt8, _], avail: Int, mut req: Request) -> Int:
         var c = buf[cl.start + k]
         if c < 48 or c > 57:
             return PARSE_ERROR
-        n = n * 10 + Int(c - 48)
+        var digit = Int(c - 48)
+        # Reject before multiplying so an attacker cannot wrap Int with an
+        # enormous Content-Length and make a partial body look complete.
+        if n > (MAX_CONTENT_LENGTH - digit) // 10:
+            return PARSE_TOO_LARGE
+        n = n * 10 + digit
     req.content_length = n
     if avail - head_end < n:
         return PARSE_INCOMPLETE
@@ -376,6 +405,29 @@ struct Response(Movable):
     def set_body_bytes(mut self, s: Span[UInt8, _]):
         self.body.clear()
         self.body.extend(s)
+
+    def set_body_latin1(mut self, s: StringSlice):
+        """Reverse Python's lossless Latin-1 carrier into original bytes."""
+        self.body.clear()
+        var b = s.as_bytes()
+        self.body.reserve(len(b))
+        var i = 0
+        while i < len(b):
+            var c = b[i]
+            if c < 128:
+                self.body.append(c)
+                i += 1
+            elif (c == 194 or c == 195) and i + 1 < len(b):
+                var tail = b[i + 1]
+                if tail >= 128 and tail <= 191:
+                    self.body.append(UInt8(128 + Int(c - 194) * 64 + Int(tail - 128)))
+                    i += 2
+                else:
+                    self.body.append(63)
+                    i += 1
+            else:
+                self.body.append(63)
+                i += 1
 
     def append_body(mut self, s: StringSlice):
         self.body.extend(s.as_bytes())
@@ -507,6 +559,10 @@ def append_int(mut out: List[UInt8], value: Int):
 
 def serialize(resp: Response, mut out: List[UInt8], head_only: Bool):
     """Write the full HTTP/1.1 response into `out`."""
+    # Usually this is a no-op because connection output buffers retain their
+    # capacity. On a new or unusually large response it prevents geometric
+    # growth and repeated copies while headers and the body are appended.
+    out.reserve(resp.headers.byte_length() + len(resp.body) + 128)
     append_str(out, "HTTP/1.1 ")
     append_int(out, resp.status)
     append_str(out, " ")
@@ -523,5 +579,6 @@ def serialize(resp: Response, mut out: List[UInt8], head_only: Bool):
         append_str(out, "Connection: close\r\n")
     append_str(out, "\r\n")
     if not head_only:
-        for i in range(len(resp.body)):
-            out.append(resp.body[i])
+        # One bounds check and memcpy instead of one append/capacity check for
+        # every byte of a chart, export, or analytics response.
+        out.extend(Span(resp.body))

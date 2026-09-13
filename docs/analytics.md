@@ -25,6 +25,8 @@ is synchronous.
 | `siteId`   | required                             | the registered site's write key    |
 | `endpoint` | `https://twohelixes.com/v1/collect`  | where to send them                 |
 | `autoPage` | `true`                               | fire `page_view` on load           |
+| `sampleAfterPerSecond` | `40`                     | begin adaptive client sampling above this event rate |
+| `minSampleRate` | `0.01`                          | lowest adaptive keep rate          |
 
 ## What is collected without any extra code
 
@@ -38,6 +40,8 @@ is synchronous.
 Each event carries the identity triple (`client_id`, `session_id`, `user_id`),
 the page (location, path and referrer), the campaign (`utm_*`), and coarse
 environment (device class, browser, OS, screen, viewport, language).
+The app calls `identify` with its opaque account ID after sign-in, so later
+events can be joined to the signed-in visitor without sending an email.
 
 ## API
 
@@ -49,6 +53,16 @@ th('page');
 th('identify', 'user_123', { email: 'a@b.c' });
 th('flush');
 ```
+
+The tracker also accepts the common GA4 command shape:
+
+```js
+gtag('event', 'signup_started', { plan: 'pro' });
+```
+
+The command is translated into the same first-party queue and remains
+non-blocking. Existing sites can keep calling their legacy
+`trackEvent(category, action, label, value)` adapter.
 
 Segment-shaped, for code already written against `analytics.js`:
 
@@ -85,13 +99,59 @@ An unknown site/write key is discarded with the same `204`. It is not
 quarantined: retaining unsolicited events would create an unbounded namespace
 and keep data nobody authorised twoHelixes to hold.
 
-`GET /v1/collect?tid=…&cid=…&en=page_view&dl=…` — GA4 Measurement-Protocol
-shaped, answers a 1×1 GIF. This is the no-JS pixel and the server-side path.
+`POST /mp/collect?measurement_id=thw_…&api_secret=…` accepts the GA4
+Measurement Protocol body (`client_id`, `user_id`, and `events[].name/params`).
+`GET /v1/collect?tid=…&cid=…&en=page_view&dl=…` accepts the GA query-string
+shape and answers a 1×1 GIF for no-JS and server-rendered pages.
 
 Segment-style bodies (`type: page|track|identify|group|alias`, `anonymousId`,
 `userId`, `properties`, `traits`) are accepted on the same endpoint and land in
 the same table; `identify` and `alias` also upsert `analytics_identities`, which
 is how an anonymous history gets stitched to a user.
+
+Existing Segment senders can use the standard HTTP paths `/v1/batch`,
+`/v1/track`, `/v1/page`, `/v1/screen`, `/v1/identify`, `/v1/group`, and
+`/v1/alias`. Put the twoHelixes write key in the Basic-auth username exactly as
+the Segment Tracking API does.
+
+Mixpanel senders can point event traffic at `POST /track` (or historical
+traffic at `/import`) and profile operations at `/engage`. JSON arrays and the
+classic base64 `data=` form are accepted; `distinct_id`, `$device_id`,
+`$user_id`, `$insert_id`, URL/referrer fields, and profile operations are
+normalised without retaining the project token in event properties. Typed
+group profiles use `POST /groups`.
+
+Amplitude HTTP V2 senders can use `POST /2/httpapi` or `/batch` with their
+normal `api_key` and `events` envelope. Device/user ids, event and user
+properties, groups, session/time fields, and `insert_id` are preserved. The
+response includes Amplitude's `code`, `events_ingested`, `payload_size_bytes`,
+and `server_upload_time` fields. The classic form-encoded Identify API is
+available at `POST /identify`.
+
+Segment `messageId`, Mixpanel `$insert_id`, Amplitude `insert_id`, and native
+`event_id` values become a source-scoped external id. Retries with the same id
+are idempotent. A batch accepts up to 2,000 events; larger payloads receive an
+explicit `413 too_many_events` response and should be chunked by the sender.
+
+## Adaptive sampling
+
+Sampling is off at ordinary product traffic. The browser tracker starts
+sampling non-critical events only when its observed call rate crosses
+`sampleAfterPerSecond`; the server has a second adaptive ceiling for SDKs and
+misbehaving clients. The server ceiling is configured with
+`TWOHELIXES_ANALYTICS_SAMPLE_AFTER_RPS` and divided across the configured
+worker count.
+
+Identity, group, purchase, sign-up, refund, login, and JavaScript-error events
+are never server-sampled. A `sample_rate` supplied by a browser describes a
+decision already made upstream and is never drawn a second time. It composes
+with the server rate into one effective probability and inverse weight.
+Accepted sampled events carry `sample_rate` and
+`sample_weight` (the inverse probability). Report event/page-view totals use
+the weight, recent-event and export responses expose the sampling metadata,
+and funnels return observed plus estimated session counts. Sampling decisions
+are stable for a session slice so a burst is retained as a path instead of a
+bag of unrelated event coin flips.
 
 ## Reporting API
 
@@ -102,8 +162,29 @@ ownership through the same team-sharing policy as charts and datasets.
 | ----------------------------------------- | ---------------------------------------------- |
 | `GET /v1/analytics/summary?site_id=&days=` | totals plus top pages, events, referrers, devices, browsers, countries, campaigns |
 | `GET /v1/analytics/timeseries?site_id=&days=` | hourly buckets (daily past 8 days) of events, page views, users |
+| `GET /v1/analytics/funnel?site_id=&days=&steps=` | ordered session/user progression through 2–12 event names |
 | `GET /v1/analytics/events?site_id=&limit=` | the raw recent event stream                    |
+| `GET /v1/analytics/schema?site_id=&days=&event=` | custom event/property catalog with types, sources, and observed/estimated counts |
+| `GET /v1/analytics/groups?site_id=&days=&type=` | typed group profiles and activity             |
+| `GET /v1/analytics/paths?site_id=&days=&mode=&start=&depth=` | discovered page/event journeys by session |
+| `GET /v1/analytics/revenue?site_id=&days=` | weighted net revenue kept separate by currency |
 | `GET /v1/analytics/export?site_id=&days=`  | Segment-shaped batch for a warehouse sync      |
+
+The normal chart agent can query the event stream without exporting it first:
+
+```json
+POST /v1/query
+{"q":"which pages lead to completed sign-ins?","analytics_site_id":"netwrck.com","days":30}
+```
+
+The site goes through the same owner/team access check as the reporting API.
+Up to 100,000 recent rows can be loaded; properties are exposed as `prop_*`
+columns and the chart response has the same shape as every other `/v1/query`.
+
+Funnel steps are evaluated in event-time order within each session. A session
+can advance through each named event once; repeated events are harmless, and a
+session that misses a step does not count toward later steps. The response
+includes reached sessions/users, overall rate, step-to-step rate, and drop-off.
 
 ## Privacy
 
@@ -129,3 +210,21 @@ and `pagehide` rather than `unload`, which iOS Safari never fires.
 Sessionisation happens server-side against the last stored event when the
 client does not supply a session id, so the pixel and server-side callers get
 sessions on the same 30-minute inactivity rule as the browser tracker.
+
+## CLI
+
+The standalone Go client lives in `cli/` and has no third-party dependencies:
+
+```sh
+twohelixes-cli analytics summary --site netwrck.com --days 30
+twohelixes-cli analytics funnel --site netwrck.com \
+  --steps page_view,sign_in_started,sign_in_completed
+twohelixes-cli analytics ask --site netwrck.com \
+  "where do people leave the sign-in flow?"
+twohelixes-cli analytics paths --site netwrck.com --days 30
+twohelixes-cli analytics revenue --site netwrck.com --days 30
+```
+
+It can also call `/v1/query` for any connected source and render the returned
+Plotly figure directly in the terminal. See `cli/README.md` for installation
+and the complete command surface.

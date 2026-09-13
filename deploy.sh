@@ -67,6 +67,11 @@ fi
 # question classifier uses and which is deliberately not in git.
 say "Checking environments"
 [ -x "$ROOT/.venv/bin/python" ] || die "no .venv - run ./scripts/setup-venvs.sh"
+if [ ! -f "$ROOT/.venv/lib/libpython3.12.so.1.0" ]; then
+  warn "runtime libpython preload missing - refreshing the runtime venv"
+  run "$ROOT/scripts/setup-venvs.sh" --runtime >/dev/null 2>&1 || \
+    die "could not prepare the runtime libpython"
+fi
 [ -x "$ROOT/.venv-13/bin/python" ] || die "no .venv-13 - run ./scripts/setup-venvs.sh"
 if [ ! -f "$ROOT/models/embed/modelint8_512dim.safetensors" ]; then
   warn "no embedding model - fetching it"
@@ -206,6 +211,23 @@ if [ "$DRY_RUN" = 0 ]; then
     printf '    %-10s %s\n' "$path" "$code"
     [ "$code" = 200 ] || fail=1
   done
+
+  # A fast-path health check cannot see a stale PostgreSQL connection. Exercise
+  # the real cross-origin collector so a deploy cannot report healthy while
+  # every analytics POST is returning a CORS-masked 500.
+  collect_headers=$(mktemp)
+  collect_code=$(curl -sS -o /dev/null -D "$collect_headers" -w '%{http_code}' \
+    -m 20 -X POST "${PUBLIC_URL}/v1/collect" \
+    -H 'Origin: https://netwrck.local:8443' \
+    -H 'Content-Type: text/plain;charset=UTF-8' \
+    --data '{"site_id":"netwrck.com","events":[]}' || echo 000)
+  collect_cors=$(awk 'BEGIN { IGNORECASE=1 } /^access-control-allow-origin:/ { gsub("\\r", "", $2); print $2; exit }' "$collect_headers")
+  rm -f "$collect_headers"
+  printf '    %-10s %s\n' "collect" "$collect_code"
+  if [ "$collect_code" != 204 ] || [ -z "$collect_cors" ]; then
+    warn "cross-origin analytics collection failed (HTTP $collect_code, CORS ${collect_cors:-missing})"
+    fail=1
+  fi
 
   # Whether the *server's* embedded interpreter found pybed, which is not the
   # same question as whether ./.venv/bin/python can import it: the binary adds

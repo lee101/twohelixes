@@ -35,18 +35,18 @@ struct Bridge(Movable):
     def dispatch(
         mut self,
         method: StringSlice,
-        path: StringSlice,
-        query: StringSlice,
-        body: StringSlice,
-        headers: StringSlice,
+        path: String,
+        query: String,
+        body: String,
+        headers: String,
     ) raises -> Tuple[Int, String, String, String]:
         """Run one request through the Python application layer."""
         var r = self.api.dispatch(
             String(method),
-            String(path),
-            String(query),
-            String(body),
-            String(headers),
+            path,
+            query,
+            body,
+            headers,
         )
         var status = Int(String(r[0]))
         var ctype = String(r[1])
@@ -56,14 +56,14 @@ struct Bridge(Movable):
 
     def stream_start(
         mut self,
-        path: StringSlice,
-        query: StringSlice,
-        body: StringSlice,
-        headers: StringSlice,
+        path: String,
+        query: String,
+        body: String,
+        headers: String,
     ) raises -> String:
         """Kick off a background job; returns its stream id."""
         var sid = self.api.stream_start(
-            String(path), String(query), String(body), String(headers)
+            path, query, body, headers
         )
         return String(sid)
 

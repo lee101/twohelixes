@@ -26,8 +26,23 @@
   var SESSION_GAP_MS = 30 * 60 * 1000;
   var FLUSH_DELAY_MS = 2000;
   var MAX_QUEUE = 50;
-
   var config = window[CONFIG_KEY] || {};
+  var configuredSampleRps = Number(config.sampleAfterPerSecond || 40);
+  var configuredMinRate = Number(config.minSampleRate || 0.01);
+  var SAMPLE_AFTER_RPS = isFinite(configuredSampleRps) ? Math.max(1, configuredSampleRps) : 40;
+  var MIN_SAMPLE_RATE = isFinite(configuredMinRate)
+    ? Math.max(0.01, Math.min(1, configuredMinRate)) : 0.01;
+  var sampleWindowStarted = Date.now();
+  var sampleWindowCount = 0;
+  var neverSample = {
+    alias: true, identify: true, js_error: true, login: true, purchase: true,
+    refund: true, session_start: true, sign_in_completed: true, sign_up: true,
+    signup_completed: true, begin_checkout: true,
+    subscription_dialog_opened: true, subscription_auth_required: true,
+    subscription_auth_selected: true, subscription_checkout_ready: true,
+    subscription_checkout_failed: true, subscription_checkout_completed: true,
+    subscription_dialog_closed: true
+  };
   var privacySignal =
     navigator.globalPrivacyControl === true ||
     navigator.doNotTrack === '1' ||
@@ -117,7 +132,37 @@
     }
   }
 
-  function baseEvent(name, props) {
+  function sampleRate(name) {
+    if (neverSample[name]) return 1;
+    var now = Date.now();
+    var elapsed = now - sampleWindowStarted;
+    if (elapsed >= 1000) {
+      sampleWindowStarted = now;
+      sampleWindowCount = 0;
+      elapsed = 0;
+    }
+    sampleWindowCount += 1;
+    var projectedRps = sampleWindowCount * 1000 / Math.max(250, elapsed || 1);
+    if (projectedRps <= SAMPLE_AFTER_RPS) return 1;
+    return Math.max(MIN_SAMPLE_RATE, SAMPLE_AFTER_RPS / projectedRps);
+  }
+
+  function sampleDraw() {
+    var value = sessionId() + '|' + Math.floor(Date.now() / 10000);
+    var hash = 2166136261;
+    for (var i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) / 4294967296;
+  }
+
+  function sampled(name) {
+    var rate = sampleRate(name);
+    return { keep: rate >= 1 || sampleDraw() < rate, rate: rate };
+  }
+
+  function baseEvent(name, props, rate) {
     var event = {
       event: name,
       ts: Date.now(),
@@ -136,6 +181,7 @@
       viewport: (window.innerWidth || 0) + 'x' + (window.innerHeight || 0),
       language: navigator.language || '',
       engagement_ms: engagement,
+      sample_rate: rate || 1,
       props: props || {}
     };
     engagement = 0;
@@ -202,23 +248,34 @@
 
   var track = safe(function (name, props) {
     if (!name || sensitiveSheetOpen()) return;
-    enqueue(baseEvent(String(name).slice(0, 64), props));
+    name = String(name).slice(0, 64);
+    var decision = sampled(name);
+    if (!decision.keep) return;
+    enqueue(baseEvent(name, props, decision.rate));
   });
 
   var page = safe(function (props) {
     if (sensitiveSheetOpen()) return;
     started = Date.now();
-    enqueue(baseEvent('page_view', props));
+    var decision = sampled('page_view');
+    if (!decision.keep) return;
+    enqueue(baseEvent('page_view', props, decision.rate));
   });
 
   var identify = safe(function (id, traits) {
     if (sensitiveSheetOpen()) return;
     userId = id ? String(id).slice(0, 64) : null;
-    var event = baseEvent('identify', traits);
+    var event = baseEvent('identify', traits, 1);
     event.type = 'identify';
     event.traits = traits || {};
     enqueue(event);
   });
+
+  function syncIdentity(user) {
+    var id = user && (user.id || user.ID || user.user_id || user.uid);
+    if (id) identify(id);
+    else if (userId) identify(null);
+  }
 
   // -- engagement: count only time the tab is actually visible --------------
   function bumpEngagement() {
@@ -322,6 +379,13 @@
     }
   });
 
+  var existingGtag = window.gtag;
+  var gtagCompat = function (command, name, props) {
+    if (command === 'event') track(name, props);
+  };
+  gtagCompat.__twoHelixesCompat = true;
+  if (typeof existingGtag !== 'function') window.gtag = gtagCompat;
+
   // Replay anything queued before this script finished loading.
   var pending = window.th && window.th.q ? window.th.q : [];
   window.th = api;
@@ -338,6 +402,18 @@
   };
 
   safe(function () {
+    window.addEventListener('userLoggedIn', safe(function (event) {
+      syncIdentity(event && event.detail ? event.detail.user || event.detail : window.userData);
+    }));
+    window.addEventListener('user-ready', safe(function (event) {
+      syncIdentity(event && event.detail ? event.detail : window.userData);
+    }));
+    window.addEventListener('authStateChanged', safe(function () {
+      syncIdentity(window.userData);
+    }));
+    setTimeout(function () {
+      syncIdentity(window.userData);
+    }, 0);
     hookHistory();
     hookOutbound();
     hookErrors();

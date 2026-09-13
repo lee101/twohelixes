@@ -12,8 +12,11 @@ Raises if anything failed, so the process exits non-zero.
 
 from th.http import (
     METHOD_GET,
+    METHOD_OPTIONS,
     METHOD_POST,
+    PARSE_ERROR,
     PARSE_OK,
+    PARSE_TOO_LARGE,
     Request,
     Response,
     Slice,
@@ -24,6 +27,7 @@ from th.http import (
     serialize,
     slice_str,
 )
+from th.app import handle_fast
 
 
 def check(name: StringSlice, got: StringSlice, want: StringSlice) -> Int:
@@ -94,6 +98,57 @@ def test_parse_and_slice_a_request() -> Int:
     return bad
 
 
+def test_oversized_content_length_stops_before_body() -> Int:
+    print("oversized content length")
+    var bad = 0
+    var raw = to_bytes(
+        "POST /v1/collect HTTP/1.1\r\n"
+        "Content-Length: 999999999999999999999999\r\n\r\n"
+    )
+    var req = Request()
+    var rc = parse_request(raw, len(raw), req)
+    bad += check_int("oversized result", rc, PARSE_TOO_LARGE)
+    return bad
+
+
+def test_request_framing_is_unambiguous() -> Int:
+    print("request framing")
+    var bad = 0
+    var bad_method = to_bytes("GEX / HTTP/1.1\r\n\r\n")
+    var req1 = Request()
+    bad += check_int(
+        "method prefix rejected",
+        parse_request(bad_method, len(bad_method), req1),
+        PARSE_ERROR,
+    )
+    var bad_version = to_bytes("GET / HTTP/9.1\r\n\r\n")
+    var req2 = Request()
+    bad += check_int(
+        "unknown version rejected",
+        parse_request(bad_version, len(bad_version), req2),
+        PARSE_ERROR,
+    )
+    var conflicting = to_bytes(
+        "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx"
+    )
+    var req3 = Request()
+    bad += check_int(
+        "conflicting lengths rejected",
+        parse_request(conflicting, len(conflicting), req3),
+        PARSE_ERROR,
+    )
+    var chunked = to_bytes(
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+    )
+    var req4 = Request()
+    bad += check_int(
+        "unsupported transfer encoding rejected",
+        parse_request(chunked, len(chunked), req4),
+        PARSE_ERROR,
+    )
+    return bad
+
+
 def test_headers_json() -> Int:
     print("headers_json")
     var bad = 0
@@ -155,6 +210,10 @@ def test_append_str_and_body() -> Int:
     bad += check("body after append", whole(resp.body), "café!")
     resp.set_body_str("x")
     bad += check_int("set_body_str replaces", len(resp.body), 1)
+    resp.set_body_latin1("\u0080ÿ")
+    bad += check_int("latin1 body length", len(resp.body), 2)
+    bad += check_int("latin1 0x80", Int(resp.body[0]), 128)
+    bad += check_int("latin1 0xff", Int(resp.body[1]), 255)
     return bad
 
 
@@ -205,15 +264,67 @@ def test_pipelined_requests_parse_independently() -> Int:
     return bad
 
 
+def test_collect_preflight_is_cross_origin() -> Int:
+    print("collect preflight")
+    var bad = 0
+    var raw = to_bytes(
+        "OPTIONS /v1/collect HTTP/1.1\r\n"
+        "Origin: https://netwrck.local:8443\r\n\r\n"
+    )
+    var req = Request()
+    _ = parse_request(raw, len(raw), req)
+    var resp = Response()
+    bad += check_int("method", req.method, METHOD_OPTIONS)
+    bad += check_int("handled", Int(handle_fast(raw, req, resp)), 1)
+    bad += check_int("status", resp.status, 204)
+    var expected = (
+        "Allow: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Headers: authorization, content-type\r\n"
+        "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
+        "Access-Control-Max-Age: 86400\r\n"
+    )
+    bad += check("CORS headers", resp.headers, expected)
+
+    var segment_raw = to_bytes(
+        "OPTIONS /v1/batch HTTP/1.1\r\n"
+        "Origin: https://segment.example\r\n\r\n"
+    )
+    var segment_req = Request()
+    _ = parse_request(segment_raw, len(segment_raw), segment_req)
+    var segment_resp = Response()
+    bad += check_int(
+        "segment handled", Int(handle_fast(segment_raw, segment_req, segment_resp)), 1
+    )
+    bad += check_int("segment status", segment_resp.status, 204)
+    bad += check("segment CORS headers", segment_resp.headers, expected)
+
+    var amplitude_raw = to_bytes("OPTIONS /2/httpapi HTTP/1.1\r\n\r\n")
+    var amplitude_req = Request()
+    _ = parse_request(amplitude_raw, len(amplitude_raw), amplitude_req)
+    var amplitude_resp = Response()
+    bad += check_int(
+        "amplitude handled",
+        Int(handle_fast(amplitude_raw, amplitude_req, amplitude_resp)),
+        1,
+    )
+    bad += check_int("amplitude status", amplitude_resp.status, 204)
+    bad += check("amplitude CORS headers", amplitude_resp.headers, expected)
+    return bad
+
+
 def main() raises:
     var bad = 0
     bad += test_slice_str_is_byte_exact()
     bad += test_parse_and_slice_a_request()
+    bad += test_oversized_content_length_stops_before_body()
+    bad += test_request_framing_is_unambiguous()
     bad += test_headers_json()
     bad += test_json_escape()
     bad += test_append_str_and_body()
     bad += test_serialize_round_trip()
     bad += test_pipelined_requests_parse_independently()
+    bad += test_collect_preflight_is_cross_origin()
     print("")
     if bad > 0:
         print(bad, "failed")

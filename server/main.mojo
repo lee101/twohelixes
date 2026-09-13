@@ -1,4 +1,4 @@
-"""twoHelixes server entrypoint.
+"""TwoHelixes server entrypoint.
 
 Spawns N worker processes that each run their own epoll loop over a shared
 SO_REUSEPORT listener. Each worker embeds its own Python interpreter, so a

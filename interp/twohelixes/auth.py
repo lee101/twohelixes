@@ -62,6 +62,7 @@ class Identity:
     def to_public(self) -> dict[str, Any]:
         return {
             "signed_in": self.signed_in,
+            "user_id": self.user_id,
             "email": self.email,
             "plan": self.plan,
             "api_credits": self.api_credits,

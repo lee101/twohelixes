@@ -30,6 +30,27 @@ def is_stream_path(buf: Span[UInt8, _], s: Slice) -> Bool:
     )
 
 
+def is_collect_path(buf: Span[UInt8, _], s: Slice) -> Bool:
+    return (
+        path_eq(buf, s, "/v1/collect")
+        or path_eq(buf, s, "/v1/batch")
+        or path_eq(buf, s, "/v1/track")
+        or path_eq(buf, s, "/v1/page")
+        or path_eq(buf, s, "/v1/screen")
+        or path_eq(buf, s, "/v1/identify")
+        or path_eq(buf, s, "/v1/group")
+        or path_eq(buf, s, "/v1/alias")
+        or path_eq(buf, s, "/mp/collect")
+        or path_eq(buf, s, "/track")
+        or path_eq(buf, s, "/import")
+        or path_eq(buf, s, "/engage")
+        or path_eq(buf, s, "/groups")
+        or path_eq(buf, s, "/2/httpapi")
+        or path_eq(buf, s, "/batch")
+        or path_eq(buf, s, "/identify")
+    )
+
+
 def path_eq(buf: Span[UInt8, _], s: Slice, literal: StringSlice) -> Bool:
     var lit = literal.as_bytes()
     if s.length != len(lit):
@@ -82,6 +103,14 @@ def handle_fast(buf: Span[UInt8, _], req: Request, mut resp: Response) -> Bool:
     if req.method == METHOD_OPTIONS:
         resp.status = 204
         resp.add_header("Allow", "GET, POST, PUT, DELETE, OPTIONS")
+        if is_collect_path(buf, req.path):
+            # OPTIONS is handled here before Python routing, so the collector's
+            # Python preflight route never runs. Keep this public endpoint
+            # usable from embedded trackers on other origins.
+            resp.add_header("Access-Control-Allow-Origin", "*")
+            resp.add_header("Access-Control-Allow-Headers", "authorization, content-type")
+            resp.add_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+            resp.add_header("Access-Control-Max-Age", "86400")
         return True
 
     return False

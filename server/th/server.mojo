@@ -15,6 +15,9 @@ from th.http import (
     PARSE_ERROR,
     PARSE_INCOMPLETE,
     PARSE_OK,
+    PARSE_TOO_LARGE,
+    MAX_CONTENT_LENGTH,
+    MAX_HEADER_BYTES,
     Request,
     Response,
     Slice,
@@ -70,7 +73,8 @@ comptime ST_WRITE: Int = 2
 comptime ST_STREAM: Int = 3
 
 comptime READ_CHUNK: Int = 16 * 1024
-comptime MAX_BODY: Int = 64 * 1024 * 1024
+comptime READ_BUDGET: Int = 256 * 1024
+comptime MAX_REQUEST_BYTES: Int = MAX_HEADER_BYTES + MAX_CONTENT_LENGTH
 comptime MAX_EVENTS: Int = 1024
 comptime MAX_FDS: Int = 65536
 
@@ -82,6 +86,7 @@ comptime BUSY_TICK_MS: Int32 = 5
 struct Conn(Movable):
     var state: Int
     var inbuf: List[UInt8]
+    var instart: Int
     var inlen: Int
     var outbuf: List[UInt8]
     var outpos: Int
@@ -92,6 +97,7 @@ struct Conn(Movable):
     def __init__(out self):
         self.state = ST_FREE
         self.inbuf = List[UInt8]()
+        self.instart = 0
         self.inlen = 0
         self.outbuf = List[UInt8]()
         self.outpos = 0
@@ -101,6 +107,7 @@ struct Conn(Movable):
 
     def open(mut self):
         self.state = ST_READ
+        self.instart = 0
         self.inlen = 0
         self.outpos = 0
         self.keepalive = True
@@ -111,6 +118,7 @@ struct Conn(Movable):
 
     def close(mut self):
         self.state = ST_FREE
+        self.instart = 0
         self.inlen = 0
         self.outpos = 0
         self.stream_id = String("")
@@ -244,15 +252,38 @@ struct Loop(Movable):
         if self.conns[i].state != ST_READ:
             return
 
-        while True:
+        var read_this_turn = 0
+        while read_this_turn < READ_BUDGET:
             var have = self.conns[i].inlen
             var cap = len(self.conns[i].inbuf)
             if cap < have + READ_CHUNK:
+                # Reclaim bytes consumed by earlier pipelined requests only
+                # when the tail needs room. Most requests therefore do no
+                # compaction, and long pipelines avoid an O(n²) shift.
+                if self.conns[i].instart > 0:
+                    var remaining = have - self.conns[i].instart
+                    for k in range(remaining):
+                        self.conns[i].inbuf[k] = self.conns[i].inbuf[
+                            self.conns[i].instart + k
+                        ]
+                    self.conns[i].instart = 0
+                    self.conns[i].inlen = remaining
+                    have = remaining
                 # One resize, not 16384 appends. The append loop ran on every
                 # read of every request and was the loop's largest per-request
                 # cost that had nothing to do with the request.
-                self.conns[i].inbuf.resize(have + READ_CHUNK, 0)
-            var n = sys_read(fd, self.conns[i].inbuf, have, READ_CHUNK)
+                var wanted = have + READ_CHUNK
+                if wanted > MAX_REQUEST_BYTES:
+                    wanted = MAX_REQUEST_BYTES
+                if wanted <= have:
+                    break
+                self.conns[i].inbuf.resize(wanted, 0)
+            var count = READ_CHUNK
+            if have + count > MAX_REQUEST_BYTES:
+                count = MAX_REQUEST_BYTES - have
+            if count <= 0:
+                break
+            var n = sys_read(fd, self.conns[i].inbuf, have, count)
             if n == 0:
                 self.drop(fd)
                 return
@@ -265,24 +296,30 @@ struct Loop(Movable):
                 self.drop(fd)
                 return
             self.conns[i].inlen = have + n
-            if self.conns[i].inlen > MAX_BODY:
-                self.drop(fd)
-                return
+            read_this_turn += n
 
         # Serve every complete request already buffered (HTTP pipelining).
-        while self.conns[i].inlen > 0:
+        while self.conns[i].inlen - self.conns[i].instart > 0:
             var req = Request()
-            var rc = parse_request(self.conns[i].inbuf, self.conns[i].inlen, req)
+            var active = Span(self.conns[i].inbuf)[
+                self.conns[i].instart : self.conns[i].inlen
+            ]
+            var rc = parse_request(active, len(active), req)
             if rc == PARSE_INCOMPLETE:
+                if len(active) >= MAX_REQUEST_BYTES:
+                    self._payload_too_large(fd)
                 return
             if rc == PARSE_ERROR:
                 self._bad_request(fd)
                 return
+            if rc == PARSE_TOO_LARGE:
+                self._payload_too_large(fd)
+                return
 
             var resp = Response()
-            var handled = handle_fast(self.conns[i].inbuf, req, resp)
+            var handled = handle_fast(active, req, resp)
 
-            if not handled and is_stream_path(self.conns[i].inbuf, req.path):
+            if not handled and is_stream_path(active, req.path):
                 self._begin_stream(fd, req)
                 return
 
@@ -300,11 +337,10 @@ struct Loop(Movable):
             self.served += 1
 
             var consumed = req.head_len + req.content_length
-            var leftover = self.conns[i].inlen - consumed
-            if leftover > 0:
-                for k in range(leftover):
-                    self.conns[i].inbuf[k] = self.conns[i].inbuf[consumed + k]
-            self.conns[i].inlen = leftover if leftover > 0 else 0
+            self.conns[i].instart += consumed
+            if self.conns[i].instart >= self.conns[i].inlen:
+                self.conns[i].instart = 0
+                self.conns[i].inlen = 0
 
             self.conns[i].state = ST_WRITE
             self.flush(fd)
@@ -326,22 +362,47 @@ struct Loop(Movable):
         self.conns[i].state = ST_WRITE
         self.flush(fd)
 
+    def _payload_too_large(mut self, fd: Int32) raises:
+        var i = Int(fd)
+        self.conns[i].outbuf.clear()
+        append_str(
+            self.conns[i].outbuf,
+            "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n",
+        )
+        self.conns[i].outpos = 0
+        self.conns[i].keepalive = False
+        self.conns[i].state = ST_WRITE
+        self.flush(fd)
+
     def _dispatch_python(mut self, fd: Int32, req: Request, mut resp: Response):
         var i = Int(fd)
-        var buf = Span(self.conns[i].inbuf)
+        var buf = Span(self.conns[i].inbuf)[
+            self.conns[i].instart : self.conns[i].inlen
+        ]
         try:
+            # Materialize each request field exactly once. Bridge accepts the
+            # owned Strings directly instead of constructing a second copy at
+            # the Python boundary; this matters most for batch event bodies.
+            var path = slice_str(buf, req.path)
+            var query = slice_str(buf, req.query)
+            var body = slice_str(buf, req.body)
+            var request_headers = headers_json(buf, req)
             var result = self.bridge.dispatch(
                 method_name(req.method),
-                slice_str(buf, req.path),
-                slice_str(buf, req.query),
-                slice_str(buf, req.body),
-                headers_json(buf, req),
+                path,
+                query,
+                body,
+                request_headers,
             )
             resp.status = result[0]
             resp.add_header("Content-Type", result[1])
             if result[2] != "" and result[2] != "{}":
                 _append_extra_headers(resp, result[2])
-            resp.set_body_str(result[3])
+            if result[1] == "image/gif" or result[1] == "application/octet-stream":
+                resp.set_body_latin1(result[3])
+            else:
+                resp.set_body_str(result[3])
         except e:
             resp.status = 500
             resp.add_header("Content-Type", "application/json; charset=utf-8")
@@ -350,15 +411,21 @@ struct Loop(Movable):
     def _begin_stream(mut self, fd: Int32, req: Request) raises:
         """Upgrade this connection to SSE and hand the work to Python."""
         var i = Int(fd)
-        var buf = Span(self.conns[i].inbuf)
+        var buf = Span(self.conns[i].inbuf)[
+            self.conns[i].instart : self.conns[i].inlen
+        ]
 
-        var sid = String("")
+        var sid: String
         try:
+            var path = slice_str(buf, req.path)
+            var query = slice_str(buf, req.query)
+            var body = slice_str(buf, req.body)
+            var request_headers = headers_json(buf, req)
             sid = self.bridge.stream_start(
-                slice_str(buf, req.path),
-                slice_str(buf, req.query),
-                slice_str(buf, req.body),
-                headers_json(buf, req),
+                path,
+                query,
+                body,
+                request_headers,
             )
         except e:
             self._bad_request(fd)
@@ -378,6 +445,7 @@ struct Loop(Movable):
         self.conns[i].outpos = 0
         self.conns[i].keepalive = False
         self.conns[i].state = ST_STREAM
+        self.conns[i].instart = 0
         self.conns[i].inlen = 0
         self.streaming.append(fd)
         self.flush_stream(fd)
@@ -451,7 +519,7 @@ struct Loop(Movable):
                 continue
 
             var chunk = String("")
-            var done = False
+            var done: Bool
             try:
                 var polled = self.bridge.stream_poll(self.conns[i].stream_id)
                 chunk = polled[0]

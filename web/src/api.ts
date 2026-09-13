@@ -2,6 +2,7 @@
 
 export interface User {
   signed_in: boolean;
+  user_id?: string | null;
   email: string;
   plan: string;
   api_credits: number;

@@ -92,6 +92,57 @@ def test_the_index_lists_every_dataset_with_a_chart() -> None:
     assert '"@type":"DataCatalog"' in body
 
 
+def test_the_curated_catalog_is_shared_with_the_other_product() -> None:
+    expected = {
+        "shipping_crisis",
+        "ecommerce_funnel",
+        "energy_transition",
+        "city_air_quality",
+    }
+    assert expected.issubset({sample.key for sample in samples.SAMPLES})
+    for key in expected:
+        sample = samples.BY_KEY[key]
+        assert sample.source == "Curated (shared with askfelix)"
+        assert sample.questions
+        assert examples.BY_DATASET[key]
+
+    expected_shapes = {
+        "shipping_crisis": (125, 26),
+        "ecommerce_funnel": (120, 11),
+        "energy_transition": (40, 9),
+        "city_air_quality": (96, 11),
+    }
+    for key, shape in expected_shapes.items():
+        assert samples.frame(key).shape == shape
+
+
+def test_the_homepage_links_to_every_curated_dataset() -> None:
+    status, _content_type, body = _get("/")
+    assert status == 200
+    for key in (
+        "shipping_crisis",
+        "ecommerce_funnel",
+        "energy_transition",
+        "city_air_quality",
+    ):
+        assert f'href="/datasets/{key}"' in body
+
+
+def test_the_catalog_search_and_compatibility_api_are_public() -> None:
+    status, _content_type, body = _get("/datasets", "q=renewable+energy")
+    assert status == 200
+    assert 'href="/datasets/energy_transition"' in body
+    assert 'href="/datasets/orders"' not in body
+
+    status, content_type, body = _get("/api/datasets", "q=funnel&limit=1")
+    assert status == 200
+    assert content_type.startswith("application/json")
+    payload = json.loads(body)
+    assert payload["count"] == 1
+    assert payload["entries"][0]["id"] == "ecommerce_funnel"
+    assert payload["entries"][0]["interesting_queries"]
+
+
 def test_a_dataset_page_carries_its_schema_its_rows_and_its_charts() -> None:
     status, _ct, body = _get("/datasets/orders")
     assert status == 200

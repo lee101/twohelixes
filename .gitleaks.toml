@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "twohelixes-api-key"
+description = "TwoHelixes API key"
+regex = '''sk-th-[A-Za-z0-9_-]{24,}'''
+secretGroup = 0
+entropy = 3.5

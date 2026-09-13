@@ -44,3 +44,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.deploy-backups/
+AGENTS.md.local
+requirements.txt.tmp

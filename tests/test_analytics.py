@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 import pytest
 
@@ -25,6 +28,7 @@ from twohelixes.routes import analytics as analytics_routes  # noqa: E402
 from twohelixes.routes import dashboards as dashboard_routes  # noqa: E402
 from twohelixes.routes import teams  # noqa: E402
 from twohelixes.routes import pages  # noqa: E402
+from twohelixes.routes import query as query_routes  # noqa: E402
 from twohelixes.charts import defaults as chart_defaults  # noqa: E402
 
 SITE: dict[str, str] = {}
@@ -128,6 +132,52 @@ def test_a_beacon_batch_is_stored() -> None:
     assert "0.0.0.0" not in (stored[0]["ip_hash"] or "")
 
 
+def test_large_batch_uses_bounded_multi_value_inserts() -> None:
+    statements: list[str] = []
+    raw = store.connection().raw
+    raw.set_trace_callback(
+        lambda sql: statements.append(sql)
+        if sql.lstrip().upper().startswith("INSERT INTO ANALYTICS_EVENTS")
+        else None
+    )
+    events = [
+        {
+            "event": "purchase",
+            "client_id": "bulk-client",
+            "session_id": "bulk-session",
+            "event_id": f"bulk-{index}",
+        }
+        for index in range(400)
+    ]
+    try:
+        assert collect(events) == 204
+    finally:
+        raw.set_trace_callback(None)
+    assert len(rows()) == 400
+    # 400 events plus one synthetic session_start, in 200-row chunks.
+    assert len(statements) == 3
+
+
+def test_helper_failure_rolls_back_instead_of_acknowledging_loss(
+    monkeypatch: Any,
+) -> None:
+    def fail(_conn: Any, _row: dict[str, Any]) -> None:
+        raise RuntimeError("forced helper failure")
+
+    monkeypatch.setattr(analytics_routes, "_link_groups", fail)
+    with pytest.raises(RuntimeError, match="forced helper failure"):
+        collect(
+            [
+                {
+                    "event": "custom_event",
+                    "client_id": "rollback-client",
+                    "session_id": "rollback-session",
+                }
+            ]
+        )
+    assert rows(include_session_start=True) == []
+
+
 def test_malformed_events_are_dropped_not_fatal() -> None:
     status, _ = dispatch("POST", "/v1/collect", body="{not json")
     assert status == 204
@@ -138,6 +188,24 @@ def test_malformed_events_are_dropped_not_fatal() -> None:
     # A good event alongside bad ones still lands.
     assert collect([{"bad": True}, {"event": "ok", "client_id": "c3"}]) == 204
     assert [r["event_name"] for r in rows()] == ["ok"]
+
+
+def test_oversized_batches_are_rejected_explicitly() -> None:
+    events = [
+        {"event": "bulk", "client_id": f"bulk-{index}"}
+        for index in range(analytics_routes.MAX_EVENTS_PER_BATCH + 1)
+    ]
+    status, body = dispatch(
+        "POST",
+        "/v1/collect",
+        body=json.dumps({"site_id": SITE["write_key"], "events": events}),
+    )
+    assert status == 413
+    assert body == {
+        "error": "too_many_events",
+        "limit": analytics_routes.MAX_EVENTS_PER_BATCH,
+    }
+    assert rows() == []
 
 
 def test_bots_are_not_counted() -> None:
@@ -176,6 +244,486 @@ def test_segment_shape_and_identify_stitching() -> None:
     assert json.loads(identity["traits"])["email"] == "a@b.c"
 
 
+def test_segment_http_api_accepts_basic_auth_write_key() -> None:
+    basic = base64.b64encode(f"{SITE['write_key']}:".encode()).decode()
+    status, body = dispatch(
+        "POST",
+        "/v1/track",
+        body=json.dumps(
+            {
+                "event": "Order Completed",
+                "anonymousId": "segment-http",
+                "properties": {"revenue": 42},
+            }
+        ),
+        headers={"authorization": f"Basic {basic}"},
+    )
+    assert status == 200
+    assert body == {"success": True}
+    assert [row["event_name"] for row in rows()] == ["Order Completed"]
+
+
+def test_segment_alias_uses_previous_id_for_identity_stitching() -> None:
+    assert collect(
+        [
+            {
+                "type": "alias",
+                "previousId": "anonymous-before-signin",
+                "userId": "known-after-signin",
+                "messageId": "alias-1",
+            }
+        ]
+    ) == 204
+    identity = store.row_to_dict(
+        store.one(
+            "SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+            (SITE["id"], "anonymous-before-signin"),
+        )
+    )
+    assert identity is not None
+    assert identity["user_id"] == "known-after-signin"
+
+
+def test_segment_batch_context_and_clock_correction_are_preserved() -> None:
+    sent = time.time() - 60
+    original = sent - 300
+    status, body = dispatch(
+        "POST",
+        "/v1/batch",
+        body=json.dumps(
+            {
+                "writeKey": SITE["write_key"],
+                "sentAt": datetime.fromtimestamp(sent, timezone.utc).isoformat(),
+                "context": {
+                    "page": {"url": "https://netwrck.com/from-batch"},
+                    "library": {"name": "analytics-python", "version": "1"},
+                    "ip": "203.0.113.8",
+                },
+                "batch": [
+                    {
+                        "type": "track",
+                        "event": "batch_custom",
+                        "anonymousId": "segment-clock",
+                        "originalTimestamp": datetime.fromtimestamp(
+                            original, timezone.utc
+                        ).isoformat(),
+                    }
+                ],
+            }
+        ),
+    )
+    assert status == 200
+    assert body == {"success": True}
+    row = rows()[0]
+    assert row["page_path"] == "/from-batch"
+    assert row["ts"] == pytest.approx(time.time() - 300, abs=3)
+    props = json.loads(row["props"])
+    assert props["$context"]["library"]["name"] == "analytics-python"
+    assert "ip" not in props["$context"]
+
+
+def test_ga4_measurement_protocol_post_is_accepted() -> None:
+    status, _ = dispatch(
+        "POST",
+        "/mp/collect",
+        query=f"measurement_id={SITE['write_key']}&api_secret=unused",
+        body=json.dumps(
+            {
+                "client_id": "ga4-client",
+                "user_id": "ga4-user",
+                "events": [
+                    {
+                        "name": "purchase",
+                        "params": {"value": 12.5, "currency": "NZD", "ga_session_id": "ga4-session"},
+                    }
+                ],
+            }
+        ),
+    )
+    assert status == 204
+    stored = rows()
+    assert [row["event_name"] for row in stored] == ["purchase"]
+    assert stored[0]["session_id"] == "ga4-session"
+    assert json.loads(stored[0]["props"])["currency"] == "NZD"
+
+
+def test_ga4_event_id_in_params_is_idempotent() -> None:
+    payload = {
+        "client_id": "ga4-dedupe",
+        "events": [
+            {"name": "workspace_exported", "params": {"event_id": "ga-event-1"}}
+        ],
+    }
+    for _ in range(2):
+        status, _ = dispatch(
+            "POST",
+            "/mp/collect",
+            query=f"measurement_id={SITE['write_key']}",
+            body=json.dumps(payload),
+        )
+        assert status == 204
+    stored = rows()
+    assert len(stored) == 1
+    assert stored[0]["external_id"] == "ga-event-1"
+
+
+def test_ga4_transaction_id_does_not_collide_across_event_types() -> None:
+    payload = {
+        "client_id": "ga4-transaction",
+        "events": [
+            {
+                "name": "purchase",
+                "params": {"event_id": "purchase-1", "transaction_id": "order-9"},
+            },
+            {
+                "name": "refund",
+                "params": {"event_id": "refund-1", "transaction_id": "order-9"},
+            },
+        ],
+    }
+    status, _ = dispatch(
+        "POST",
+        "/mp/collect",
+        query=f"measurement_id={SITE['write_key']}",
+        body=json.dumps(payload),
+    )
+    assert status == 204
+    assert [row["event_name"] for row in rows()] == ["purchase", "refund"]
+
+
+def test_mixpanel_track_is_lossless_and_idempotent() -> None:
+    payload = [
+        {
+            "event": "workspace_exported",
+            "properties": {
+                "token": SITE["write_key"],
+                "distinct_id": "mix-user",
+                "$user_id": "user-42",
+                "$device_id": "device-42",
+                "$insert_id": "mix-1",
+                "$current_url": "https://netwrck.com/workspaces/1",
+                "format": "csv",
+                "row_count": 1234,
+            },
+        }
+    ]
+    for _ in range(2):
+        status, body = dispatch(
+            "POST", "/track", query="verbose=1", body=json.dumps(payload)
+        )
+        assert status == 200
+        assert body["status"] == 1
+    stored = rows()
+    assert len(stored) == 1
+    assert stored[0]["source"] == "mixpanel"
+    assert stored[0]["external_id"] == "mix-1"
+    assert stored[0]["client_id"] == "device-42"
+    assert stored[0]["user_id"] == "user-42"
+    assert stored[0]["page_path"] == "/workspaces/1"
+    props = json.loads(stored[0]["props"])
+    assert props["format"] == "csv"
+    assert "token" not in props
+
+
+def test_mixpanel_engage_merges_profile_operations() -> None:
+    first = [
+        {
+            "$token": SITE["write_key"],
+            "$distinct_id": "profile-1",
+            "$set": {"plan": "pro"},
+            "$set_once": {"created_via": "cli"},
+            "$add": {"login_count": 1},
+        }
+    ]
+    second = [
+        {
+            "$token": SITE["write_key"],
+            "$distinct_id": "profile-1",
+            "$set": {"plan": "business"},
+            "$set_once": {"created_via": "ignored"},
+            "$add": {"login_count": 2},
+        }
+    ]
+    assert dispatch("POST", "/engage", body=json.dumps(first))[0] == 200
+    assert dispatch("POST", "/engage", body=json.dumps(second))[0] == 200
+    identity = store.row_to_dict(
+        store.one(
+            "SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+            (SITE["id"], "profile-1"),
+        )
+    )
+    assert identity is not None
+    traits = json.loads(identity["traits"])
+    assert traits == {"plan": "business", "created_via": "cli", "login_count": 3.0}
+    deleted = [{"$token": SITE["write_key"], "$distinct_id": "profile-1", "$delete": ""}]
+    assert dispatch("POST", "/engage", body=json.dumps(deleted))[0] == 200
+    assert store.one(
+        "SELECT 1 FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+        (SITE["id"], "profile-1"),
+    ) is None
+
+
+def test_mixpanel_alias_stitches_the_original_identity() -> None:
+    payload = [
+        {
+            "event": "$create_alias",
+            "properties": {
+                "token": SITE["write_key"],
+                "distinct_id": "mix-anonymous",
+                "alias": "mix-known",
+                "$insert_id": "mix-alias-1",
+            },
+        }
+    ]
+    assert dispatch("POST", "/track", body=json.dumps(payload))[0] == 200
+    identity = store.row_to_dict(
+        store.one(
+            "SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+            (SITE["id"], "mix-anonymous"),
+        )
+    )
+    assert identity is not None
+    assert identity["user_id"] == "mix-known"
+
+
+def test_segment_and_mixpanel_groups_share_typed_group_profiles() -> None:
+    assert collect(
+        [
+            {
+                "type": "group",
+                "userId": "group-user",
+                "groupId": "acct-7",
+                "groupType": "account_id",
+                "traits": {"name": "Acme"},
+            }
+        ]
+    ) == 204
+    status, body = dispatch(
+        "POST",
+        "/groups",
+        query="verbose=1",
+        body=json.dumps(
+            [
+                {
+                    "$token": SITE["write_key"],
+                    "$group_key": "account_id",
+                    "$group_id": "acct-7",
+                    "$set": {"plan": "business"},
+                    "$add": {"seats": 2},
+                }
+            ]
+        ),
+    )
+    assert status == 200
+    assert body["status"] == 1
+    status, report = dispatch(
+        "GET", "/v1/analytics/groups", query=f"site_id={SITE['id']}&type=account_id"
+    )
+    assert status == 200
+    assert len(report["groups"]) == 1
+    group = report["groups"][0]
+    assert group["group_id"] == "acct-7"
+    assert group["traits"] == {"name": "Acme", "plan": "business", "seats": 2.0}
+    assert group["observed_events"] == 2
+
+
+def test_amplitude_http_v2_accepts_custom_events_and_profiles() -> None:
+    payload = {
+        "api_key": SITE["write_key"],
+        "events": [
+            {
+                "device_id": "amp-device",
+                "user_id": "amp-user",
+                "event_type": "workspace_exported",
+                "time": int(time.time() * 1000),
+                "session_id": 1788062000000,
+                "insert_id": "amp-1",
+                "event_properties": {"format": "parquet", "row_count": 500},
+                "user_properties": {"plan": "pro"},
+                "groups": {"account_id": "acct-7"},
+            }
+        ],
+    }
+    status, body = dispatch("POST", "/2/httpapi", body=json.dumps(payload))
+    assert status == 200
+    assert body["code"] == 200
+    assert body["events_ingested"] == 1
+    stored = rows()
+    assert len(stored) == 1
+    assert stored[0]["source"] == "amplitude"
+    assert stored[0]["external_id"] == "amp-1"
+    props = json.loads(stored[0]["props"])
+    assert props["format"] == "parquet"
+    assert props["$groups"] == {"account_id": "acct-7"}
+    identity = store.row_to_dict(
+        store.one(
+            "SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+            (SITE["id"], "amp-device"),
+        )
+    )
+    assert identity is not None
+    assert json.loads(identity["traits"])["plan"] == "pro"
+    status, groups = dispatch(
+        "GET", "/v1/analytics/groups", query=f"site_id={SITE['id']}&type=account_id"
+    )
+    assert status == 200
+    assert groups["groups"][0]["group_id"] == "acct-7"
+
+
+def test_amplitude_identify_form_api_updates_a_profile() -> None:
+    body = urlencode(
+        {
+            "api_key": SITE["write_key"],
+            "identification": json.dumps(
+                [
+                    {
+                        "device_id": "amp-identify-device",
+                        "user_id": "amp-identify-user",
+                        "user_properties": {
+                            "$set": {"plan": "enterprise"},
+                            "$add": {"login_count": 1},
+                        },
+                    }
+                ]
+            ),
+        }
+    )
+    status, response = dispatch(
+        "POST",
+        "/identify",
+        body=body,
+        headers={"content-type": "application/x-www-form-urlencoded"},
+    )
+    assert status == 200
+    assert response["events_ingested"] == 1
+    identity = store.row_to_dict(
+        store.one(
+            "SELECT * FROM analytics_identities WHERE site_id = ? AND client_id = ?",
+            (SITE["id"], "amp-identify-device"),
+        )
+    )
+    assert identity is not None
+    assert json.loads(identity["traits"]) == {"plan": "enterprise", "login_count": 1.0}
+
+
+def test_oversized_properties_remain_valid_json() -> None:
+    assert collect(
+        [
+            {
+                "event": "large_custom_event",
+                "client_id": "large-props",
+                "props": {"keep": "small", "huge": "🚀" * 9000},
+            }
+        ]
+    ) == 204
+    props = json.loads(rows()[0]["props"])
+    assert props["_twohelixes_truncated"] is True
+    assert props["keep"] == "small"
+    assert "huge" not in props
+
+
+def test_sampled_events_carry_inverse_weights() -> None:
+    events = [
+        {
+            "event": "pointer_moved",
+            "client_id": f"sample-{index}",
+            "session_id": f"session-{index}",
+            "sample_rate": 0.5,
+        }
+        for index in range(50)
+    ]
+    assert collect(events) == 204
+    stored = rows()
+    # These are the rows already retained upstream. The server must not draw
+    # against the upstream probability a second time.
+    assert len(stored) == len(events)
+    assert {row["sample_rate"] for row in stored} == {0.5}
+    assert {row["sample_weight"] for row in stored} == {2.0}
+
+
+def test_upstream_and_server_sampling_probabilities_compose(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        analytics_routes,
+        "_server_sample_rate",
+        lambda _site, _now, _ceiling=None: 0.5,
+    )
+    events = [
+        {
+            "event": "pointer_moved",
+            "client_id": f"composed-{index}",
+            "session_id": f"composed-session-{index}",
+            "sample_rate": 0.1,
+        }
+        for index in range(100)
+    ]
+    assert collect(events) == 204
+    stored = rows()
+    assert 20 < len(stored) < 80
+    assert all(row["sample_rate"] == pytest.approx(0.05) for row in stored)
+    assert all(row["sample_weight"] == pytest.approx(20.0) for row in stored)
+
+
+def test_server_sampling_starts_only_after_the_rate_ceiling(monkeypatch: Any) -> None:
+    monkeypatch.setenv("TWOHELIXES_ANALYTICS_SAMPLE_AFTER_RPS", "10")
+    monkeypatch.setenv("TWOHELIXES_WORKERS", "1")
+    analytics_routes._sample_windows.clear()
+    rates = [analytics_routes._server_sample_rate(SITE["id"], 1000.1) for _ in range(30)]
+    assert rates[:10] == [1.0] * 10
+    assert rates[-1] == pytest.approx(1 / 3)
+
+    keep, rate = analytics_routes._keep_sample(
+        {"event": "purchase", "client_id": "important"}, SITE["id"], 1000.1
+    )
+    assert keep is True
+    assert rate == 1.0
+    for event_name in (
+        "begin_checkout",
+        "subscription_dialog_opened",
+        "subscription_auth_required",
+        "subscription_auth_selected",
+        "subscription_checkout_ready",
+        "subscription_checkout_failed",
+        "subscription_checkout_completed",
+        "subscription_dialog_closed",
+    ):
+        keep, rate = analytics_routes._keep_sample(
+            {"event": event_name, "client_id": "important"}, SITE["id"], 1000.1
+        )
+        assert keep is True
+        assert rate == 1.0
+
+
+def test_chart_agent_can_load_an_owned_analytics_site() -> None:
+    collect(
+        [
+            {
+                "event": "sign_in_completed",
+                "client_id": "agent-client",
+                "session_id": "agent-session",
+                "page_location": "https://netwrck.com/login",
+                "props": {"surface": "header"},
+            }
+        ]
+    )
+    owner = store.get_user_by_email("analytics-owner@test.local")
+    assert owner is not None
+    identity = auth.Identity(user_id=owner["id"], email=owner["email"])
+    ctx = router.Context(
+        method="POST",
+        path="/v1/query",
+        raw_query="",
+        raw_body=json.dumps(
+            {"analytics_site_id": SITE["id"], "days": 1, "limit": 100}
+        ),
+        headers={},
+        user=identity,
+    )
+    frames = query_routes._load_frames(identity, ctx)
+    frame = frames["analytics_events"]
+    assert "prop_surface" in frame.columns
+    assert "sign_in_completed" in set(frame["event_name"])
+
+
 def test_ga_style_pixel_returns_a_gif_and_records() -> None:
     status, body = dispatch(
         "GET",
@@ -184,6 +732,7 @@ def test_ga_style_pixel_returns_a_gif_and_records() -> None:
     )
     assert status == 200
     assert body.startswith("GIF89a")
+    assert body.encode("latin-1") == analytics_routes.PIXEL
     stored = rows()
     assert len(stored) == 1
     assert stored[0]["client_id"] == "pixel1"
@@ -231,20 +780,192 @@ def test_summary_and_timeseries_report_what_was_ingested() -> None:
     assert page["context"]["page"]["path"] == "/"
 
 
+def test_funnel_counts_ordered_session_progression() -> None:
+    now = time.time() * 1000 - 10
+    collect(
+        [
+            {"event": "page_view", "client_id": "a", "session_id": "s1", "ts": now},
+            {"event": "signup_started", "client_id": "a", "session_id": "s1", "ts": now + 1},
+            {"event": "sign_in_completed", "client_id": "a", "session_id": "s1", "ts": now + 2},
+            {"event": "page_view", "client_id": "b", "session_id": "s2", "ts": now},
+            {"event": "signup_started", "client_id": "b", "session_id": "s2", "ts": now + 1},
+            {"event": "page_view", "client_id": "c", "session_id": "s3", "ts": now},
+            {"event": "sign_in_completed", "client_id": "c", "session_id": "s3", "ts": now + 1},
+        ]
+    )
+
+    status, report = dispatch(
+        "GET",
+        "/v1/analytics/funnel",
+        query=f"site_id={SITE['id']}&days=1&steps=page_view,signup_started,sign_in_completed",
+    )
+    assert status == 200
+    assert [stage["sessions"] for stage in report["steps"]] == [3, 2, 1]
+    assert [stage["users"] for stage in report["steps"]] == [3, 2, 1]
+    assert report["steps"][1]["step_rate"] == pytest.approx(2 / 3)
+    assert report["steps"][2]["dropoff"] == 1
+
+
+def test_same_timestamp_funnel_keeps_batch_order() -> None:
+    now = time.time() * 1000
+    collect(
+        [
+            {"event": "step_z", "client_id": "ordered", "session_id": "ordered", "ts": now},
+            {"event": "step_a", "client_id": "ordered", "session_id": "ordered", "ts": now},
+            {"event": "step_m", "client_id": "ordered", "session_id": "ordered", "ts": now},
+        ]
+    )
+    status, report = dispatch(
+        "GET",
+        "/v1/analytics/funnel",
+        query=f"site_id={SITE['id']}&days=1&steps=step_z,step_a,step_m",
+    )
+    assert status == 200
+    assert [step["sessions"] for step in report["steps"]] == [1, 1, 1]
+
+
+def test_paths_discovers_session_flows_without_predefined_steps() -> None:
+    now = time.time() * 1000 - 10
+    collect(
+        [
+            {"event": "page_view", "client_id": "a", "session_id": "s1", "ts": now,
+             "page_location": "https://netwrck.com/"},
+            {"event": "signup_started", "client_id": "a", "session_id": "s1", "ts": now + 1},
+            {"event": "sign_in_completed", "client_id": "a", "session_id": "s1", "ts": now + 2},
+            {"event": "page_view", "client_id": "b", "session_id": "s2", "ts": now,
+             "page_location": "https://netwrck.com/"},
+            {"event": "signup_started", "client_id": "b", "session_id": "s2", "ts": now + 1},
+        ]
+    )
+    status, report = dispatch(
+        "GET",
+        "/v1/analytics/paths",
+        query=f"site_id={SITE['id']}&days=1&mode=events&depth=3",
+    )
+    assert status == 200
+    assert report["sessions"] == 2
+    paths = {tuple(path["path"]): path for path in report["paths"]}
+    assert paths[("page_view", "signup_started")]["sessions"] == 1
+    assert paths[("page_view", "signup_started", "sign_in_completed")]["sessions"] == 1
+
+
+def test_revenue_is_net_and_never_sums_mixed_currencies() -> None:
+    collect(
+        [
+            {"event": "purchase", "client_id": "buyer-1",
+             "props": {"value": 49, "currency": "NZD"}},
+            {"event": "refund", "client_id": "buyer-1",
+             "props": {"value": 10, "currency": "NZD"}},
+            {"event": "Order Completed", "client_id": "buyer-2",
+             "props": {"revenue": 20, "currency": "USD"}},
+        ]
+    )
+    status, report = dispatch(
+        "GET", "/v1/analytics/revenue", query=f"site_id={SITE['id']}&days=1"
+    )
+    assert status == 200
+    totals = {row["currency"]: row["revenue"] for row in report["currencies"]}
+    assert totals == {"NZD": 39.0, "USD": 20.0}
+
+
+def test_funnel_uses_stitched_user_ids_when_available() -> None:
+    now = time.time() * 1000 - 10
+    collect(
+        [
+            {"event": "page_view", "client_id": "anon-a", "session_id": "s1", "ts": now},
+            {"event": "sign_in_completed", "client_id": "anon-a", "session_id": "s1",
+             "user_id": "user-1", "ts": now + 1},
+            {"event": "page_view", "client_id": "anon-b", "session_id": "s2", "ts": now},
+            {"event": "sign_in_completed", "client_id": "anon-b", "session_id": "s2",
+             "user_id": "user-1", "ts": now + 1},
+        ]
+    )
+
+    status, report = dispatch(
+        "GET",
+        "/v1/analytics/funnel",
+        query=f"site_id={SITE['id']}&days=1&steps=page_view,sign_in_completed",
+    )
+    assert status == 200
+    assert report["steps"][0]["users"] == 2
+    assert report["steps"][1]["users"] == 1
+
+
 def test_summary_requires_a_site() -> None:
     status, body = dispatch("GET", "/v1/analytics/summary")
     assert status == 400
     assert body["error"] == "site_id_required"
 
 
+def test_schema_discovers_custom_events_properties_and_sources() -> None:
+    collect(
+        [
+            {
+                "event": "workspace_exported",
+                "client_id": "schema-1",
+                "props": {"format": "csv", "row_count": 12, "compressed": True},
+            },
+            {
+                "event": "workspace_exported",
+                "client_id": "schema-2",
+                "props": {"format": "parquet", "row_count": 20},
+            },
+        ]
+    )
+    status, body = dispatch(
+        "GET", "/v1/analytics/schema", query=f"site_id={SITE['id']}&days=1"
+    )
+    assert status == 200
+    exported = next(event for event in body["events"] if event["name"] == "workspace_exported")
+    assert exported["observed_events"] == 2
+    assert exported["users"] == 2
+    assert exported["sources"] == [{"name": "native", "observed_events": 2}]
+    properties = {prop["name"]: prop for prop in exported["properties"]}
+    assert properties["format"]["types"] == ["string"]
+    assert properties["row_count"]["types"] == ["number"]
+    assert properties["compressed"]["types"] == ["boolean"]
+
+
+def test_reporting_resolves_historical_anonymous_events_to_a_person() -> None:
+    collect(
+        [
+            {"event": "page_view", "client_id": "anon-canonical"},
+            {
+                "type": "identify",
+                "anonymousId": "anon-canonical",
+                "userId": "known-user",
+                "traits": {"plan": "pro"},
+            },
+        ]
+    )
+    collect(
+        [
+            {"event": "page_view", "client_id": "second-device"},
+            {
+                "type": "identify",
+                "anonymousId": "second-device",
+                "userId": "known-user",
+            },
+        ]
+    )
+    status, body = dispatch(
+        "GET", "/v1/analytics/summary", query=f"site_id={SITE['id']}&days=1"
+    )
+    assert status == 200
+    assert body["totals"]["users"] == 1
+
+
 def test_stranger_is_forbidden_from_every_read_endpoint() -> None:
     stranger = store.create_user("analytics-stranger@test.local")
     headers = {"authorization": f"Bearer {auth.api_key_for(stranger['id'])}"}
-    for endpoint in ("summary", "events", "timeseries", "export"):
+    for endpoint in (
+        "summary", "events", "schema", "groups", "paths", "revenue",
+        "funnel", "timeseries", "export",
+    ):
         status, body = dispatch(
             "GET",
             f"/v1/analytics/{endpoint}",
-            query=f"site_id={SITE['id']}",
+            query=f"site_id={SITE['id']}" + ("&steps=page_view,sign_up" if endpoint == "funnel" else ""),
             headers=headers,
         )
         assert status == 403, endpoint
@@ -381,6 +1102,41 @@ def test_first_event_dashboard_is_claimed_once_and_edits_survive() -> None:
     )
 
 
+def test_unique_custom_event_names_do_not_amplify_dashboard_work() -> None:
+    assert collect(
+        [
+            {
+                "event": f"untrusted_custom_{index}",
+                "client_id": "schema-spray",
+                "session_id": "schema-spray-session",
+            }
+            for index in range(100)
+        ]
+    ) == 204
+    claims = store.one(
+        "SELECT COUNT(*) AS n FROM analytics_event_dashboards WHERE site_id = ?",
+        (SITE["id"],),
+    )["n"]
+    assert claims == 1  # only the protected synthetic session_start
+
+    analytics_routes._sample_windows.clear()
+    assert collect(
+        [
+            {
+                "event": "established_custom_event",
+                "client_id": "schema-repeat",
+                "session_id": "schema-repeat-session",
+            }
+            for _ in range(10)
+        ]
+    ) == 204
+    assert store.one(
+        "SELECT status FROM analytics_event_dashboards"
+        " WHERE site_id = ? AND event_name = ?",
+        (SITE["id"], "established_custom_event"),
+    )["status"] == "pending"
+
+
 def test_self_tracking_is_off_without_config_and_uses_own_origin_when_enabled(
     monkeypatch: Any,
 ) -> None:
@@ -408,3 +1164,8 @@ def test_tracker_has_privacy_guards_and_omits_risky_fields() -> None:
     assert "#checkout-overlay[open]" in source
     assert "page_title:" not in source
     assert "message: String(e.message)" not in source
+    assert "sampleAfterPerSecond" in source
+    assert "sample_rate:" in source
+    assert "purchase: true" in source
+    assert "begin_checkout: true" in source
+    assert "subscription_dialog_opened: true" in source

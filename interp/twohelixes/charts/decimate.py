@@ -115,11 +115,12 @@ def _indices(values: list[Any], target: int) -> list[int] | None:
 
     # Stride: cheap, order-preserving, and keeps the endpoints. It loses
     # narrow spikes, which is exactly what LTTB is for - hence the note.
-    step = max(1, len(y) // target)
-    keep = list(range(0, len(y), step))
-    if keep[-1] != len(y) - 1:
-        keep.append(len(y) - 1)
-    return keep
+    # Pick exactly `target` evenly spaced rows, including both endpoints.
+    # Integer division by `target` used to emit 5,001 points for a 15,000-row
+    # series with a 4,000-point limit, defeating both the documented bound and
+    # the payload budget. This is also O(target), not O(input rows).
+    last = len(y) - 1
+    return [(index * last) // (target - 1) for index in range(target)]
 
 
 def _target_for(trace: dict[str, Any]) -> int:

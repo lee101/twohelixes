@@ -294,13 +294,17 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     country       TEXT,
     ip_hash       TEXT,
     engagement_ms INTEGER NOT NULL DEFAULT 0,
+    sample_rate   REAL NOT NULL DEFAULT 1,
+    sample_weight REAL NOT NULL DEFAULT 1,
+    event_sequence INTEGER NOT NULL DEFAULT 0,
+    source         TEXT NOT NULL DEFAULT 'native',
+    external_id    TEXT,
     props         TEXT
 );
 CREATE INDEX IF NOT EXISTS analytics_events_site_ts ON analytics_events(site_id, ts);
 CREATE INDEX IF NOT EXISTS analytics_events_session ON analytics_events(site_id, session_id, ts);
 CREATE INDEX IF NOT EXISTS analytics_events_name ON analytics_events(site_id, event_name, ts);
 CREATE INDEX IF NOT EXISTS analytics_events_client ON analytics_events(site_id, client_id, ts);
-
 -- Identity stitching for the Segment-style identify/alias calls.
 CREATE TABLE IF NOT EXISTS analytics_identities (
     site_id     TEXT NOT NULL,
@@ -312,6 +316,27 @@ CREATE TABLE IF NOT EXISTS analytics_identities (
     PRIMARY KEY (site_id, client_id)
 );
 CREATE INDEX IF NOT EXISTS analytics_identities_user ON analytics_identities(site_id, user_id);
+
+-- Account/organisation/cohort profiles and event membership. Vendor SDKs use
+-- different names, but they all reduce to a typed group id plus traits.
+CREATE TABLE IF NOT EXISTS analytics_groups (
+    site_id     TEXT NOT NULL,
+    group_type  TEXT NOT NULL,
+    group_id    TEXT NOT NULL,
+    traits      TEXT,
+    first_seen  REAL NOT NULL,
+    last_seen   REAL NOT NULL,
+    PRIMARY KEY (site_id, group_type, group_id)
+);
+CREATE TABLE IF NOT EXISTS analytics_event_groups (
+    event_id    TEXT NOT NULL,
+    site_id     TEXT NOT NULL,
+    group_type  TEXT NOT NULL,
+    group_id    TEXT NOT NULL,
+    PRIMARY KEY (event_id, group_type, group_id)
+);
+CREATE INDEX IF NOT EXISTS analytics_event_groups_lookup
+    ON analytics_event_groups(site_id, group_type, group_id, event_id);
 
 CREATE TABLE IF NOT EXISTS analytics_event_dashboards (
     site_id       TEXT NOT NULL,
@@ -460,6 +485,17 @@ def _postgres_schema() -> str:
 
 def connection() -> Any:
     conn = getattr(_local, "conn", None)
+    if conn is not None and is_postgres():
+        raw = getattr(conn, "raw", conn)
+        if bool(getattr(raw, "closed", False)):
+            # Workers are long-lived, while PostgreSQL may be restarted for an
+            # upgrade or failover. psycopg marks the old connection closed
+            # after that happens; keeping it in thread-local storage makes
+            # every later request fail with "the connection is closed" until
+            # the whole worker is restarted.
+            log.warning("discarding closed PostgreSQL connection")
+            _local.conn = None
+            conn = None
     if conn is not None:
         # A connection handed back mid-transaction means the last operation on
         # this thread neither committed nor rolled back - which under SQLite's
@@ -569,6 +605,11 @@ _ADDED_COLUMNS = (
     ("datasets", "shape_report", "TEXT"),
     ("datasets", "sheet_name", "TEXT"),
     ("datasets", "updated_at", "REAL"),
+    ("analytics_events", "sample_rate", "REAL NOT NULL DEFAULT 1"),
+    ("analytics_events", "sample_weight", "REAL NOT NULL DEFAULT 1"),
+    ("analytics_events", "event_sequence", "INTEGER NOT NULL DEFAULT 0"),
+    ("analytics_events", "source", "TEXT NOT NULL DEFAULT 'native'"),
+    ("analytics_events", "external_id", "TEXT"),
 )
 
 
@@ -577,9 +618,12 @@ def _add_missing_columns(conn: Any) -> None:
         if is_postgres():
             # Postgres has had this since 9.6 and it is race-free, which
             # matters: four workers run init() at once on a cold box.
-            postgres_kind = {"REAL": "DOUBLE PRECISION", "INTEGER": "BIGINT"}.get(
-                kind, kind
-            )
+            if kind.startswith("REAL"):
+                postgres_kind = "DOUBLE PRECISION" + kind[len("REAL") :]
+            elif kind.startswith("INTEGER"):
+                postgres_kind = "BIGINT" + kind[len("INTEGER") :]
+            else:
+                postgres_kind = kind
             conn.execute(
                 f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {postgres_kind}"
             )
@@ -588,6 +632,11 @@ def _add_missing_columns(conn: Any) -> None:
         if column not in existing:
             log.info("adding %s.%s", table, column)
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS analytics_events_dedupe"
+        " ON analytics_events(site_id, source, external_id)"
+        " WHERE external_id IS NOT NULL AND external_id != ''"
+    )
 
 
 def new_id() -> str:

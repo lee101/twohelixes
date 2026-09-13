@@ -1,7 +1,7 @@
 """robots.txt and sitemap.xml.
 
 Generated rather than checked in, because the interesting half of this site is
-generated: nine datasets times their worked examples is most of the URLs, and a
+generated: the datasets and their worked examples are most of the URLs, and a
 hand-maintained sitemap goes stale the first time an example is added.
 
 Crawlable and non-crawlable are decided once, here. Everything under `/v1/` is
@@ -22,6 +22,8 @@ PAGES: tuple[tuple[str, str, str], ...] = (
     ("/pricing", "weekly", "0.8"),
     ("/datasets", "weekly", "0.7"),
     ("/docs", "weekly", "0.6"),
+    ("/blog", "weekly", "0.6"),
+    ("/blog/open-product-analytics", "monthly", "0.6"),
 )
 
 # Paths a crawler gains nothing from and we lose something by exposing.
