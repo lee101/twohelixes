@@ -17,8 +17,11 @@ def publish(path, root):
     immutable = path.name.startswith(("chunk-", "reshape-chunk-", "asset-"))
     headers = {"Content-Type": content_type,
                "Cache-Control": "public, max-age=31536000, immutable" if immutable else "public, max-age=60, must-revalidate"}
-    with path.open("rb") as content:
-        response = requests.put(url, data=content, headers=headers, timeout=180)
+    try:
+        with path.open("rb") as content:
+            response = requests.put(url, data=content, headers=headers, timeout=180)
+    except requests.RequestException:
+        raise RuntimeError(f"Upload failed for {key}: network error") from None
     if not response.ok:
         # Presigned URLs contain credentials; never print the request URL.
         raise RuntimeError(f"Upload failed for {key}: HTTP {response.status_code}")

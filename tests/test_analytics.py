@@ -41,9 +41,9 @@ def fresh_db(tmp_path: Any, monkeypatch: Any) -> Any:
     store._initialised = False
     store.init()
     router.build()
-    user = store.create_user("analytics-owner@test.local")
+    user = store.create_user(f"analytics-owner-{store.new_id()}@test.local")
     site_id = store.new_id()
-    write_key = "thw_test_analytics"
+    write_key = f"thw_test_{site_id}"
     with store.transaction() as conn:
         conn.execute(
             "INSERT INTO analytics_sites"
@@ -54,6 +54,7 @@ def fresh_db(tmp_path: Any, monkeypatch: Any) -> Any:
     SITE.update(
         {
             "id": site_id,
+            "owner_email": user["email"],
             "write_key": write_key,
             "owner_key": auth.api_key_for(user["id"]),
         }
@@ -135,6 +136,8 @@ def test_a_beacon_batch_is_stored() -> None:
 def test_large_batch_uses_bounded_multi_value_inserts() -> None:
     statements: list[str] = []
     raw = store.connection().raw
+    if not hasattr(raw, "set_trace_callback"):
+        pytest.skip("SQLite statement tracing test")
     raw.set_trace_callback(
         lambda sql: statements.append(sql)
         if sql.lstrip().upper().startswith("INSERT INTO ANALYTICS_EVENTS")
@@ -705,7 +708,7 @@ def test_chart_agent_can_load_an_owned_analytics_site() -> None:
             }
         ]
     )
-    owner = store.get_user_by_email("analytics-owner@test.local")
+    owner = store.get_user_by_email(SITE["owner_email"])
     assert owner is not None
     identity = auth.Identity(user_id=owner["id"], email=owner["email"])
     ctx = router.Context(
@@ -974,7 +977,7 @@ def test_stranger_is_forbidden_from_every_read_endpoint() -> None:
 
 def test_team_member_can_read_a_shared_site() -> None:
     teams.ensure_schema()
-    owner = store.get_user_by_email("analytics-owner@test.local")
+    owner = store.get_user_by_email(SITE["owner_email"])
     mate = store.create_user("analytics-mate@test.local")
     team_id = store.new_id()
     with store.transaction() as conn:

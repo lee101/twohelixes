@@ -23,7 +23,8 @@ def fresh_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     store._initialised = False
 
 
-def identity(email: str = "sheets@test.local") -> auth.Identity:
+def identity(email: str = "") -> auth.Identity:
+    email = email or f"sheets-{store.new_id()}@test.local"
     user = store.create_user(email)
     return auth.Identity(user_id=user["id"], email=email, plan="free")
 
@@ -160,6 +161,7 @@ def test_agent_output_is_reduced_to_safe_bounded_operations(
 
 def test_agent_is_not_charged_when_the_model_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     user = identity()
+    before = store.one("SELECT COUNT(*) AS n FROM rate_events")["n"]
 
     def fail(*args: Any, **kwargs: Any) -> Any:
         raise llm.LLMError("offline")
@@ -179,4 +181,4 @@ def test_agent_is_not_charged_when_the_model_fails(monkeypatch: pytest.MonkeyPat
     # Admission slots are reserved before model work. A failed call is not
     # billed, but it still counts against the short-lived bot/burst windows.
     row = store.one("SELECT COUNT(*) AS n FROM rate_events")
-    assert row["n"] == 4
+    assert row["n"] - before == 4

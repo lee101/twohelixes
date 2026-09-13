@@ -1893,24 +1893,15 @@ def recent_events(ctx: Context) -> Result:
     site_id = str(site["id"])
     start, end = _window(ctx)
     limit = max(1, min(ctx.q_int("limit", 100), 1000))
-    clauses = ["site_id = ?", "ts BETWEEN ? AND ?"]
-    values: list[Any] = [site_id, start, end]
     event_name = _clip(ctx.q("event"), 64)
     source = _clip(ctx.q("source"), 32).lower()
-    if event_name:
-        clauses.append("event_name = ?")
-        values.append(event_name)
-    if source:
-        clauses.append("source = ?")
-        values.append(source)
-    values.append(limit)
     rows = store.query(
         "SELECT event_name, ts, page_path, referrer_host, device, browser, country, client_id,"
         " session_id, user_id, sample_rate, sample_weight, source, external_id, props"
-        " FROM analytics_events WHERE "
-        + " AND ".join(clauses)
-        + " ORDER BY ts DESC LIMIT ?",
-        values,
+        " FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?"
+        " AND (? = '' OR event_name = ?) AND (? = '' OR source = ?)"
+        " ORDER BY ts DESC LIMIT ?",
+        (site_id, start, end, event_name, event_name, source, source, limit),
     )
     events = store.rows_to_dicts(rows)
     identities = _identity_map(site_id)
@@ -1949,18 +1940,12 @@ def event_schema(ctx: Context) -> Result:
     site_id = str(site["id"])
     start, end = _window(ctx)
     selected_event = _clip(ctx.q("event"), 64)
-    clauses = ["site_id = ?", "ts BETWEEN ? AND ?"]
-    values: list[Any] = [site_id, start, end]
-    if selected_event:
-        clauses.append("event_name = ?")
-        values.append(selected_event)
     rows = store.rows_to_dicts(
         store.query(
             "SELECT event_name, ts, client_id, user_id, sample_weight, source, props"
-            " FROM analytics_events WHERE "
-            + " AND ".join(clauses)
-            + " ORDER BY ts DESC LIMIT 100001",
-            values,
+            " FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?"
+            " AND (? = '' OR event_name = ?) ORDER BY ts DESC LIMIT 100001",
+            (site_id, start, end, selected_event, selected_event),
         )
     )
     truncated = len(rows) > 100000
@@ -2036,25 +2021,13 @@ def analytics_groups(ctx: Context) -> Result:
     site_id = str(site["id"])
     start, end = _window(ctx)
     selected_type = _clip(ctx.q("type"), 64)
-    clauses = ["site_id = ?"]
-    values: list[Any] = [site_id]
-    if selected_type:
-        clauses.append("group_type = ?")
-        values.append(selected_type)
     profiles = store.rows_to_dicts(
         store.query(
             "SELECT group_type, group_id, traits, first_seen, last_seen"
-            " FROM analytics_groups WHERE "
-            + " AND ".join(clauses)
-            + " ORDER BY last_seen DESC LIMIT 1000",
-            values,
+            " FROM analytics_groups WHERE site_id = ?"
+            " AND (? = '' OR group_type = ?) ORDER BY last_seen DESC LIMIT 1000",
+            (site_id, selected_type, selected_type),
         )
-    )
-    link_type = " AND eg.group_type = ?" if selected_type else ""
-    link_values: tuple[Any, ...] = (
-        (site_id, start, end, selected_type)
-        if selected_type
-        else (site_id, start, end)
     )
     metric_rows = store.rows_to_dicts(
         store.query(
@@ -2065,9 +2038,9 @@ def analytics_groups(ctx: Context) -> Result:
             " LEFT JOIN analytics_identities i"
             " ON i.site_id = e.site_id AND i.client_id = e.client_id"
             " WHERE eg.site_id = ? AND e.ts BETWEEN ? AND ?"
-            + link_type
-            + " GROUP BY eg.group_type, eg.group_id",
-            link_values,
+            " AND (? = '' OR eg.group_type = ?)"
+            " GROUP BY eg.group_type, eg.group_id",
+            (site_id, start, end, selected_type, selected_type),
         )
     )
     metrics = {

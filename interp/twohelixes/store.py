@@ -543,9 +543,20 @@ def connection() -> Any:
     # fail with "database is locked" and surface as a 500 on signing in. Read
     # it first: on an existing database the answer is already "wal" and there
     # is nothing to take a lock for.
-    current = conn.execute("PRAGMA journal_mode").fetchone()
-    if not current or str(current[0]).lower() != "wal":
-        conn.execute("PRAGMA journal_mode=WAL")
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            current = conn.execute("PRAGMA journal_mode").fetchone()
+            if not current or str(current[0]).lower() != "wal":
+                conn.execute("PRAGMA journal_mode=WAL")
+            break
+        except sqlite3.OperationalError as exc:
+            # Two workers may open a brand-new database simultaneously.
+            # Journal-mode changes can return BUSY without the busy handler.
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                conn.close()
+                raise
+            time.sleep(0.05)
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     wrapped = _Connection(conn)
