@@ -22,6 +22,7 @@ from typing import Any
 
 from twohelixes import auth, config, credits, router, store
 from twohelixes.notebooks import ipynb_export, marimo_export
+from twohelixes.routes import teams
 
 log = logging.getLogger("twohelixes.routes.notebooks")
 
@@ -61,10 +62,10 @@ def _dataset_path_for(identity: Any, row: dict[str, Any]) -> str:
 def export_notebook(ctx: router.Context) -> router.Result:
     """Export a saved chart as a runnable marimo notebook."""
     identity = auth.require(ctx)
-    row = store.one(
-        "SELECT * FROM charts WHERE id = ? AND user_id = ?",
-        (ctx.params["chart_id"], identity.user_id),
-    )
+    chart_id = ctx.params["chart_id"]
+    if not teams.can_read(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT * FROM charts WHERE id = ?", (chart_id,))
     if row is None:
         return router.error(404, "not_found")
 
@@ -216,10 +217,9 @@ def start_session(ctx: router.Context) -> router.Result:
     if not source:
         chart_id = str(body.get("chart_id") or "")
         if chart_id:
-            row = store.one(
-                "SELECT * FROM charts WHERE id = ? AND user_id = ?",
-                (chart_id, identity.user_id),
-            )
+            if not teams.can_read(identity.user_id, "chart", chart_id):
+                return router.error(404, "chart_not_found")
+            row = store.one("SELECT * FROM charts WHERE id = ?", (chart_id,))
             if row is None:
                 return router.error(404, "chart_not_found")
             data = store.row_to_dict(row) or {}

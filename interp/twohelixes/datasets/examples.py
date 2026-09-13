@@ -597,7 +597,141 @@ EXAMPLES: list[Example] = [
         found="diagnosis and mean_radius.",
         reason="One measure across two groups: bars.",
     ),
+    # -- shipping_crisis ---------------------------------------------------
+    Example(
+        dataset="shipping_crisis",
+        slug="transits-through-the-closure",
+        question="line chart of daily ship transits with the closure marked",
+        headline="Daily transits through the strait, pre-war to crisis",
+        finding=(
+            "Transits run flat until the closure, then step down and stay "
+            "down: the period_type column marks the day the regime changes."
+        ),
+        transform=(
+            'df["date"] = pd.to_datetime(df["date"])\n'
+            'result = df.groupby(["date", "period_type"], as_index=False)'
+            '["daily_ship_transits"].sum()'
+        ),
+        config={
+            "chart_type": "line",
+            "x": "date",
+            "y": "daily_ship_transits",
+            "color": "period_type",
+            "title": "Ship transits per day through the strait",
+            "x_title": "Date",
+            "y_title": "Transits per day",
+        },
+        found="date, period_type and daily_ship_transits.",
+        reason=(
+            "A daily series with a step change reads best as a line; the "
+            "period split names the two regimes instead of a guessed annotation."
+        ),
+    ),
+    # -- ecommerce_funnel --------------------------------------------------
+    Example(
+        dataset="ecommerce_funnel",
+        slug="funnel-by-stage",
+        question="funnel chart of visitors signups trials and purchases",
+        headline="The acquisition funnel, all channels",
+        finding=(
+            "Each stage is a share of the one before it, so the drop from "
+            "signup to trial dominates the drop the revenue team talks about."
+        ),
+        transform=(
+            'stages = ["visitors", "signups", "trials_started", "purchases"]\n'
+            'result = df[stages].sum().rename("people").reset_index()\n'
+            'result = result.rename(columns={"index": "stage"})\n'
+            'result["stage"] = pd.Categorical(\n'
+            '    result["stage"], categories=stages, ordered=True\n'
+            ').astype(str)'
+        ),
+        config={
+            # The dataset pages draw with the native SVG exporter, which does
+            # not render funnels; horizontal bars keep the stage order and
+            # show exactly where the width collapses. Ask the app for a
+            # funnel and the pipeline will pick one.
+            "chart_type": "hbar",
+            "x": "stage",
+            "y": "people",
+            "title": "Visitors to purchases",
+            "x_title": "Stage",
+            "y_title": "People",
+        },
+        found="the four stage columns, summed across cohorts.",
+        reason=(
+            "Stages of one funnel only ever shrink; drawn as ranked bars in "
+            "funnel order so the collapse from visitors to purchases is the "
+            "whole shape."
+        ),
+    ),
+    # -- energy_transition -------------------------------------------------
+    Example(
+        dataset="energy_transition",
+        slug="renewable-share-by-region-over-time",
+        question="line chart of renewable share by year and region",
+        headline="Renewable share of electricity by region",
+        finding=(
+            "Every region's share climbs, but from different bases: the lines "
+            "do not cross so much as converge on different ceilings."
+        ),
+        transform=(
+            'result = df.groupby(["year", "region"], as_index=False)'
+            '["renewable_share_pct"].mean()'
+        ),
+        config={
+            "chart_type": "line",
+            "x": "year",
+            "y": "renewable_share_pct",
+            "color": "region",
+            "title": "Renewable share by region",
+            "x_title": "Year",
+            "y_title": "Renewable share (%)",
+        },
+        found="year, region and renewable_share_pct.",
+        reason=(
+            "One measure over time per region: a line each. An area would sum "
+            "shares that do not add to a meaningful total."
+        ),
+    ),
+    # -- city_air_quality --------------------------------------------------
+    Example(
+        dataset="city_air_quality",
+        slug="worst-cities-by-pm25",
+        question="which cities have the worst PM2.5?",
+        headline="Average PM2.5 by city",
+        finding=(
+            "Averaged over the year, the ranking is stable - the worst city is "
+            "not the one with the worst single month."
+        ),
+        transform=(
+            'result = df.groupby("city", as_index=False)["pm25_ug_m3"].mean()'
+            '.sort_values("pm25_ug_m3", ascending=False)'
+        ),
+        config={
+            "chart_type": "bar",
+            "x": "city",
+            "y": "pm25_ug_m3",
+            "title": "Mean PM2.5 by city",
+            "x_title": "City",
+            "y_title": "PM2.5 (ug/m3)",
+        },
+        found="city and pm25_ug_m3, averaged over the months present.",
+        reason=(
+            "Named categories ranked on one measure: horizontal bars if the "
+            "names are long, vertical here - twelve cities fit either way."
+        ),
+    ),
 ]
+
+EXAMPLES.append(Example(
+    dataset="queensland_schools", slug="schools-by-sector",
+    question="How many schools are in each sector?", headline="School directory entries by sector (2020)",
+    finding="Counts describe the historical directory. Achievement data is not included.",
+    transform="result = df.groupby('sector', dropna=False).size().reset_index(name='schools')",
+    config={"chart_type": "bar", "x": "sector", "y": "schools"},
+    found="Queensland Department of Education school directory, May 2020, CC BY 4.0.",
+    reason="Bars compare counts across sectors; missing NAPLAN scores are not treated as zero.",
+))
 
 BY_DATASET: dict[str, list[Example]] = {}
 for _example in EXAMPLES:

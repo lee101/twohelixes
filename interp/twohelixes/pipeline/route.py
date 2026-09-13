@@ -85,7 +85,7 @@ FAMILIES: dict[str, tuple[str, ...]] = {
         "largest", "smallest", "highest", "lowest", "rank", "ranked",
         "compare", "comparison", "by category", "by channel", "by region",
         "by source", "by topic", "by priority", "by plan", "by species",
-        "by segment", "by type",
+        "by segment", "by type", "by sector", "each sector",
     ),
 }
 

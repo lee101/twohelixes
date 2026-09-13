@@ -19,6 +19,7 @@ from twohelixes import auth, router, store
 from twohelixes.routes import builder as builder_routes
 from twohelixes.routes import dashboards as dashboard_routes
 from twohelixes.routes import query as query_routes
+from twohelixes.routes import teams
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +106,49 @@ def test_attaching_someone_elses_chart_is_a_404():
         _ctx(mine, body={"chart_id": _chart(theirs)}, params={"dashboard_id": board})
     )
     assert result.status == 404
+
+
+def test_team_dashboard_is_listed_readable_and_role_gated():
+    owner = _identity("team-board-owner@test.local")
+    member = _identity("team-board-member@test.local")
+    viewer = _identity("team-board-viewer@test.local")
+    board = _dashboard(owner, "Shared board")
+    team_id = store.new_id()
+    now = time.time()
+    teams.ensure_schema()
+    store.execute(
+        "INSERT INTO teams (id, name, owner_id, created_at) VALUES (?, 'Analysts', ?, ?)",
+        (team_id, owner.user_id, now),
+    )
+    for identity, role in ((owner, "owner"), (member, "member"), (viewer, "viewer")):
+        store.execute(
+            "INSERT INTO team_members (team_id, user_id, role, added_at) VALUES (?, ?, ?, ?)",
+            (team_id, identity.user_id, role, now),
+        )
+    store.execute(
+        "INSERT INTO team_objects (team_id, kind, object_id, added_at) "
+        "VALUES (?, 'dashboard', ?, ?)",
+        (team_id, board, now),
+    )
+
+    listed = dashboard_routes.list_dashboards(_ctx(member)).body["dashboards"]
+    assert [(item["title"], item["can_edit"]) for item in listed if item["id"] == board] == [
+        ("Shared board", True)
+    ]
+    assert dashboard_routes.get_dashboard(
+        _ctx(member, params={"dashboard_id": board})
+    ).body["can_edit"] is True
+    assert dashboard_routes.update_dashboard(
+        _ctx(member, body={"title": "Team edit"}, params={"dashboard_id": board})
+    ).status == 200
+
+    viewer_payload = dashboard_routes.get_dashboard(
+        _ctx(viewer, params={"dashboard_id": board})
+    ).body
+    assert viewer_payload["can_edit"] is False
+    assert dashboard_routes.update_dashboard(
+        _ctx(viewer, body={"title": "Nope"}, params={"dashboard_id": board})
+    ).status == 404
 
 
 def test_a_board_stops_at_the_tile_limit():

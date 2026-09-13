@@ -115,7 +115,7 @@ def _indices(values: list[Any], target: int) -> list[int] | None:
 
     # Stride: cheap, order-preserving, and keeps the endpoints. It loses
     # narrow spikes, which is exactly what LTTB is for - hence the note.
-    step = max(1, len(y) // target)
+    step = max(1, (len(y) + target - 1) // target)
     keep = list(range(0, len(y), step))
     if keep[-1] != len(y) - 1:
         keep.append(len(y) - 1)

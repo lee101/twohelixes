@@ -299,8 +299,21 @@ class Client:
     def post(self, path: str, body: Any = None, **kwargs: Any) -> Any:
         return self.request("POST", path, body, **kwargs)
 
-    def sign_in(self, email: str) -> dict[str, Any]:
-        status, body = self.post("/v1/auth/signin", {"email": email})
+    def sign_in(self, email: str, password: str = "test-password-123") -> dict[str, Any]:
+        status, body = self.post(
+            "/v1/auth/signup", {"email": email, "password": password}
+        )
+        if status == 409:
+            status, body = self.post(
+                "/v1/auth/signin", {"email": email, "password": password}
+            )
+        assert status == 200, body
+        return body
+
+    def sign_up(self, email: str, password: str = "test-password-123") -> dict[str, Any]:
+        status, body = self.post(
+            "/v1/auth/signup", {"email": email, "password": password}
+        )
         assert status == 200, body
         return body
 

@@ -53,7 +53,7 @@ const result = await Bun.build({
   // collides with app.css under a flat [name].[ext] scheme.
   naming: {
     entry: "[name].[ext]",
-    chunk: "chunk-[hash].[ext]",
+    chunk: "chunk-[name]-[hash].[ext]",
     asset: "asset-[name]-[hash].[ext]",
   },
   define: {
@@ -82,7 +82,7 @@ const workerResult = await Bun.build({
   sourcemap: watch ? "inline" : "none",
   naming: {
     entry: "[name].[ext]",
-    chunk: "reshape-chunk-[hash].[ext]",
+    chunk: "reshape-chunk-[name]-[hash].[ext]",
     asset: "reshape-asset-[name]-[hash].[ext]",
   },
 });
@@ -118,7 +118,35 @@ try {
   await mkdir(outdir + "art", { recursive: true });
   for (const name of names) await copyFile(assets + name, outdir + "art/" + name);
   console.log(`copied ${names.length} art files`);
-} catch { /* no assets is fine */ }
+} catch {
+  /* art is optional locally */
+}
+
+// Map topojson + ISO tables live under public/ so a wipe of outdir does not
+// forget them. Choropleth/scattergeo need these files at a stable URL.
+async function copyTree(src: string, dest: string): Promise<number> {
+  let count = 0;
+  await mkdir(dest, { recursive: true });
+  for (const entry of await readdir(src, { withFileTypes: true })) {
+    const from = `${src}/${entry.name}`;
+    const to = `${dest}/${entry.name}`;
+    if (entry.isDirectory()) {
+      count += await copyTree(from, to);
+    } else {
+      await copyFile(from, to);
+      count += 1;
+    }
+  }
+  return count;
+}
+
+const publicDir = new URL("./public/", import.meta.url).pathname;
+try {
+  const n = await copyTree(publicDir.replace(/\/$/, ""), outdir.replace(/\/$/, ""));
+  console.log(`copied ${n} public geo/static files`);
+} catch (error) {
+  console.warn("public geo assets missing:", error);
+}
 
 const outputs = [...cssResult.outputs, ...result.outputs, ...workerResult.outputs];
 const total = outputs.reduce((n, o) => n + o.size, 0);

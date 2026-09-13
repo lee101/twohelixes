@@ -6,15 +6,16 @@ import base64
 
 from twohelixes import auth, router, store
 from twohelixes.charts import helix, palette, svg
+from twohelixes.routes import teams
 
 
 @router.get("/v1/chart/{chart_id}/export")
 def export_chart(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
-    row = store.one(
-        "SELECT spec, title FROM charts WHERE id = ? AND user_id = ?",
-        (ctx.params["chart_id"], identity.user_id),
-    )
+    chart_id = ctx.params["chart_id"]
+    if not teams.can_read(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT spec, title FROM charts WHERE id = ?", (chart_id,))
     if row is None:
         return router.error(404, "not_found")
 

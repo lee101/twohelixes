@@ -123,6 +123,9 @@ export class TraceView {
         this.appendDelta(data.stage, String(data.text ?? ""));
         break;
       case "warning":
+        if (data?.detail) {
+          console.warn("twoHelixes:", String(data.text ?? ""), String(data.detail));
+        }
         this.addLine(String(data.text ?? ""), "trace-warn");
         break;
       case "partial":

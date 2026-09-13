@@ -491,7 +491,8 @@ def append_int(mut out: List[UInt8], value: Int):
     var neg = v < 0
     if neg:
         v = -v
-    var digits = InlineArray[UInt8, 24](fill=0)
+    var digits = List[UInt8](capacity=24)
+    digits.resize(24, 0)
     var n = 0
     while v > 0:
         digits[n] = UInt8(48 + (v % 10))
@@ -522,6 +523,7 @@ def serialize(resp: Response, mut out: List[UInt8], head_only: Bool):
     else:
         append_str(out, "Connection: close\r\n")
     append_str(out, "\r\n")
-    if not head_only:
-        for i in range(len(resp.body)):
-            out.append(resp.body[i])
+    if not head_only and len(resp.body) > 0:
+        # One memcpy, not one bounds-checked append per body byte. Healthz is
+        # tiny; static/API bodies are not, and both share this path.
+        out.extend(Span(resp.body))

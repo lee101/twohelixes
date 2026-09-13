@@ -10,6 +10,7 @@ from typing import Any
 from twohelixes import auth, config, llm, ratelimit, router, store
 from twohelixes.charts import defaults as chart_defaults
 from twohelixes.pipeline import orchestrator
+from twohelixes.routes import teams
 
 log = logging.getLogger("twohelixes.routes.dashboards")
 
@@ -221,12 +222,22 @@ def build_analytics_event_dashboard(site_id: str, event_name: str) -> str | None
 @router.get("/v1/dashboards")
 def list_dashboards(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    teams.ensure_schema()
     rows = store.query(
-        "SELECT id, title, is_public, share_token, created_at, updated_at "
-        "FROM dashboards WHERE user_id = ? ORDER BY updated_at DESC",
-        (identity.user_id,),
+        "SELECT DISTINCT d.id, d.title, d.is_public, d.share_token, "
+        "d.created_at, d.updated_at, m.role "
+        "FROM dashboards d "
+        "LEFT JOIN team_objects o ON o.kind = 'dashboard' AND o.object_id = d.id "
+        "LEFT JOIN team_members m ON m.team_id = o.team_id AND m.user_id = ? "
+        "WHERE d.user_id = ? OR m.user_id = ? ORDER BY d.updated_at DESC",
+        (identity.user_id, identity.user_id, identity.user_id),
     )
-    return router.json_result({"dashboards": store.rows_to_dicts(rows)})
+    dashboards = store.rows_to_dicts(rows)
+    for dashboard in dashboards:
+        dashboard["can_edit"] = teams.can_write(
+            identity.user_id, "dashboard", dashboard["id"]
+        )
+    return router.json_result({"dashboards": dashboards})
 
 
 @router.post("/v1/dashboards")
@@ -246,13 +257,15 @@ def create_dashboard(ctx: router.Context) -> router.Result:
 @router.get("/v1/dashboards/{dashboard_id}")
 def get_dashboard(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
-    row = store.one(
-        "SELECT * FROM dashboards WHERE id = ? AND user_id = ?",
-        (ctx.params["dashboard_id"], identity.user_id),
-    )
+    dashboard_id = ctx.params["dashboard_id"]
+    if not teams.can_read(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT * FROM dashboards WHERE id = ?", (dashboard_id,))
     if row is None:
         return router.error(404, "not_found")
-    return router.json_result(_dashboard_payload(row, mode=ctx.q("mode", "light") or "light"))
+    payload = _dashboard_payload(row, mode=ctx.q("mode", "light") or "light")
+    payload["can_edit"] = teams.can_write(identity.user_id, "dashboard", dashboard_id)
+    return router.json_result(payload)
 
 
 def _dashboard_payload(row: Any, mode: str = "light") -> dict[str, Any]:
@@ -324,11 +337,7 @@ def update_dashboard(ctx: router.Context) -> router.Result:
     """Save title and tile layout - the manual dashboard-building path."""
     identity = auth.require(ctx)
     dashboard_id = ctx.params["dashboard_id"]
-    row = store.one(
-        "SELECT id FROM dashboards WHERE id = ? AND user_id = ?",
-        (dashboard_id, identity.user_id),
-    )
-    if row is None:
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
         return router.error(404, "not_found")
 
     layout = ctx.field("layout")
@@ -371,16 +380,21 @@ def add_chart(ctx: router.Context) -> router.Result:
     width = int(ctx.field("w") or 1)
     width = 1 if width < 1 else 3 if width > 3 else width
 
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
+    if not teams.can_write(identity.user_id, "chart", chart_id):
+        return router.error(404, "no_such_chart")
+
     with store.transaction() as conn:
         row = conn.execute(
-            "SELECT layout FROM dashboards WHERE id = ? AND user_id = ?",
-            (dashboard_id, identity.user_id),
+            "SELECT layout FROM dashboards WHERE id = ?",
+            (dashboard_id,),
         ).fetchone()
         if row is None:
             return router.error(404, "not_found")
         chart = conn.execute(
-            "SELECT id FROM charts WHERE id = ? AND user_id = ?",
-            (chart_id, identity.user_id),
+            "SELECT id FROM charts WHERE id = ?",
+            (chart_id,),
         ).fetchone()
         if chart is None:
             return router.error(404, "no_such_chart")
@@ -414,10 +428,13 @@ def remove_chart(ctx: router.Context) -> router.Result:
     dashboard_id = ctx.params["dashboard_id"]
     chart_id = ctx.params["chart_id"]
 
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
+
     with store.transaction() as conn:
         row = conn.execute(
-            "SELECT layout FROM dashboards WHERE id = ? AND user_id = ?",
-            (dashboard_id, identity.user_id),
+            "SELECT layout FROM dashboards WHERE id = ?",
+            (dashboard_id,),
         ).fetchone()
         if row is None:
             return router.error(404, "not_found")
@@ -428,9 +445,8 @@ def remove_chart(ctx: router.Context) -> router.Result:
             if tile.get("chart_id") != chart_id
         ]
         conn.execute(
-            "UPDATE charts SET dashboard_id = NULL WHERE id = ? AND user_id = ?"
-            " AND dashboard_id = ?",
-            (chart_id, identity.user_id, dashboard_id),
+            "UPDATE charts SET dashboard_id = NULL WHERE id = ? AND dashboard_id = ?",
+            (chart_id, dashboard_id),
         )
         conn.execute(
             "UPDATE dashboards SET layout = ?, updated_at = ? WHERE id = ?",
@@ -443,9 +459,13 @@ def remove_chart(ctx: router.Context) -> router.Result:
 @router.delete("/v1/dashboards/{dashboard_id}")
 def delete_dashboard(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    dashboard_id = ctx.params["dashboard_id"]
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
+    store.execute("DELETE FROM dashboards WHERE id = ?", (dashboard_id,))
     store.execute(
-        "DELETE FROM dashboards WHERE id = ? AND user_id = ?",
-        (ctx.params["dashboard_id"], identity.user_id),
+        "DELETE FROM team_objects WHERE kind = 'dashboard' AND object_id = ?",
+        (dashboard_id,),
     )
     store.execute(
         "UPDATE charts SET dashboard_id = NULL WHERE dashboard_id = ?",
@@ -460,11 +480,14 @@ def share_dashboard(ctx: router.Context) -> router.Result:
     dashboard_id = ctx.params["dashboard_id"]
     enable = bool(ctx.field("public", True))
 
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
+
     token = secrets.token_urlsafe(18) if enable else None
     store.execute(
         "UPDATE dashboards SET is_public = ?, share_token = ?, updated_at = ? "
-        "WHERE id = ? AND user_id = ?",
-        (1 if enable else 0, token, time.time(), dashboard_id, identity.user_id),
+        "WHERE id = ?",
+        (1 if enable else 0, token, time.time(), dashboard_id),
     )
     return router.json_result(
         {
@@ -513,13 +536,22 @@ def build_dashboard(stream: Any, ctx: router.Context) -> None:
     from twohelixes.routes import query as query_routes
 
     try:
-        frames = query_routes._load_frames(identity, ctx)
+        frames = query_routes._load_frames(identity, ctx, goal)
+    except query_routes.DataSelectionError as exc:
+        stream.emit("error", {"code": exc.code, "message": str(exc)})
+        return
     except Exception as exc:  # noqa: BLE001
         stream.emit("error", {"code": "data_unavailable", "message": str(exc)})
         return
 
     if not frames:
-        stream.emit("error", {"code": "no_data"})
+        stream.emit(
+            "error",
+            {
+                "code": "no_datasets",
+                "message": "You don’t have any datasets available. Upload a file or attach a sample.",
+            },
+        )
         return
 
     from twohelixes.interpreter import tools
@@ -635,9 +667,11 @@ def refresh_dashboard(ctx: router.Context) -> router.Result:
     """Re-run every tile's query against current data."""
     identity = auth.require(ctx)
     dashboard_id = ctx.params["dashboard_id"]
+    if not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "not_found")
     charts = store.query(
-        "SELECT * FROM charts WHERE dashboard_id = ? AND user_id = ?",
-        (dashboard_id, identity.user_id),
+        "SELECT * FROM charts WHERE dashboard_id = ?",
+        (dashboard_id,),
     )
     if not charts:
         return router.error(404, "no_charts")

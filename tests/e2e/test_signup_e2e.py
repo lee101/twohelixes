@@ -66,16 +66,33 @@ def test_the_header_cta_signs_you_in_without_a_navigation(browser: Any, server: 
     page.wait_for_selector("#signin-overlay[open]", timeout=10000)
     assert page.url.endswith("/pricing"), "the sheet must not cost a navigation"
 
+    # Start free opens on signup; the toggle must still reach login.
+    assert page.locator("#signin-title").inner_text() in ("Create account", "Sign in")
+    if page.locator("#signin-title").inner_text() == "Sign in":
+        page.click('[data-auth-mode="signup"]')
+        page.wait_for_function(
+            "() => document.querySelector('#signin-title').textContent === 'Create account'",
+            timeout=5000,
+        )
+
     email = _email()
     page.fill("#signin-email", email)
+    page.fill("#signin-password", "test-password-123")
     page.click("#signin-form button[type=submit]")
 
     # The app is where "Start free" goes once there is an account.
     page.wait_for_url("**/app", timeout=20000)
     assert page.errors == [], page.errors
 
-    cookies = {c["name"] for c in page.context.cookies()}
+    cookies = {c["name"]: c for c in page.context.cookies()}
     assert "th_session" in cookies, cookies
+    # Persistent, not a tab/session cookie. Browsers may cap the server's
+    # ten-year Max-Age, but it must survive a browser restart and is renewed
+    # whenever /v1/me resumes the app.
+    assert cookies["th_session"]["expires"] > time.time() + 300 * 86400
+
+    user_data = page.evaluate("() => JSON.parse(localStorage.getItem('th_user') || 'null')")
+    assert user_data and user_data["email"] == email
 
 
 def test_a_bad_email_is_reported_in_the_sheet_not_swallowed(browser: Any, server: Any):
@@ -84,6 +101,7 @@ def test_a_bad_email_is_reported_in_the_sheet_not_swallowed(browser: Any, server
     page.wait_for_selector("#signin-overlay[open]", timeout=10000)
 
     page.fill("#signin-email", "not-an-email")
+    page.fill("#signin-password", "test-password-123")
     page.click("#signin-form button[type=submit]")
 
     page.wait_for_function(
@@ -159,6 +177,7 @@ def test_buying_while_signed_out_asks_for_an_account_first(browser: Any, server:
     assert page.url.endswith("/pricing")
 
     page.fill("#signin-email", _email())
+    page.fill("#signin-password", "test-password-123")
     page.click("#signin-form button[type=submit]")
 
     # Sign-in resolves the pending purchase, so checkout opens on its own.
@@ -175,6 +194,7 @@ def test_the_checkout_sheet_never_sits_on_a_blank_modal(browser: Any, server: An
     page.click("#header-cta")
     page.wait_for_selector("#signin-overlay[open]", timeout=10000)
     page.fill("#signin-email", _email())
+    page.fill("#signin-password", "test-password-123")
     page.click("#signin-form button[type=submit]")
     page.wait_for_url("**/app", timeout=20000)
 

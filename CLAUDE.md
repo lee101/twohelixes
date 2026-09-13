@@ -25,6 +25,21 @@ Streaming work runs on Python threads that release the GIL on network I/O; the
 loop drains their buffered SSE frames each tick, so a 60-second pipeline run
 never blocks another connection.
 
+## SQL and Sheets workbenches
+
+The app exposes two lazy-loaded working surfaces alongside Ask and Dashboards:
+
+- SQL uses the connector registry through `/v1/sql/*`. Execution is read-only,
+  row-bounded, recorded in query history, and separate from AI generation so a
+  person can edit and rerun generated SQL without another model call.
+- Sheets persists compact workbook JSON through `/v1/sheets/*`. Its agent may
+  only propose validated `setCells` and `addChart` operations; the browser
+  previews those operations and requires explicit approval before applying
+  them. Model output never replaces a workbook directly.
+
+Both views are split out of the initial JavaScript bundle. Sheets loads Plotly
+only after a workbook actually contains a chart.
+
 ## Hard-won facts
 
 **Nothing on the request path may touch a byte at a time.** `slice_str` built

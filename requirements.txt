@@ -52,3 +52,4 @@ marimo
 # --- on-device embeddings (no torch; numpy only) --------------------------
 # Installed from the sibling checkout by scripts/setup-venvs.sh:
 #   uv pip install -e ../pybed
+wordcloud

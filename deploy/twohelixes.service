@@ -13,6 +13,9 @@ Environment=TWOHELIXES_PORT=7474
 Environment=TWOHELIXES_WORKERS=4
 Environment=TWOHELIXES_PROD=1
 Environment=TWOHELIXES_SITE_URL=https://twohelixes.com
+Environment=TWOHELIXES_STATIC_URL=https://twohelixesstatic.twohelixes.com
+Environment=R2_PUBLIC_HOST=twohelixesstatic.twohelixes.com
+Environment=R2_BUCKET=twohelixesstatic
 Environment=TWOHELIXES_INTERP=/nvme0n1-disk/code/twohelixes/interp
 # The AOT Mojo binary embeds CPython 3.12, so it needs the 3.12 venv this
 # repo builds for itself (scripts/setup-venvs.sh). Pointing this at the 3.13

@@ -13,6 +13,7 @@ comptime SOCK_NONBLOCK: Int32 = 0o4000
 comptime SOL_SOCKET: Int32 = 1
 comptime SO_REUSEADDR: Int32 = 2
 comptime SO_REUSEPORT: Int32 = 15
+comptime SO_KEEPALIVE: Int32 = 9
 comptime IPPROTO_TCP: Int32 = 6
 comptime TCP_NODELAY: Int32 = 1
 

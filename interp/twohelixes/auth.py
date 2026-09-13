@@ -26,7 +26,17 @@ from twohelixes import config, store
 log = logging.getLogger("twohelixes.auth")
 
 COOKIE_NAME = "th_session"
-SESSION_TTL = 60 * 60 * 24 * 30  # 30 days
+# A remembered browser remains signed in until explicit sign-out for any
+# practical lifetime of the device. This is still bounded so a forgotten
+# cookie is not literally immortal, and server-side revocation always wins.
+SESSION_TTL = 60 * 60 * 24 * 365 * 10
+
+PASSWORD_MIN_LENGTH = 6
+PASSWORD_MAX_LENGTH = 1024
+RESET_TTL_SECONDS = 60 * 60
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
 
 
 @dataclass
@@ -62,6 +72,7 @@ class Identity:
     def to_public(self) -> dict[str, Any]:
         return {
             "signed_in": self.signed_in,
+            "id": self.user_id or "",
             "email": self.email,
             "plan": self.plan,
             "api_credits": self.api_credits,
@@ -78,6 +89,7 @@ class Identity:
             ),
             "paid": self.paid,
             "is_admin": self.is_admin,
+            "is_subscribed": self.plan in config.PAID_PLANS,
         }
 
 
@@ -85,6 +97,37 @@ def _sign(value: str) -> str:
     return hmac.new(
         config.session_secret().encode(), value.encode(), hashlib.sha256
     ).hexdigest()[:32]
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with stdlib scrypt and a unique random salt."""
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise ValueError("password_too_short")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        raise ValueError("password_too_long")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P
+    )
+    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    """Verify a stored password without leaking comparison timing."""
+    try:
+        algorithm, n, r, p, salt, wanted = encoded.split("$", 5)
+        if algorithm != "scrypt":
+            return False
+        actual = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=bytes.fromhex(salt),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+        )
+        return hmac.compare_digest(actual, bytes.fromhex(wanted))
+    except (ValueError, TypeError, MemoryError):
+        return False
 
 
 def mint_session(user_id: str, user_agent: str = "") -> str:
@@ -101,6 +144,49 @@ def mint_session(user_id: str, user_agent: str = "") -> str:
 
 def revoke_session(token: str) -> None:
     store.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def revoke_user_sessions(user_id: str) -> None:
+    store.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+
+def mint_reset_token(user_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    store.touch_user(
+        user_id,
+        password_reset_token=token,
+        password_reset_expires=time.time() + RESET_TTL_SECONDS,
+    )
+    return token
+
+
+def user_for_reset_token(token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+    row = store.one(
+        "SELECT * FROM users WHERE password_reset_token = ? "
+        "AND password_reset_expires > ?",
+        (token, time.time()),
+    )
+    return store.row_to_dict(row)
+
+
+def clear_reset_token(user_id: str) -> None:
+    store.touch_user(user_id, password_reset_token=None, password_reset_expires=None)
+
+
+def renew_session(token: str) -> bool:
+    """Extend a live session; called when the browser resumes the app."""
+    now = time.time()
+    row = store.one(
+        "SELECT token FROM sessions WHERE token = ? AND expires_at > ?", (token, now)
+    )
+    if row is None:
+        return False
+    store.execute(
+        "UPDATE sessions SET expires_at = ? WHERE token = ?", (now + SESSION_TTL, token)
+    )
+    return True
 
 
 def cookie_header(token: str, secure: bool = True) -> str:

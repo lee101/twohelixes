@@ -184,7 +184,7 @@ def test_country_map_builds_choropleth_with_our_sequential_scale():
     )
     trace = figure["data"][0]
     assert trace["type"] == "choropleth"
-    assert trace["locationmode"] == "country names"
+    assert trace["locationmode"] == "ISO-3"
     assert [stop[1] for stop in trace["colorscale"]] == palette.sequential(9)
     assert defaults.audit(defaults.apply(figure, chart_type="map")) == []
 

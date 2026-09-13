@@ -172,14 +172,36 @@ def _mode(ctx: router.Context) -> str:
 # --------------------------------------------------------------------------
 
 
+def _clear_button(query: str) -> str:
+    if not query:
+        return ""
+    return '<a class="btn btn-ghost" href="/datasets">Clear</a>'
+
+
+def _result_note(query: str, shown: list[Any], total: int) -> str:
+    if not query:
+        return ""
+    if not shown:
+        return (
+            '<p class="sub">Nothing matched. Try a broader word, or '
+            '<a href="/datasets">browse everything</a>.</p>'
+        )
+    return (
+        f'<p class="sub">{len(shown)} of {total} datasets match '
+        f"&ldquo;{html.escape(query)}&rdquo;.</p>"
+    )
+
+
 @router.get("/datasets")
 def index(ctx: router.Context) -> router.Result:
     mode = _mode(ctx)
     site = config.site_url().rstrip("/")
+    query = (ctx.q("q") or "").strip()
+    shown = samples.search(query) if query else samples.SAMPLES
 
     cards = ""
     items: list[dict[str, Any]] = []
-    for position, sample in enumerate(samples.SAMPLES, start=1):
+    for position, sample in enumerate(shown, start=1):
         entry = _catalogue_entry(sample.key) or {}
         lead = examples.lead(sample.key)
         markup = ""
@@ -237,18 +259,25 @@ def index(ctx: router.Context) -> router.Result:
 <section class="page-head"><div class="shell">
   <p class="kicker">Datasets</p>
   <h1>Datasets you can ask questions of right now</h1>
-  <p class="sub">Nine datasets are loaded into every account &mdash; four open
-  reference sets everyone benchmarks against, five generated to have the shapes
-  real business data has: seasonality, a long tail, a funnel, a cohort. Every
-  chart below was drawn by the live pipeline from the real rows, and every one
-  shows its reasoning.</p>
+  <p class="sub">{len(samples.SAMPLES)} datasets are loaded into every account
+  &mdash; four open reference sets everyone benchmarks against, generated sets
+  with the shapes real business data has (seasonality, a long tail, a funnel,
+  a cohort), and curated business timelines shared with our sibling project.
+  Every chart below was drawn by the live pipeline from the real rows, and
+  every one shows its reasoning.</p>
+  <form method="get" action="/datasets" class="ds-search" role="search">
+    <input type="search" name="q" value="{_esc(query)}"
+      placeholder="Search the datasets &mdash; funnel, pollution, iris&hellip;"
+      aria-label="Search the datasets">
+    <button class="btn btn-ghost" type="submit">Search</button>
+    {_clear_button(query)}
+  </form>
 </div></section>
 
 <section><div class="shell">
+  {_result_note(query, shown, len(samples.SAMPLES))}
   <div class="ds-grid">{cards}</div>
 </div></section>
-
-<section class="band"><div class="shell">
   <h2>Or point it at your own data</h2>
   <p class="lead-in">A spreadsheet, a warehouse, an API. The datasets here are
   a starting point, not the product &mdash; the pipeline that drew these charts
@@ -260,10 +289,11 @@ def index(ctx: router.Context) -> router.Result:
 </main>"""
 
     return router.html(
-        _page(
+            _page(
             "Sample datasets with worked example charts — twoHelixes",
-            "Nine sample datasets with schemas, rows, and example charts drawn "
-            "by the live pipeline with their reasoning traces attached.",
+            f"{len(samples.SAMPLES)} sample datasets with schemas, rows, and "
+            "example charts drawn by the live pipeline with their reasoning "
+            "traces attached.",
             body,
             "/datasets",
             head=_jsonld(structured),
@@ -323,6 +353,7 @@ def detail(ctx: router.Context) -> router.Result:
     <a class="btn btn-ghost" href="/v1/samples/{_esc(key)}/download.csv">
       Download CSV</a>
     {notebook_link}
+    {'<a class="btn btn-ghost" href="/schools">Explore school map</a>' if key == 'queensland_schools' else ''}
   </div>
   <div class="ds-meta" style="margin-top:var(--s4)">
     <span>{len(frame):,} rows</span><span>{len(frame.columns)} columns</span>
@@ -554,9 +585,15 @@ def _dataset_jsonld(sample: Any, frame: Any, site: str) -> dict[str, Any]:
 
 @router.get("/v1/samples/catalog")
 def list_datasets(ctx: router.Context) -> router.Result:
-    """Everything the pages show, as JSON. Public: the data is public."""
-    entries = [e for e in (_catalogue_entry(s.key) for s in samples.SAMPLES) if e]
-    return router.json_result({"datasets": entries})
+    """Everything the pages show, as JSON. Public: the data is public.
+
+    `?q=` applies the same ranking the /datasets page uses, so a client can
+    mirror the site's search without reimplementing it.
+    """
+    query = (ctx.q("q") or "").strip()
+    shown = samples.search(query) if query else samples.SAMPLES
+    entries = [e for e in (_catalogue_entry(s.key) for s in shown) if e]
+    return router.json_result({"datasets": entries, "total": len(samples.SAMPLES)})
 
 
 @router.get("/v1/samples/{key}/dataset")

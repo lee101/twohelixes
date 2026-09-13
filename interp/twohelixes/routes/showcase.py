@@ -48,8 +48,11 @@ def _revenue_trend() -> tuple[dict[str, Any], str]:
         {"type": "scatter", "mode": "lines", "x": months, "y": east,
          "name": "East", "_series_index": 2},
     ]
+    crossover = next(i for i, (e, s) in enumerate(zip(east, south)) if e > s)
+    from datetime import date
+    crossover_month = date.fromisoformat(months[crossover]).strftime("%B")
     layout = {
-        "title": {"text": "East overtook South in August"},
+        "title": {"text": f"East overtook South in {crossover_month}"},
         "xaxis": {"title": {"text": "Month"}},
         "yaxis": {"title": {"text": "Revenue ($k)"}},
     }
@@ -66,7 +69,7 @@ def _channel_mix() -> tuple[dict[str, Any], str]:
         "name": "Signups", "_series_index": 0,
     }]
     layout = {
-        "title": {"text": "Organic drives 34% of signups"},
+        "title": {"text": f"Organic drives {values[0] / sum(values):.0%} of signups"},
         "xaxis": {"title": {"text": "Channel"}},
         "yaxis": {"title": {"text": "Signups"}},
     }
@@ -85,7 +88,7 @@ def _latency_distribution() -> tuple[dict[str, Any], str]:
         "name": "Requests", "_series_index": 0,
     }]
     layout = {
-        "title": {"text": "94% of requests finish under 200 ms"},
+        "title": {"text": f"{sum(counts[:3]) / sum(counts):.0%} of requests finish under 200 ms"},
         "xaxis": {"title": {"text": "Latency (ms)"}},
         "yaxis": {"title": {"text": "Requests"}},
     }
@@ -102,7 +105,7 @@ def _cohort_retention() -> tuple[dict[str, Any], str]:
         "x": weeks, "y": retained, "name": "Retained", "_series_index": 0,
     }]
     layout = {
-        "title": {"text": "Retention settles at 45% after week 8"},
+        "title": {"text": f"Retention reaches {retained[-1]}% at week {len(retained)}"},
         "xaxis": {"title": {"text": "Week"}},
         "yaxis": {"title": {"text": "Retained (%)"}},
     }

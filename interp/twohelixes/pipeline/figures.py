@@ -40,13 +40,24 @@ VALID_TYPES = {
     "waterfall",
     "stat",
     "table",
+    "wordcloud",
 }
 
 # Above this many categories a pie is unreadable; above the bar limit the tail
 # is folded into "Other".
 # Forms with a dedicated builder in charts/forms.py.
 FORM_BUILDERS = frozenset(
-    {"sankey", "treemap", "sunburst", "bubble", "map", "funnel", "waterfall", "box"}
+    {
+        "sankey",
+        "treemap",
+        "sunburst",
+        "bubble",
+        "map",
+        "funnel",
+        "waterfall",
+        "box",
+        "wordcloud",
+    }
 )
 
 MAX_PIE_SLICES = 6
@@ -125,6 +136,15 @@ def validate_config(
                 "using a bar chart.",
             )
 
+    if chart_type == "wordcloud":
+        from twohelixes.charts import forms
+
+        blob = forms._text_blob(frame, out.get("x") or out.get("text"))
+        if len(forms._word_frequencies(blob)) < 3:
+            chart_type = "bar"
+            out["chart_type"] = chart_type
+            _note(emit, "Not enough words for a word cloud; using bars.")
+
     if chart_type == "bar" and _has_long_labels(frame, out.get("x")):
         out["chart_type"] = "hbar"
         out["orientation"] = "h"
@@ -201,10 +221,16 @@ def _refresh_stale_labels(config: dict, frame, emit=None) -> None:
     # hand ("Revenue by segment leader") is left alone.
     if x and str(x) in columns:
         _, _, tail = title.lower().partition(" by ")
-        if tail and tail.strip() != tools.humanise(str(x)).lower():
+        # A series grouping is just as real as the x grouping: a time series
+        # coloured by region can correctly be titled "Revenue by Region".
+        groupings = {tools.humanise(str(x)).lower()}
+        color = config.get("color")
+        if color and str(color) in columns:
+            groupings.add(tools.humanise(str(color)).lower())
+        if tail and tail.strip() not in groupings:
             named = any(tools.humanise(c).lower() == tail.strip() for c in columns)
             if named:
-                _note(emit, f"Title said 'by {tail.strip()}', which is not the x axis.")
+                _note(emit, f"Title said 'by {tail.strip()}', which is not a plotted grouping.")
                 config["title"] = _auto_title(config, frame, measure)
                 return
 
@@ -292,6 +318,31 @@ def heuristic_config(frame: Any, question: str) -> dict[str, Any]:
             "title": "Locations",
             "y_title": tools.humanise(measure) if measure else "",
         }
+    if geographic and geographic["kind"] == "countries":
+        measure = measures[0] if measures else None
+        return {
+            "chart_type": "map",
+            "x": geographic["country"],
+            "y": measure,
+            "agg": "sum" if measure else "count",
+            "title": "By country",
+            "y_title": tools.humanise(measure) if measure else "Count",
+        }
+
+    asked = (question or "").casefold()
+    if any(token in asked for token in ("word cloud", "wordcloud", "common words")):
+        text_cols = [
+            column
+            for column in frame.columns
+            if getattr(frame[column].dtype, "kind", "") in "OUS"
+        ]
+        if text_cols:
+            return {
+                "chart_type": "wordcloud",
+                "x": text_cols[0],
+                "y": None,
+                "title": f"Words in {tools.humanise(text_cols[0])}",
+            }
 
     if not measures:
         # Nothing to measure: show the distribution of the first category.

@@ -23,25 +23,39 @@ DOTENV_CANDIDATES = (
 )
 
 # --------------------------------------------------------------------------
-# Models. Luna is the default route for interactive chart work: it is the
-# cheap tier and every interactive query is rate limited anyway. Sol is the
-# escalation used by long-running agents, which are paid-only.
+# Models. Muse Spark 1.3 is available through the OpenPaths Meta route.
+# Keep bounded decisions cheap and independent from the reasoning model.
+# Contributor has different data-use terms: never select it implicitly.
 # --------------------------------------------------------------------------
-MODEL_DEFAULT = "gpt-5.6-luna"
-MODEL_ESCALATE = "gpt-5.6-terra"
-MODEL_DEEP = "gpt-5.6-sol"
-MODEL_FAST = "auto-easy-task"
+MODEL_PRIMARY = os.environ.get("TWOHELIXES_MODEL") or "muse-spark-1.3"
+MODEL_DEFAULT = MODEL_PRIMARY
+MODEL_FAST = os.environ.get("TWOHELIXES_MODEL_FAST") or "deepseek-v4-flash"
 
 # The small, structured, well-bounded decisions - which chart form, which
-# columns on which channels, what a one-line edit meant - run here. It is
-# 0.14/0.28 per million against luna's 1.00/6.00, so on a query whose other
-# calls write pandas and plan joins this is most of the saving and none of the
-# risk: the output is a small JSON object that `figures.validate_config`
+# columns on which channels, what a one-line edit meant - run on the fast
+# tier. The output is a small JSON object that `figures.validate_config`
 # repairs against the real frame anyway, so a worse answer degrades into the
 # heuristic rather than into a wrong chart.
-MODEL_MINI = "deepseek-v4-flash"
+MODEL_MINI = os.environ.get("TWOHELIXES_MODEL_MINI") or MODEL_FAST
+
+# Escalation uses frontier reasoning, and stays distinct from MINI:
+# "cheaper must not mean sometimes no answer" - a declined mini call
+# escalates here before anything degrades.
+MODEL_ESCALATE = os.environ.get("TWOHELIXES_MODEL_DEEP") or MODEL_PRIMARY
+MODEL_DEEP = MODEL_ESCALATE
+
+if any("contributor" in model.lower() for model in (
+    MODEL_PRIMARY, MODEL_FAST, MODEL_MINI, MODEL_DEEP,
+)) and os.environ.get("TWOHELIXES_ALLOW_CONTRIBUTOR", "").lower() not in {"1", "true", "yes"}:
+    raise ValueError(
+        "Contributor routes may use submitted data for model improvement. "
+        "Review provider terms and explicitly set TWOHELIXES_ALLOW_CONTRIBUTOR=1."
+    )
 
 DEFAULT_BASE_URL = "https://openpaths.io/v1"
+# Sibling openpaths process on this box (`../openpaths`, port 8092).
+LOCAL_OPENPATHS_BASE_URL = "http://127.0.0.1:8092/v1"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # --------------------------------------------------------------------------
 # What things cost us, measured rather than guessed.
@@ -68,6 +82,7 @@ MEASURED_COST_CENTS = {
     "chat_query_p90": 2.1,
     "dashboard_build": 4.0,
     "sql_generate": 0.3,
+    "sheet_agent": 0.3,
     "deep_research_minute": 4.0,
 }
 
@@ -76,6 +91,7 @@ CREDIT_COST = {
     "chat_query": 4,
     "dashboard_build": 12,
     "sql_generate": 1,
+    "sheet_agent": 1,
     "sql_autocomplete": 0,
     "structure_import": 1,
     "deep_research": 60,
@@ -123,7 +139,7 @@ MACHINE_INCLUDED_CLASS = "cpu-small"
 # --------------------------------------------------------------------------
 PLAN_ALLOWANCES = {
     "free": {
-        "chat_query": 15,
+        "chat_query": 10,
         "deep_research": 0,
         "notebook_minute": 0,
         "price_cents": 0,
@@ -156,7 +172,7 @@ PAID_PLANS = ("plus", "pro", "team")
 
 # The free allowance renews. A lifetime allowance of three meant a new user hit
 # a wall on their first afternoon and never came back; a monthly one costs us
-# about fifteen cents a head and gives the habit somewhere to form.
+# about ten cents a head and gives the habit somewhere to form.
 FREE_PERIOD_DAYS = 30
 
 # --------------------------------------------------------------------------
@@ -247,18 +263,44 @@ def get_int(name: str, default: int) -> int:
         return default
 
 
+def _normalize_openpaths_base(raw: str) -> str:
+    base = raw.rstrip("/")
+    if base in ("https://api.openpaths.io/v1", "https://api.openpaths.io"):
+        return DEFAULT_BASE_URL
+    if base == "https://openpaths.io":
+        return DEFAULT_BASE_URL
+    if not base.endswith("/v1"):
+        return f"{base}/v1"
+    return base
+
+
 def llm_credentials() -> tuple[str | None, str | None, str]:
     """Return (api_key, base_url, provider).
 
     The key and the base URL must be chosen together. Sending an OpenAI key to
     the OpenPaths gateway earns a 401, which the circuit breaker then reads as
     a gateway outage - so pair them here rather than resolving each separately.
+
+    In DEV, prefer the sibling `../openpaths` process: the shared dotenv files
+    point `OPENPATHS_BASE_URL` at production, which is fine for openpaths's
+    own clients but not for a local twohelixes that needs the models that
+    process actually serves.
     """
     gateway_key = get("OPENPATHS_API_KEY")
     if gateway_key:
-        base = get("OPENPATHS_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL
-        if base.rstrip("/") == "https://api.openpaths.io/v1":
-            base = DEFAULT_BASE_URL
+        explicit = get("TWOHELIXES_OPENPATHS_BASE_URL")
+        if explicit:
+            base = _normalize_openpaths_base(explicit)
+        elif is_dev() and (REPO_ROOT.parent / "openpaths").is_dir():
+            probe = (
+                get("OPENPATHS_PROBE_BASE_URL")
+                or LOCAL_OPENPATHS_BASE_URL
+            )
+            base = _normalize_openpaths_base(probe)
+        else:
+            base = _normalize_openpaths_base(
+                get("OPENPATHS_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL
+            )
         return gateway_key, base, "openpaths"
 
     openai_key = get("OPENAI_API_KEY")
@@ -268,6 +310,13 @@ def llm_credentials() -> tuple[str | None, str | None, str]:
         return openai_key, get("OPENAI_BASE_URL"), "openai"
 
     return None, None, "none"
+
+
+def deepseek_credentials() -> tuple[str | None, str]:
+    """Direct credentials for DeepSeek models, independent of the gateway."""
+    return get("DEEPSEEK_API_KEY"), (
+        get("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL) or DEEPSEEK_BASE_URL
+    )
 
 
 def openpaths_key() -> str | None:
@@ -310,3 +359,25 @@ def is_dev() -> bool:
 
 def site_url() -> str:
     return get("TWOHELIXES_SITE_URL") or "https://twohelixes.com"
+
+
+def static_url() -> str:
+    """Where the browser loads `/static` assets from.
+
+    Locally that is same-origin `/static` (nginx or the app). In production it
+    is the R2 public host `deploy.sh` publishes to, so a deploy that only
+    uploads assets is enough for the next page load - the Mojo workers never
+    have to serve binary bodies.
+    """
+    if is_dev():
+        return "/static"
+    explicit = (
+        get("TWOHELIXES_STATIC_URL")
+        or get("R2_PUBLIC_HOST")
+        or "twohelixesstatic.twohelixes.com"
+    ).rstrip("/")
+    if explicit.startswith("http://") or explicit.startswith("https://"):
+        return explicit
+    if explicit.startswith("/"):
+        return explicit
+    return f"https://{explicit}"

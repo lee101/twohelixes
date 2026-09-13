@@ -82,6 +82,10 @@ def handle_fast(buf: Span[UInt8, _], req: Request, mut resp: Response) -> Bool:
     if req.method == METHOD_OPTIONS:
         resp.status = 204
         resp.add_header("Allow", "GET, POST, PUT, DELETE, OPTIONS")
+        resp.add_header("Access-Control-Allow-Origin", "*")
+        resp.add_header("Access-Control-Allow-Headers", "content-type")
+        resp.add_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+        resp.add_header("Access-Control-Max-Age", "86400")
         return True
 
     return False

@@ -44,7 +44,9 @@ def test_ga4_supported_surface_matches_reporting_rules() -> None:
     token = uuid.uuid4().hex[:10]
     domain = f"parity-{token}.example"
     status, _signed_in = request(
-        "POST", "/v1/auth/signin", {"email": f"parity-{token}@test.local"}
+        "POST",
+        "/v1/auth/signup",
+        {"email": f"parity-{token}@test.local", "password": "test-password-123"},
     )
     assert status == 200
     status, site = request(

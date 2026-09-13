@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -293,10 +294,40 @@ def _energy() -> Any:
             })
     return pd.DataFrame(rows)
 
+# --------------------------------------------------------------------------
+# Curated business data, shared with the sibling askfelix project. These are
+# checked-in CSVs rather than generated frames: the shapes (a crisis timeline
+# with annotations, a marketing funnel, an energy transition) carry real
+# structure that a generator would only imitate.
+# --------------------------------------------------------------------------
 
-# --------------------------------------------------------------------------
-# Catalogue
-# --------------------------------------------------------------------------
+
+def _csv_frame(filename: str) -> Any:
+    import pandas as pd
+
+    path = config.REPO_ROOT / "assets" / "data" / "samples" / filename
+    return pd.read_csv(path)
+
+
+def _hormuz() -> Any:
+    return _csv_frame("hormuz-shipping-crisis.csv")
+
+
+def _ecommerce_funnel() -> Any:
+    return _csv_frame("ecommerce-funnel.csv")
+
+
+def _energy_transition() -> Any:
+    return _csv_frame("energy-transition.csv")
+
+
+def _city_air_quality() -> Any:
+    return _csv_frame("city-air-quality.csv")
+
+
+ # --------------------------------------------------------------------------
+ # Catalogue
+ # --------------------------------------------------------------------------
 
 SAMPLES: list[Sample] = [
     Sample(
@@ -405,9 +436,111 @@ SAMPLES: list[Sample] = [
             "compare mean radius by diagnosis",
         ],
     ),
+    Sample(
+        key="shipping_crisis",
+        name="Hormuz shipping crisis",
+        description="Daily transits, oil and LNG flows, insurance and carrier "
+        "status through a strait closure, with the key events annotated.",
+        build=_hormuz,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "line chart of daily ship transits with the closure marked",
+            "scatter Brent crude vs transit share of pre-war average",
+            "area chart of cumulative vessels attacked over the timeline",
+            "which carriers kept operating during the crisis?",
+        ],
+    ),
+    Sample(
+        key="ecommerce_funnel",
+        name="E-commerce funnel",
+        description="Visitors to purchases by channel and device, with signup "
+        "rates, trial conversion and order values.",
+        build=_ecommerce_funnel,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "funnel chart of visitors signups trials and purchases",
+            "sankey from channel to device to purchases weighted by revenue",
+            "boxplot of average order value by device",
+        ],
+    ),
+    Sample(
+        key="energy_transition",
+        name="Energy transition",
+        description="Renewable share, generation mix, storage and grid "
+        "emissions by region and year.",
+        build=_energy_transition,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "line chart of renewable share by year and region",
+            "stacked area of solar wind and hydro generation over time",
+            "scatter renewable share vs grid emissions coloured by region",
+        ],
+    ),
+    Sample(
+        key="city_air_quality",
+        name="City air quality",
+        description="Monthly PM2.5, NO2 and ozone for world cities with "
+        "temperature and respiratory visits.",
+        build=_city_air_quality,
+        source="Curated (shared with askfelix)",
+        questions=[
+            "which cities have the worst PM2.5?",
+            "does air pollution track respiratory visits?",
+            "seasonality of ozone by climate zone",
+        ],
+    ),
 ]
 
+from twohelixes.datasets.schools import frame as _schools_frame
+
+SAMPLES.append(Sample(
+    key="queensland_schools", name="Queensland school directory (May 2020)",
+    description="Historical school addresses, sectors and coordinates. NAPLAN results are unavailable; achievement scores and ranks are missing, not zero. Explore the map at /schools.",
+    build=_schools_frame, source="Queensland Department of Education · CC BY 4.0",
+    questions=["How many schools are in each sector?", "Show school locations on a map", "Which schools are in Brisbane?"],
+))
+
 BY_KEY = {s.key: s for s in SAMPLES}
+_SEARCH_WEIGHTS = (
+    (lambda s: s.name.lower(), 4),
+    (lambda s: s.key.replace("_", " ").lower(), 3),
+    (lambda s: s.description.lower(), 2),
+    (lambda s: s.source.lower(), 1),
+    (lambda s: " ".join(s.questions).lower(), 1),
+)
+
+
+def search(query: str) -> list[Sample]:
+    """Rank the catalogue against a free-text query.
+
+    Lexical, not clever: every word has to appear somewhere, and the score is
+    where it appeared. The catalogue is small enough that this beats pulling
+    in an embedding model for the marketing pages, and a wrong-but-fast
+    ordering costs one extra glance, not one wrong chart.
+    """
+    words = query.lower().split()
+    if not words:
+        return list(SAMPLES)
+    scored: list[tuple[int, Sample]] = []
+    for sample in SAMPLES:
+        total = 0
+        fields = [
+            (get_text(sample), weight)
+            for get_text, weight in _SEARCH_WEIGHTS
+        ]
+        for word in words:
+            best = 0
+            for text, weight in fields:
+                if word in text:
+                    best = max(best, weight)
+            if best == 0:
+                total = 0
+                break
+            total += best
+        if total:
+            scored.append((total, sample))
+    scored.sort(key=lambda pair: -pair[0])
+    return [sample for _, sample in scored]
 
 
 def storage_dir() -> Path:
@@ -429,7 +562,16 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
         try:
             if force or not target.exists():
                 frame = sample.build()
-                frame.to_parquet(target, index=False)
+                # Multiple first visitors can warm samples concurrently. Only
+                # publish a complete file; otherwise another worker can read
+                # the zero-byte file while Parquet is still being written.
+                with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".parquet", delete=False) as temp:
+                    pending = Path(temp.name)
+                try:
+                    frame.to_parquet(pending, index=False)
+                    pending.replace(target)
+                finally:
+                    pending.unlink(missing_ok=True)
                 log.info("built sample %s: %d rows", sample.key, len(frame))
             else:
                 import pandas as pd

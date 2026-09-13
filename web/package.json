@@ -18,6 +18,7 @@
     "@codemirror/view": "^6.41.0",
     "@duckdb/duckdb-wasm": "^1.33.1-dev57.0",
     "apache-arrow": "^17.0.0",
+    "buffer": "^6.0.3",
     "plotly.js": "^3.7.0",
     "plotly.js-basic-dist-min": "^3.2.0"
   },

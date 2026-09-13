@@ -24,6 +24,7 @@ import choropleth from "plotly.js/lib/choropleth";
 import funnel from "plotly.js/lib/funnel";
 import heatmap from "plotly.js/lib/heatmap";
 import histogram from "plotly.js/lib/histogram";
+import image from "plotly.js/lib/image";
 import indicator from "plotly.js/lib/indicator";
 import pie from "plotly.js/lib/pie";
 import sankey from "plotly.js/lib/sankey";
@@ -42,6 +43,7 @@ Plotly.register([
   funnel,
   heatmap,
   histogram,
+  image,
   indicator,
   pie,
   sankey,
@@ -63,6 +65,7 @@ export const SUPPORTED_TRACES = new Set([
   "funnel",
   "heatmap",
   "histogram",
+  "image",
   "indicator",
   "pie",
   "sankey",

@@ -58,7 +58,10 @@ _state: dict[str, Any] = {"tried": False, "model": None}
 # Column names repeat across every question about a dataset, so their vectors
 # are worth keeping. Bounded because a user's own columns are unbounded.
 _vectors: dict[str, Any] = {}
-MAX_CACHED_VECTORS = 4096
+# Enough for the coarse schema index plus the fine shortlist of a 500-dataset
+# workspace. 10k float32 × 512 is ~20 MB; bounded, and cheaper than rebuilding
+# the same schema embeddings on every question.
+MAX_CACHED_VECTORS = 10_000
 
 
 def model_dir() -> str:
@@ -155,3 +158,31 @@ def resolve(question: str, candidates: list[str]) -> tuple[str, float] | None:
         return None
 
     return top_name, top_score
+
+
+def rank_documents(
+    question: str, documents: dict[str, list[str]]
+) -> list[tuple[str, float]]:
+    """Rank named documents by their closest embedded schema phrase.
+
+    Dataset discovery deliberately embeds several short phrases (name,
+    description, and individual columns) instead of one giant schema string.
+    Mean-pooling a 60-column schema dilutes the two words the question is
+    actually about; max-over-fields preserves that signal while still loading
+    only metadata, not the dataset itself.
+    """
+    if not question or not documents or not available():
+        return []
+    query = embed(question)
+    if query is None:
+        return []
+
+    ranked: list[tuple[str, float]] = []
+    for key, phrases in documents.items():
+        scores = [
+            float(query @ vector)
+            for phrase in phrases
+            if phrase and (vector := embed(str(phrase))) is not None
+        ]
+        ranked.append((str(key), max(scores) if scores else -1.0))
+    return sorted(ranked, key=lambda item: (-item[1], item[0]))

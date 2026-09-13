@@ -131,7 +131,25 @@ def dispatch(
                 "detail": traceback.format_exc(limit=3).splitlines()[-1],
             }
         )
-        return ("500", "application/json; charset=utf-8", "", payload)
+        extra = ""
+        if path == "/v1/collect":
+            # Collection is intentionally cross-origin. If its handler fails,
+            # omitting CORS here makes the browser hide the useful HTTP 500
+            # behind a misleading "blocked by CORS" message.
+            try:
+                request_headers = json.loads(headers) if headers else {}
+            except (TypeError, ValueError):
+                request_headers = {}
+            origin = str(request_headers.get("origin") or "*")
+            extra = json.dumps(
+                {
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Headers": "content-type",
+                    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+                    "Vary": "Origin",
+                }
+            )
+        return ("500", "application/json; charset=utf-8", extra, payload)
 
 
 def stream_start(path: str, query: str, body: str, headers: str) -> str:

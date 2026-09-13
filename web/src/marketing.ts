@@ -9,19 +9,36 @@
  * are still ordinary links to /app and the hosted checkout still works.
  */
 
-interface Me {
-  signed_in: boolean;
-  email: string;
-  paid: boolean;
-  api_credits: number;
-  free_queries_left: number;
-}
+import { clearUser, persistUser, type UserData } from "./user";
+
+interface Me extends UserData {}
+
+type AuthMode = "login" | "signup" | "forgot";
 
 let cachedMe: Me | null = null;
 let stripePromise: Promise<any> | null = null;
+let authMode: AuthMode = "login";
 
 const $ = <T extends HTMLElement>(sel: string): T | null =>
   document.querySelector<T>(sel);
+
+// Fixed placement labels only: never collect the visitor's question or data.
+// The existing tracker respects privacy signals and handles beacon delivery.
+document.addEventListener("click", (event) => {
+  const link = (event.target as Element | null)?.closest<HTMLElement>("[data-conversion]");
+  if (!link) return;
+  try {
+    const tracker = (window as Window & {
+      th?: (command: string, name: string, props: Record<string, string>) => void;
+    }).th;
+    tracker?.("track", "landing_cta_clicked", {
+      placement: link.dataset.conversion || "unknown",
+      variant: "helix-intelligence-v1",
+    });
+  } catch {
+    // Analytics must never interfere with navigation or sign-up.
+  }
+});
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, {
@@ -42,10 +59,38 @@ async function me(force = false): Promise<Me> {
   if (cachedMe && !force) return cachedMe;
   try {
     cachedMe = await api<Me>("/v1/me");
+    if (cachedMe.signed_in) persistUser(cachedMe);
+    else clearUser();
   } catch {
-    cachedMe = { signed_in: false, email: "", paid: false, api_credits: 0, free_queries_left: 0 };
+    cachedMe = {
+      signed_in: false,
+      id: "",
+      email: "",
+      plan: "anon",
+      paid: false,
+      api_credits: 0,
+      free_queries_left: 0,
+      free_queries_total: 0,
+      free_queries_used: 0,
+      is_admin: false,
+      is_subscribed: false,
+    };
+    clearUser();
   }
   return cachedMe;
+}
+
+// --------------------------------------------------------------------------
+// Shared stylesheet — marketing inlines the server design system; this file
+// carries the pastel token overrides so marketing and the app stay aligned.
+// --------------------------------------------------------------------------
+
+function ensureSharedStyles(): void {
+  if (document.querySelector('link[href="/static/styles.css"]')) return;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = "/static/styles.css";
+  document.head.append(link);
 }
 
 // --------------------------------------------------------------------------
@@ -87,48 +132,159 @@ function closeAll(): void {
 // --------------------------------------------------------------------------
 
 /** Resolves when the user is signed in, or rejects if they dismiss it. */
-function requireSignIn(reason = ""): Promise<Me> {
+function requireSignIn(reason = "", mode: AuthMode = "login"): Promise<Me> {
   return new Promise((resolve, reject) => {
     const note = $("#signin-reason");
-    if (note) note.textContent = reason;
+    if (note && reason) note.textContent = reason;
 
     pendingAuth = { resolve, reject };
+    setAuthMode(mode);
     open("signin-overlay");
   });
 }
 
 let pendingAuth: { resolve: (m: Me) => void; reject: (e: Error) => void } | null = null;
 
+function setAuthMode(mode: AuthMode): void {
+  authMode = mode;
+  const overlay = $("#signin-overlay");
+  const title = $("#signin-title");
+  const reason = $("#signin-reason");
+  const submit = $<HTMLButtonElement>("#signin-submit");
+  const passwordField = document.querySelector<HTMLElement>("[data-auth-field=password]");
+  const password = $<HTMLInputElement>("#signin-password");
+  const switchNote = $("#signin-switch");
+  overlay?.setAttribute("data-mode", mode);
+
+  if (mode === "signup") {
+    if (title) title.textContent = "Create account";
+    if (reason)
+      reason.textContent = `No card — ${overlay?.dataset.freeCharts || "10"} free charts a month, sample data already loaded.`;
+    if (submit) submit.textContent = "Create account";
+    if (passwordField) passwordField.hidden = false;
+    if (password) {
+      password.required = true;
+      password.autocomplete = "new-password";
+    }
+    if (switchNote) {
+      switchNote.innerHTML =
+        'Already have an account? <a href="#" data-auth-mode="login">Sign in</a>';
+    }
+  } else if (mode === "forgot") {
+    if (title) title.textContent = "Forgot password";
+    if (reason) {
+      reason.textContent =
+        "Enter your email and we will send a reset link if an account exists.";
+    }
+    if (submit) submit.textContent = "Send reset link";
+    if (passwordField) passwordField.hidden = true;
+    if (password) password.required = false;
+    if (switchNote) {
+      switchNote.innerHTML =
+        '<a href="#" data-auth-mode="login">Back to sign in</a>';
+    }
+  } else {
+    if (title) title.textContent = "Sign in";
+    if (reason) {
+      reason.textContent =
+        "Sign in to keep your dashboards and collaborate with your team.";
+    }
+    if (submit) submit.textContent = "Sign in";
+    if (passwordField) passwordField.hidden = false;
+    if (password) {
+      password.required = true;
+      password.autocomplete = "current-password";
+    }
+    if (switchNote) {
+      switchNote.innerHTML =
+        '<a href="#" data-auth-mode="forgot">Forgot password?</a> · New here? ' +
+        '<a href="#" data-auth-mode="signup">Create an account</a>';
+    }
+  }
+}
+
 function wireSignIn(): void {
   const form = $<HTMLFormElement>("#signin-form");
   if (!form) return;
 
+  document.addEventListener("click", (event) => {
+    const link = (event.target as HTMLElement).closest<HTMLElement>("[data-auth-mode]");
+    if (!link) return;
+    event.preventDefault();
+    const mode = link.dataset.authMode as AuthMode;
+    if (mode === "login" || mode === "signup" || mode === "forgot") setAuthMode(mode);
+  });
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = form.querySelector<HTMLInputElement>("input[type=email]");
+    const password = form.querySelector<HTMLInputElement>("input[type=password]");
     const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
     const error = $("#signin-error");
     if (!input || !input.value.trim()) return;
+    if (authMode !== "forgot" && (!password || !password.value)) return;
 
     if (submit) {
       submit.disabled = true;
-      submit.textContent = "Signing in…";
+      submit.textContent =
+        authMode === "forgot"
+          ? "Sending…"
+          : authMode === "signup"
+            ? "Creating…"
+            : "Signing in…";
     }
     if (error) error.textContent = "";
 
     try {
-      const user = await api<Me>("/v1/auth/signin", { email: input.value.trim() });
+      if (authMode === "forgot") {
+        const result = await api<{ detail?: string; reset_url?: string }>(
+          "/v1/auth/forgot-password",
+          { email: input.value.trim() },
+        );
+        if (error) error.textContent = "";
+        const note = $("#signin-reason");
+        if (note) {
+          note.textContent =
+            result.detail ||
+            "If an account exists for that email, a reset link is on its way.";
+        }
+        if (result.reset_url) {
+          // Dev-only: SMTP unset. Keep the link usable without leaving the sheet.
+          if (note) {
+            note.innerHTML =
+              `${note.textContent} <a href="${result.reset_url}">Open reset link</a>`;
+          }
+        }
+        setAuthMode("login");
+        return;
+      }
+
+      const path = authMode === "signup" ? "/v1/auth/signup" : "/v1/auth/signin";
+      const user = await api<Me>(path, {
+        email: input.value.trim(),
+        password: password!.value,
+      });
       cachedMe = user;
+      persistUser(user);
       close("signin-overlay");
       refreshHeader(user);
       pendingAuth?.resolve(user);
       pendingAuth = null;
     } catch (exc) {
-      if (error) error.textContent = (exc as Error).message;
+      const message = (exc as Error).message;
+      if (error) error.textContent = message;
+      if (authMode === "signup" && /already exists/i.test(message)) {
+        setAuthMode("login");
+      }
     } finally {
       if (submit) {
         submit.disabled = false;
-        submit.textContent = "Continue";
+        submit.textContent =
+          authMode === "forgot"
+            ? "Send reset link"
+            : authMode === "signup"
+              ? "Create account"
+              : "Sign in";
       }
     }
   });
@@ -137,10 +293,19 @@ function wireSignIn(): void {
 /** Swap the header CTA once we know who this is. */
 function refreshHeader(user: Me): void {
   const cta = $<HTMLAnchorElement>("#header-cta");
-  if (!cta) return;
-  if (user.signed_in) {
-    cta.textContent = "Open app";
-    cta.href = "/app";
+  if (cta) {
+    if (user.signed_in) {
+      cta.textContent = "Account";
+      // setAttribute: bun's minify has turned `cta.href = ...` + a following
+      // statement into a bogus `cta.href(...)` call, which throws and aborts
+      // the rest of the sign-in success path (including navigation to /app).
+      cta.setAttribute("href", "/account");
+      cta.removeAttribute("data-action");
+    } else {
+      cta.textContent = "Start free";
+      cta.setAttribute("href", "/app");
+      cta.dataset.action = "signin";
+    }
   }
   const badge = $("#header-badge");
   if (badge && user.signed_in) {
@@ -148,7 +313,72 @@ function refreshHeader(user: Me): void {
       ? `${user.api_credits.toLocaleString()} credits`
       : `${user.free_queries_left} free left`;
     badge.hidden = false;
+  } else if (badge) {
+    badge.hidden = true;
   }
+}
+
+function wireAccount(): void {
+  const logout = $<HTMLButtonElement>("#account-logout");
+  if (logout) {
+    logout.addEventListener("click", async () => {
+      logout.disabled = true;
+      try {
+        await api("/v1/auth/signout", {});
+      } catch {
+        /* cookie clear is best-effort */
+      }
+      clearUser();
+      cachedMe = null;
+      window.location.href = "/";
+    });
+  }
+
+  const form = $<HTMLFormElement>("#reset-form");
+  if (!form) return;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const token = form.dataset.token || "";
+    const email = $<HTMLInputElement>("#reset-email");
+    const password = $<HTMLInputElement>("#reset-password");
+    const error = $("#reset-error");
+    const ok = $("#reset-ok");
+    const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
+    if (error) error.textContent = "";
+    if (ok) ok.hidden = true;
+    if (submit) submit.disabled = true;
+    try {
+      if (token) {
+        if (!password?.value) return;
+        const user = await api<Me>("/v1/auth/reset-password", {
+          token,
+          password: password.value,
+        });
+        persistUser(user);
+        window.location.href = "/account";
+        return;
+      }
+      if (!email?.value.trim()) return;
+      const result = await api<{ detail?: string; reset_url?: string }>(
+        "/v1/auth/forgot-password",
+        { email: email.value.trim() },
+      );
+      if (ok) {
+        ok.hidden = false;
+        ok.textContent =
+          result.detail ||
+          "If an account exists for that email, a reset link is on its way.";
+        if (result.reset_url) {
+          ok.innerHTML =
+            `${ok.textContent} <a href="${result.reset_url}">Open reset link</a>`;
+        }
+      }
+    } catch (exc) {
+      if (error) error.textContent = (exc as Error).message;
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -186,7 +416,7 @@ async function startCheckout(opts: {
   if (!user.signed_in) {
     // Buying requires an account, so collect it inline rather than bouncing
     // the buyer to a sign-in page and losing the purchase.
-    await requireSignIn("Sign in to continue — it takes a moment.");
+    await requireSignIn("Sign in to continue — it takes a moment.", "signup");
   }
 
   const key = document.body.dataset.stripeKey || "";
@@ -297,9 +527,12 @@ function wireCopy(): void {
 }
 
 function wire(): void {
+  ensureSharedStyles();
   wireSignIn();
+  wireAccount();
   wireTheme();
   wireCopy();
+  setAuthMode("login");
 
   document.addEventListener("click", (event) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action]");
@@ -309,8 +542,13 @@ function wire(): void {
     if (action === "signin") {
       event.preventDefault();
       void me().then((user) => {
-        if (user.signed_in) window.location.href = "/app";
-        else requireSignIn().then(() => (window.location.href = "/app")).catch(() => undefined);
+        if (user.signed_in) window.location.href = "/account";
+        else {
+          const mode = (target.dataset.authMode as AuthMode) || "signup";
+          requireSignIn("", mode === "login" ? "login" : "signup")
+            .then(() => (window.location.href = "/app"))
+            .catch(() => undefined);
+        }
       });
     } else if (action === "buy") {
       event.preventDefault();
