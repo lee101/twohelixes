@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS users (
     api_credits     INTEGER NOT NULL DEFAULT 0,
     free_queries_used INTEGER NOT NULL DEFAULT 0,
     is_admin        INTEGER NOT NULL DEFAULT 0,
+    password_hash   TEXT,
     -- The allowance period: when it started, and what has been used in it.
     -- Rolling rather than calendar, so subscribing on the 31st is not a
     -- shorter first month than subscribing on the 1st.
@@ -190,6 +191,16 @@ CREATE TABLE IF NOT EXISTS query_history (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS query_history_user ON query_history(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS sheets (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    workbook    TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sheets_user ON sheets(user_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id          TEXT PRIMARY KEY,
@@ -598,6 +609,9 @@ _ADDED_COLUMNS = (
     ("users", "plan_usage", "TEXT"),
     ("users", "stripe_subscription", "TEXT"),
     ("users", "credit_dust", "INTEGER"),
+    ("users", "password_hash", "TEXT"),
+    ("users", "password_reset_token", "TEXT"),
+    ("users", "password_reset_expires", "REAL"),
     ("jobs", "cost_micros", "INTEGER"),
     ("data_sources", "folder_id", "TEXT"),
     ("datasets", "folder_id", "TEXT"),

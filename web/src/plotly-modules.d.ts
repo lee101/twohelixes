@@ -50,6 +50,11 @@ declare module "plotly.js/lib/indicator" {
   export default trace;
 }
 
+declare module "plotly.js/lib/image" {
+  const trace: unknown;
+  export default trace;
+}
+
 declare module "plotly.js/lib/pie" {
   const trace: unknown;
   export default trace;

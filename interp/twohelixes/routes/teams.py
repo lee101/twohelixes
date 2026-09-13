@@ -30,6 +30,7 @@ ROLE_RANK = {role: index for index, role in enumerate(reversed(ROLES))}
 SHAREABLE = ("dashboard", "chart", "query", "dataset")
 TEAM_SHAREABLE = (*SHAREABLE, "analytics_site")
 MAX_TEAMS_PER_USER = 20
+TEAM_SEAT_LIMIT = int(config.PLAN_ALLOWANCES["team"]["seats"])
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
@@ -129,6 +130,11 @@ def team_of(kind: str, object_id: str) -> str | None:
     return str(row["team_id"]) if row else None
 
 
+def _dashboard_of_chart(chart_id: str) -> str | None:
+    row = store.one("SELECT dashboard_id FROM charts WHERE id = ?", (chart_id,))
+    return str(row["dashboard_id"]) if row and row["dashboard_id"] else None
+
+
 def role_in(team_id: str, user_id: str) -> str | None:
     ensure_schema()
     row = store.one(
@@ -148,6 +154,14 @@ def can_read(user_id: str | None, kind: str, object_id: str, token: str = "") ->
     team_id = team_of(kind, object_id)
     if user_id and team_id and role_in(team_id, user_id):
         return True
+
+    # A dashboard share includes its panes. Requiring every chart to be added
+    # to team_objects separately made a shared board render but made its graph
+    # endpoints (export, edit and notebook) mysteriously return 404.
+    if kind == "chart":
+        dashboard_id = _dashboard_of_chart(object_id)
+        if dashboard_id and can_read(user_id, "dashboard", dashboard_id, token=token):
+            return True
 
     if token:
         share = resolve_share(token)
@@ -170,6 +184,10 @@ def can_write(user_id: str | None, kind: str, object_id: str) -> bool:
         role = role_in(team_id, user_id)
         # A viewer is exactly that: membership alone is not write access.
         return bool(role and ROLE_RANK.get(role, 0) >= ROLE_RANK["member"])
+    if kind == "chart":
+        dashboard_id = _dashboard_of_chart(object_id)
+        if dashboard_id:
+            return can_write(user_id, "dashboard", dashboard_id)
     return False
 
 
@@ -269,6 +287,7 @@ def list_teams(ctx: router.Context) -> router.Result:
             "SELECT COUNT(*) AS n FROM team_members WHERE team_id = ?", (team["id"],)
         )
         team["members"] = int(count["n"]) if count else 0
+        team["seat_limit"] = TEAM_SEAT_LIMIT
     return router.json_result({"teams": teams})
 
 
@@ -360,6 +379,10 @@ def accept_invite(ctx: router.Context) -> router.Result:
         return router.error(404, "unknown_invite")
 
     invite_row = store.row_to_dict(row) or {}
+    if invite_row.get("accepted_by") == identity.user_id:
+        return router.json_result(
+            {"joined": True, "already": True, "team_id": invite_row["team_id"]}
+        )
     if invite_row.get("accepted_by"):
         return router.error(409, "already_used")
     expires = invite_row.get("expires_at")
@@ -375,15 +398,47 @@ def accept_invite(ctx: router.Context) -> router.Result:
     if role_in(invite_row["team_id"], identity.user_id):
         return router.json_result({"joined": True, "already": True})
 
-    store.execute(
-        "INSERT INTO team_members (team_id, user_id, role, added_at) VALUES (?, ?, ?, ?)",
-        (invite_row["team_id"], identity.user_id, invite_row["role"], time.time()),
-    )
-    store.execute(
-        "UPDATE team_invites SET accepted_by = ? WHERE token = ?",
-        (identity.user_id, ctx.params["token"]),
-    )
+    # Count and add in one write transaction.  Without that, simultaneous
+    # acceptances can both see the last seat and make a five-seat workspace
+    # larger than the plan the customer bought.
+    with store.transaction() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM team_members WHERE team_id = ?",
+            (invite_row["team_id"],),
+        ).fetchone()
+        if count and int(count["n"]) >= TEAM_SEAT_LIMIT:
+            return router.error(409, "team_seat_limit")
+        conn.execute(
+            "INSERT INTO team_members (team_id, user_id, role, added_at) "
+            "VALUES (?, ?, ?, ?)",
+            (invite_row["team_id"], identity.user_id, invite_row["role"], time.time()),
+        )
+        conn.execute(
+            "UPDATE team_invites SET accepted_by = ? WHERE token = ?",
+            (identity.user_id, ctx.params["token"]),
+        )
     return router.json_result({"joined": True, "team_id": invite_row["team_id"]})
+
+
+@router.get("/join/{token}")
+def follow_invite(ctx: router.Context) -> router.Result:
+    """Carry a browser invite into the app, including through sign-in."""
+    ensure_schema()
+    row = store.one(
+        "SELECT expires_at, accepted_by FROM team_invites WHERE token = ?",
+        (ctx.params["token"],),
+    )
+    if row is None or row["accepted_by"]:
+        return router.html("<h1>This team invite is no longer available.</h1>", status=404)
+    if row["expires_at"] and float(row["expires_at"]) < time.time():
+        return router.html("<h1>This team invite has expired.</h1>", status=410)
+    token = ctx.params["token"]
+    return router.Result(
+        status=302,
+        body="",
+        content_type="text/plain; charset=utf-8",
+        headers={"Location": f"/app?join={token}", "Cache-Control": "no-store"},
+    )
 
 
 @router.delete("/v1/teams/{team_id}/members/{user_id}")
@@ -510,7 +565,23 @@ def read_share(ctx: router.Context) -> router.Result:
     """Read a shared object. No account needed, read only."""
     share = resolve_share(ctx.params["token"])
     if share is None:
-        return router.error(404, "not_found")
+        # Compatibility for dashboard links minted before the unified shares
+        # table. The browser now uses this endpoint for both generations.
+        legacy = store.one(
+            "SELECT * FROM dashboards WHERE share_token = ? AND is_public = 1",
+            (ctx.params["token"],),
+        )
+        if legacy is None:
+            return router.error(404, "not_found")
+        from twohelixes.routes import dashboards as dashboard_routes
+
+        data = dashboard_routes._dashboard_payload(
+            legacy, mode=ctx.q("mode", "light") or "light"
+        )
+        data.pop("user_id", None)
+        for chart in data.get("charts", []):
+            chart.pop("query", None)
+        return router.json_result({"kind": "dashboard", "object": data})
 
     store.execute(
         "UPDATE shares SET views = views + 1 WHERE token = ?", (ctx.params["token"],)
@@ -526,7 +597,18 @@ def read_share(ctx: router.Context) -> router.Result:
     dataset_storage = data.get("storage") if kind == "dataset" else None
     # Never leak who owns it, what it was asked of, or which source it came
     # from: a share link grants the rendered object and nothing else.
-    for secret in ("user_id", "source_id", "query", "sql", "storage", "raw_storage"):
+    for secret in (
+        "user_id",
+        "source_id",
+        "query",
+        "sql",
+        "storage",
+        "raw_storage",
+        "rows_json",
+        "trace",
+        "cost_micros",
+        "dashboard_id",
+    ):
         data.pop(secret, None)
     for field in (
         "spec",

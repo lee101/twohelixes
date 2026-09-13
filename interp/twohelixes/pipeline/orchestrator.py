@@ -121,10 +121,20 @@ class Emitter:
         if self.stream is not None:
             self.stream.emit("delta", {"text": text, "stage": stage})
 
-    def warn(self, text: str) -> None:
+    def warn(self, text: str, *, detail: Any = None) -> None:
+        """Surface a short note to the UI; keep noisy detail in the server log.
+
+        Gateway 404s and circuit-open strings are useful to the person running
+        the server and useless (and alarming) next to a chart that still drew.
+        """
+        if detail is not None:
+            log.warning("%s (%s)", text, detail)
         self.trace.append({"warning": text, "at": time.time()})
         if self.stream is not None:
-            self.stream.emit("warning", {"text": text})
+            payload: dict[str, Any] = {"text": text}
+            if detail is not None:
+                payload["detail"] = str(detail)
+            self.stream.emit("warning", payload)
 
     def partial(self, name: str, payload: Any) -> None:
         if self.stream is not None:
@@ -371,9 +381,9 @@ def _search(
     model: str,
 ) -> dict[str, Any]:
     """Decide which datasets and columns the question needs."""
-    if len(frames) == 1 and not catalog:
+    if len(frames) == 1:
         only = next(iter(frames))
-        emit.thought(f"Using the only connected dataset: {only}.", "search")
+        emit.thought(f"Schema search selected {only}.", "search")
         return {"datasets": [only], "interpretation": question, "confidence": 1.0}
 
     profiles = {name: tools.profile(frame) for name, frame in frames.items()}
@@ -385,7 +395,7 @@ def _search(
     try:
         answer = llm.json_call(prompt, system=prompts.SEARCH_SYSTEM, model=model)
     except llm.LLMError as exc:
-        emit.warn(f"Discovery fell back to all datasets ({exc}).")
+        emit.warn("Using all connected datasets.", detail=exc)
         return {"datasets": list(frames), "interpretation": question, "confidence": 0.3}
 
     if answer.get("reasoning"):
@@ -466,7 +476,7 @@ def _transform(
         try:
             answer = llm.json_call(prompt, system=prompts.TRANSFORM_SYSTEM, model=model)
         except llm.LLMError as exc:
-            emit.warn(f"Transformation stage unavailable ({exc}); charting raw data.")
+            emit.warn("Charting without reshaping.", detail=exc)
             return frame, {"code": "", "fallback": "raw"}
 
         code = str(answer.get("code") or "")
@@ -516,6 +526,8 @@ def _small_call(prompt: str, system: str, model: str) -> dict[str, Any]:
     except llm.CircuitOpen:
         raise
     except llm.LLMError as exc:
+        if model == config.MODEL_MINI:
+            raise
         log.info("mini model declined (%s); escalating to %s", exc, model)
         return llm.json_call(prompt, system=system, model=model)
 
@@ -543,7 +555,7 @@ def _choose_chart(
     try:
         answer = _small_call(prompt, prompts.GRAPH_SYSTEM, model)
     except llm.LLMError as exc:
-        emit.warn(f"Chart selection fell back to heuristics ({exc}).")
+        emit.warn("Picked a chart from the data.", detail=exc)
         return figures.heuristic_config(frame, question)
 
     if answer.get("reasoning"):
@@ -569,7 +581,7 @@ def _edit(
     try:
         answer = _small_call(prompt, prompts.EDIT_SYSTEM, model)
     except llm.LLMError as exc:
-        emit.warn(f"Edit could not be interpreted ({exc}); keeping the chart.")
+        emit.warn("Kept the current chart.", detail=exc)
         return existing
 
     if answer.get("explanation"):

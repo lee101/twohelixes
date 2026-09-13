@@ -436,6 +436,27 @@ def _cases() -> dict[str, Case]:
             },
             expect=("choropleth", "scattergeo"),
         ),
+        "wordcloud": Case(
+            pd.DataFrame(
+                {
+                    "feedback": [
+                        "great product support and great onboarding experience",
+                        "support was slow but the product is great overall",
+                        "love the onboarding and product design details",
+                        "billing support needs work and documentation",
+                        "great design great product and solid support",
+                        "onboarding was clear and support answered quickly",
+                    ]
+                }
+            ),
+            {
+                "chart_type": "wordcloud",
+                "x": "feedback",
+                "title": "Words in customer feedback",
+            },
+            expect=("image", "scatter"),
+            min_marks=1,
+        ),
         "funnel": Case(
             funnel,
             {

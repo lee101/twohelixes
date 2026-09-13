@@ -699,6 +699,16 @@ EXAMPLES: list[Example] = [
     ),
 ]
 
+EXAMPLES.append(Example(
+    dataset="queensland_schools", slug="schools-by-sector",
+    question="How many schools are in each sector?", headline="School directory entries by sector (2020)",
+    finding="Counts describe the historical directory. Achievement data is not included.",
+    transform="result = df.groupby('sector', dropna=False).size().reset_index(name='schools')",
+    config={"chart_type": "bar", "x": "sector", "y": "schools"},
+    found="Queensland Department of Education school directory, May 2020, CC BY 4.0.",
+    reason="Bars compare counts across sectors; missing NAPLAN scores are not treated as zero.",
+))
+
 BY_DATASET: dict[str, list[Example]] = {}
 for _example in EXAMPLES:
     BY_DATASET.setdefault(_example.dataset, []).append(_example)

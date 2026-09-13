@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -296,6 +297,12 @@ def _energy() -> Any:
             })
     return pd.DataFrame(rows)
 
+# --------------------------------------------------------------------------
+# Curated business data, shared with the sibling askfelix project. These are
+# checked-in CSVs rather than generated frames: the shapes (a crisis timeline
+# with annotations, a marketing funnel, an energy transition) carry real
+# structure that a generator would only imitate.
+# --------------------------------------------------------------------------
 
 def _curated_csv(filename: str) -> Any:
     """Load a checked-in fixture shared with the askfelix sample catalogue."""
@@ -494,7 +501,56 @@ SAMPLES: list[Sample] = [
     ),
 ]
 
+from twohelixes.datasets.schools import frame as _schools_frame
+
+SAMPLES.append(Sample(
+    key="queensland_schools", name="Queensland school directory (May 2020)",
+    description="Historical school addresses, sectors and coordinates. NAPLAN results are unavailable; achievement scores and ranks are missing, not zero. Explore the map at /schools.",
+    build=_schools_frame, source="Queensland Department of Education · CC BY 4.0",
+    questions=["How many schools are in each sector?", "Show school locations on a map", "Which schools are in Brisbane?"],
+))
+
 BY_KEY = {s.key: s for s in SAMPLES}
+_SEARCH_WEIGHTS = (
+    (lambda s: s.name.lower(), 4),
+    (lambda s: s.key.replace("_", " ").lower(), 3),
+    (lambda s: s.description.lower(), 2),
+    (lambda s: s.source.lower(), 1),
+    (lambda s: " ".join(s.questions).lower(), 1),
+)
+
+
+def search(query: str) -> list[Sample]:
+    """Rank the catalogue against a free-text query.
+
+    Lexical, not clever: every word has to appear somewhere, and the score is
+    where it appeared. The catalogue is small enough that this beats pulling
+    in an embedding model for the marketing pages, and a wrong-but-fast
+    ordering costs one extra glance, not one wrong chart.
+    """
+    words = query.lower().split()
+    if not words:
+        return list(SAMPLES)
+    scored: list[tuple[int, Sample]] = []
+    for sample in SAMPLES:
+        total = 0
+        fields = [
+            (get_text(sample), weight)
+            for get_text, weight in _SEARCH_WEIGHTS
+        ]
+        for word in words:
+            best = 0
+            for text, weight in fields:
+                if word in text:
+                    best = max(best, weight)
+            if best == 0:
+                total = 0
+                break
+            total += best
+        if total:
+            scored.append((total, sample))
+    scored.sort(key=lambda pair: -pair[0])
+    return [sample for _, sample in scored]
 
 
 def storage_dir() -> Path:
@@ -507,6 +563,17 @@ def path_for(key: str) -> Path:
     return storage_dir() / f"{key}.parquet"
 
 
+def _publish_frame(frame: Any, target: Path) -> None:
+    # Readers must see either the old complete file or the new complete file.
+    with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".parquet", delete=False) as temp:
+        pending = Path(temp.name)
+    try:
+        frame.to_parquet(pending, index=False)
+        pending.replace(target)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
     """Build every sample to Parquet once. Returns a catalogue with real shapes."""
     catalogue: dict[str, dict[str, Any]] = {}
@@ -514,10 +581,13 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
     for sample in SAMPLES:
         target = path_for(sample.key)
         try:
-            shared_fixture = sample.source == "Curated (shared with askfelix)"
+            shared_fixture = sample.source == "Curated (shared with askfelix)" or sample.key == "queensland_schools"
             if force or not target.exists():
                 frame = sample.build()
-                frame.to_parquet(target, index=False)
+                # Multiple first visitors can warm samples concurrently. Only
+                # publish a complete file; otherwise another worker can read
+                # the zero-byte file while Parquet is still being written.
+                _publish_frame(frame, target)
                 log.info("built sample %s: %d rows", sample.key, len(frame))
             elif shared_fixture:
                 # Curated fixtures are checked in rather than generated. Read
@@ -528,7 +598,7 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
                 frame = sample.build()
                 cached = pd.read_parquet(target)
                 if not cached.equals(frame):
-                    frame.to_parquet(target, index=False)
+                    _publish_frame(frame, target)
                     log.info("refreshed shared sample %s: %d rows", sample.key, len(frame))
                 else:
                     frame = cached

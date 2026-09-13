@@ -125,7 +125,7 @@ def test_both_models_failing_still_produces_a_chart(
     )
 
     assert config_out["chart_type"], "always a chart, even with the gateway dead"
-    assert any("heuristic" in warning.lower() for warning in _warnings(emit))
+    assert any("picked a chart" in warning.lower() for warning in _warnings(emit))
 
 
 def test_an_open_circuit_is_not_retried_on_the_expensive_model(
@@ -144,11 +144,14 @@ def test_an_open_circuit_is_not_retried_on_the_expensive_model(
 
 def test_the_cheap_tier_is_priced_so_a_run_can_be_measured() -> None:
     # An unpriced model silently costs DEFAULT_PRICE in the ledger, which is
-    # 7x its real input price - the margin numbers would be fiction.
+    # wrong relative to its real price - the margin numbers would be fiction.
     assert config.MODEL_MINI in llm.PRICES
+    assert config.MODEL_DEFAULT in llm.PRICES
+    assert config.MODEL_ESCALATE in llm.PRICES
     mini_in, mini_out = llm.PRICES[config.MODEL_MINI]
-    default_in, default_out = llm.PRICES[config.MODEL_DEFAULT]
-    assert mini_in < default_in and mini_out < default_out
+    escalate_in, escalate_out = llm.PRICES[config.MODEL_ESCALATE]
+    # Mini is never more expensive than the paid escalation path.
+    assert mini_in <= escalate_in and mini_out <= escalate_out
 
 
 def test_a_question_that_names_its_own_chart_costs_no_model_call(

@@ -3,6 +3,7 @@
 export interface User {
   signed_in: boolean;
   user_id?: string | null;
+  id: string;
   email: string;
   plan: string;
   api_credits: number;
@@ -11,6 +12,7 @@ export interface User {
   free_queries_left: number;
   paid: boolean;
   is_admin: boolean;
+  is_subscribed: boolean;
 }
 
 export interface ChartConfig {
@@ -214,10 +216,24 @@ export const api = {
     upload<T>(file, onProgress),
 
   me: () => request<User>("/v1/me"),
-  signIn: (email: string) => request<User>("/v1/auth/signin", {
+  signUp: (email: string, password: string) => request<User>("/v1/auth/signup", {
     method: "POST",
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, password }),
   }),
+  signIn: (email: string, password: string) => request<User>("/v1/auth/signin", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  }),
+  forgotPassword: (email: string) =>
+    request<{ ok: boolean; detail: string; reset_url?: string }>(
+      "/v1/auth/forgot-password",
+      { method: "POST", body: JSON.stringify({ email }) },
+    ),
+  resetPassword: (token: string, password: string) =>
+    request<User>("/v1/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
   signOut: () => request<{ signed_out: boolean }>("/v1/auth/signout", { method: "POST" }),
 
   library: () => request<LibraryResponse>("/v1/library"),

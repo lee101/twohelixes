@@ -12,9 +12,9 @@ import json
 import time
 from typing import Any
 
-from twohelixes import auth, config, router, store
+from twohelixes import config, router, store
 from twohelixes.charts import helix, palette
-from twohelixes.routes import showcase
+from twohelixes.routes import landing, showcase
 from twohelixes.routes.billing import CREDIT_PACKS, PLANS
 
 NAV = (
@@ -25,6 +25,23 @@ NAV = (
     ("/docs", "Docs"),
     ("/blog", "Blog"),
 )
+
+
+def _asset(path: str) -> str:
+    """URL for a built frontend asset, cache-busted and CDN-aware in prod."""
+    relative = path.lstrip("/")
+    file_path = config.REPO_ROOT / "static" / relative
+    try:
+        stamp = int(file_path.stat().st_mtime)
+    except OSError:
+        stamp = int(time.time())
+    base = config.static_url().rstrip("/")
+    return f"{base}/{relative}?v={stamp}"
+
+
+def _topojson_url() -> str:
+    """Directory Plotly resolves world_110m.json from."""
+    return config.static_url().rstrip("/") + "/libs/topojson/"
 
 
 def _css() -> str:
@@ -382,6 +399,13 @@ details.trace .body{{padding:0 var(--s4) var(--s4);display:grid;gap:.5rem}}
 .ds-questions a{{font-size:.87rem;color:var(--text-secondary);
   padding:.28rem 0;border-top:1px solid var(--border)}}
 .ds-questions a:hover{{color:var(--accent)}}
+.ds-search{{display:flex;gap:.6rem;margin-top:var(--s4);flex-wrap:wrap}}
+.ds-search input{{flex:1 1 16rem;min-width:0;font:inherit;font-size:1rem;
+  padding:.6rem .8rem;border-radius:var(--r-sm);
+  border:1px solid var(--border);background:var(--panel);
+  color:var(--text-primary)}}
+.ds-search input:focus-visible{{outline:2px solid var(--accent);
+  outline-offset:1px;border-color:var(--accent-ring)}}
 .example{{margin-top:var(--s6)}}
 .example h3{{font-size:1.15rem;letter-spacing:-.02em;font-weight:650}}
 .example > p{{color:var(--text-secondary);font-size:.93rem;
@@ -635,31 +659,41 @@ header.site,main,footer.site{{position:relative;z-index:1}}
 
 
 def _overlays() -> str:
-    """Sign-in and checkout sheets.
+    """Sign-in / sign-up / forgot-password and checkout sheets.
 
     Both live on every marketing page so neither costs a navigation: a visitor
     who decides to buy on the pricing page stays on the pricing page.
     """
-    return """
+    return f"""
 <div class="overlay" id="signin-overlay" role="dialog" aria-modal="true"
-     aria-labelledby="signin-title">
+     aria-labelledby="signin-title" data-mode="login"
+     data-free-charts="{config.PLAN_ALLOWANCES['free']['chat_query']}">
   <div class="sheet">
     <button class="close" data-action="close" aria-label="Close">&times;</button>
     <h2 id="signin-title">Sign in</h2>
-    <p class="sub" id="signin-reason">Your email is enough. No password to
-    forget.</p>
+    <p class="sub" id="signin-reason">Sign in to keep your dashboards and
+    collaborate with your team.</p>
     <form id="signin-form" novalidate>
       <div class="field">
         <label for="signin-email">Email</label>
         <input id="signin-email" type="email" required autocomplete="email"
                placeholder="you@company.com" inputmode="email">
       </div>
-      <button class="btn btn-primary" type="submit" style="width:100%">
-        Continue</button>
+      <div class="field" data-auth-field="password">
+        <label for="signin-password">Password</label>
+        <input id="signin-password" type="password" required
+               minlength="6" maxlength="1024" autocomplete="current-password"
+               placeholder="At least 6 characters">
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:100%"
+              id="signin-submit">Sign in</button>
       <p class="form-error" id="signin-error"></p>
     </form>
-    <p class="form-note">New accounts get free queries straight away. We use
-    your email to keep your dashboards; nothing else.</p>
+    <p class="form-note" id="signin-switch">
+      <a href="#" data-auth-mode="forgot">Forgot password?</a>
+      &middot; New here?
+      <a href="#" data-auth-mode="signup">Create an account</a>
+    </p>
   </div>
 </div>
 
@@ -747,7 +781,9 @@ def _page(
 {_THEME_BOOT}
 <style>{_css()}</style>
 {head}
-</head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}">
+</head><body data-stripe-key="{html.escape(config.stripe_publishable_key() or "")}"
+      data-topojson-url="{html.escape(_topojson_url())}"
+      data-static-url="{html.escape(config.static_url().rstrip('/'))}">
 <a class="skip" href="#content">Skip to content</a>
 <header class="site"><div class="shell">
   <a class="brand" href="/">{helix.logo(28, uid="nav")}<span>twoHelixes</span></a>
@@ -760,13 +796,13 @@ def _page(
 {body}
 {_overlays()}
 <footer class="site"><div class="shell">
-  <span>twoHelixes — charts of your data, from a sentence</span>
+  <span>twoHelixes — connect data. Discover what matters.</span>
   <nav aria-label="Footer">
     <a href="/features">Features</a><a href="/datasets">Datasets</a>
     <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/blog">Blog</a><a href="/app">App</a>
   </nav>
 </div></footer>
-<script type="module" src="/static/marketing.js"></script>
+<script type="module" src="{_asset('marketing.js')}"></script>
 {_analytics_snippet()}
 </body></html>"""
 
@@ -774,6 +810,9 @@ def _page(
 @router.get("/")
 def home(ctx: router.Context) -> router.Result:
     mode = ctx.q("mode", "light") or "light"
+    model_label = html.escape({"muse-spark-1.3": "Muse Spark 1.3"}.get(
+        config.MODEL_DEFAULT, config.MODEL_DEFAULT
+    ))
 
     # Every chart below is rendered by the same pipeline that serves customers.
     # If the chart defaults regress, this page changes with them.
@@ -802,85 +841,81 @@ def home(ctx: router.Context) -> router.Result:
     )
 
     body = f"""
-<main id="content">
+<main id="content" class="intelligence-home">
 <div class="hero"><div class="shell hero-layout">
   <div>
-    <span class="eyebrow">Any data. One sentence. A chart.</span>
-    <h1>Charts of your data, from a sentence</h1>
-    <p class="lede">Drop in a spreadsheet or connect a database, then ask for
-    what you want to see. It finds the columns, joins them, shapes them and
-    draws the chart &mdash; every time, never an apology.</p>
+    <span class="eyebrow">Your data. A new perspective.</span>
+    <h1>Turn connected data into <em>clear decisions.</em></h1>
+    <p class="lede">Bring your files, databases, and questions together.
+    Explore with AI, uncover the story, and turn it into charts, dashboards,
+    and analysis your team can build on.</p>
     <div class="actions">
-      <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
-      <a class="btn btn-ghost" href="#how">See how it works</a>
+      <a class="btn btn-primary" href="/app?sample=orders&amp;q=How+did+net+revenue+trend+over+time+by+region%3F"
+         data-conversion="hero-sample">Explore sample data <span aria-hidden="true">↗</span></a>
+      <a class="btn btn-ghost" href="/app" data-action="signin"
+         data-conversion="hero-signup">Bring your own data</a>
     </div>
     <p class="hero-note">Ask one question now without an account. Sign in for
     {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month &mdash;
     no card, and the sample data is already loaded.</p>
   </div>
-  <div class="stage">
-    <span class="stage-mark" aria-hidden="true">{helix.logo(320, mode, uid="heromark")}</span>
-    <div class="askline"><span class="tag">Ask</span>
-      <span class="q">how did revenue trend by region?</span></div>
-    <figure class="figure">{hero_chart}</figure>
-    <div class="stage-caption"><b>Drawn by the live pipeline</b>
-      <span class="ms">2.4 s</span></div>
+  <div class="helix-scene" role="img" aria-label="Two connected strands link your data and questions to insight.">
+    <div class="intelligence-helix" aria-hidden="true">{landing.artwork(mode)}</div>
+    <div class="orbit-card orbit-source" aria-hidden="true"><small>01 / Connect</small><strong>orders.csv + warehouse</strong></div>
+    <div class="orbit-card orbit-query" aria-hidden="true"><small>02 / Explore</small><strong>What changed. And why?</strong></div>
+    <div class="orbit-card orbit-answer" aria-hidden="true"><small>03 / Understand</small><strong>From rows to a story.</strong>
+      <div class="mini-bars"><i style="height:35%"></i><i style="height:52%"></i><i style="height:45%"></i><i style="height:76%"></i><i style="height:100%"></i></div></div>
+    <span class="orbit-label" aria-hidden="true">Data × intelligence</span>
   </div>
 </div></div>
 
-<section class="band" id="how" style="margin-top:clamp(2rem,5vw,4.5rem)">
- <div class="shell">
-  <div class="stats">
-    <div class="stat"><div class="n">19</div>
-      <div class="l">chart forms it can pick from</div></div>
-    <div class="stat"><div class="n">15</div>
-      <div class="l">databases, warehouses and APIs</div></div>
-    <div class="stat"><div class="n">100%</div>
-      <div class="l">of answers come back as a chart</div></div>
-    <div class="stat"><div class="n">0</div>
-      <div class="l">dual axes, ever</div></div>
-  </div>
- </div>
-</section>
+<div class="source-strip"><div class="shell"><span>Start where your data lives</span>
+  <b>CSV &amp; Excel</b><b>PostgreSQL</b><b>Snowflake</b><b>BigQuery</b><b>HTTP APIs</b>
+  <a href="/features">Explore connections ↗</a>
+</div></div>
 
-<section><div class="shell split">
-  <div>
-    <p class="kicker">How it works</p>
-    <h2>It always gets you a chart</h2>
-    <p class="lead-in">Most data assistants hand back a paragraph explaining
-    why they could not help. This one draws something every time. If two tables
-    share no values it drops the join and charts what is left. If its own
-    shaping code fails it charts the cleaned data instead. If the question is
-    vague it picks the most useful cut and names the one it rejected. You get a
-    figure, plus a plain note about anything it had to approximate.</p>
-    <div class="chips">
-      <span class="chip">Degrades, never dead-ends</span>
-      <span class="chip">Every approximation named</span>
-      <span class="chip">Fix it and re-run</span>
+<section id="how"><div class="shell">
+  <div class="section-heading"><div><p class="kicker">Less digging. More discovering.</p>
+    <h2>A question in.<br>A new perspective out.</h2></div>
+    <p class="sub">Follow the data from question to finding. Inspect the steps,
+    adjust the chart, and keep asking.</p></div>
+  <div class="workspace-preview">
+    <div class="workspace-bar"><i class="workspace-dot"></i><i class="workspace-dot"></i>
+      <span>twoHelixes / Revenue exploration</span><span class="preview-label">Sample analysis</span></div>
+    <div class="workspace-body">
+      <aside class="workspace-sidebar"><p class="kicker">The path to your answer</p>
+        <h3>Every step, in view.</h3><p>See what was selected, shaped, and checked.
+        Approximations are surfaced alongside the result.</p>
+        <ol><li>Select data</li><li>Shape &amp; aggregate</li><li>Build chart</li><li>Audit defaults</li></ol>
+        <a href="/app?sample=orders&amp;q=How+did+net+revenue+trend+over+time+by+region%3F"
+          data-conversion="preview-sample">Try your own question ↗</a></aside>
+      <div class="workspace-main"><div class="workspace-question"><span>↳</span>How did revenue trend by region?</div>
+        <figure class="figure">{hero_chart}</figure>
+        <p class="workspace-insight"><b>See the story behind the lines.</b> In this illustrative dataset,
+        East moves ahead of South in July. Rendered by the same chart engine used in the app.</p>
+      </div>
     </div>
   </div>
-  <div class="trace-demo">
-    <div class="askbox"><span>Question</span>how did revenue trend by region?</div>
-    <div class="tstep"><div class="top"><i class="dot"></i>
-      <span class="nm">Finding the data</span><span class="ms">4 ms</span></div>
-      <p class="said">orders joined to regions &mdash; 3 columns are enough to
-      answer this.</p></div>
-    <div class="tstep"><div class="top"><i class="dot"></i>
-      <span class="nm">Joining</span><span class="ms">61 ms</span></div>
-      <p class="said">region_id &rarr; id, 98% value overlap. Row count
-      unchanged, so the key is unique.</p></div>
-    <div class="tstep"><div class="top"><i class="dot"></i>
-      <span class="nm">Shaping the data</span><span class="ms">1.2 s</span></div>
-      <p class="said">Monthly totals per region, sorted by date so the line
-      reads left to right.</p></div>
-    <div class="tstep now"><div class="top"><i class="dot"></i>
-      <span class="nm">Choosing the chart</span><span class="ms">0.9 s</span></div>
-      <p class="said">Time on x, one line per region. A bar chart would hide
-      the crossover in August.</p></div>
-    <div class="tstep"><div class="top"><i class="dot"></i>
-      <span class="nm">Applying defaults</span><span class="ms">3 ms</span></div>
-      <p class="said">Palette, spacing and labels applied. 0 issues found.</p></div>
+</div></section>
+
+<section class="band"><div class="shell">
+  <div class="section-heading"><div><p class="kicker">One connected workspace</p>
+    <h2>Go beyond the chart.</h2></div><p class="sub">From a quick business question to hands-on analysis,
+    work at the depth your decision needs.</p></div>
+  <div class="use-cases">
+    <article class="use-case"><div class="case-icon" aria-hidden="true">↗</div><h3>Explore &amp; explain</h3>
+      <p>Ask in plain language. Compare performance, uncover trends, and inspect the transformations behind each result.</p>
+      <a href="/app?sample=orders" data-conversion="explore">Explore a dataset ↗</a></article>
+    <article class="use-case"><div class="case-icon" aria-hidden="true">▦</div><h3>Build a shared view</h3>
+      <p>Bring charts into dashboards. Share a link with your team or export a figure for your next presentation.</p>
+      <a href="/features">Discover dashboards ↗</a></article>
+    <article class="use-case"><div class="case-icon" aria-hidden="true">&lt;/&gt;</div><h3>Go deeper with code</h3>
+      <p>Work in SQL, sheets, and Python notebooks. Use agents for multi-step analysis, with editable code and reusable outputs.</p>
+      <a href="/docs">Explore the toolkit ↗</a></article>
   </div>
+  <div class="model-note"><b>Frontier reasoning. Inspectable results.</b>
+    <p>{model_label} powers the configured analysis route, with task-specific routing and fallback models.
+    Chart validation stays in code, independent of the model.</p></div>
 </div></section>
 
 <section><div class="shell">
@@ -933,7 +968,7 @@ def home(ctx: router.Context) -> router.Result:
 <section><div class="shell split">
   <div>
     <p class="kicker">Your data</p>
-    <h2>Whatever the data lives in, it can chart it</h2>
+    <h2>Your sources. One place to make sense of them.</h2>
     <p class="lead-in">Drag in a CSV, Excel file or Parquet extract and ask a
     question thirty seconds later. Or connect the warehouse and leave the rows
     where they are &mdash; everything is read-only, and generated SQL is checked
@@ -984,24 +1019,24 @@ def home(ctx: router.Context) -> router.Result:
   </div>
   <div>
     <p class="kicker">Get started</p>
-    <h2>Chart something you actually care about</h2>
-    <p class="lead-in">Try it on the sample data without signing up. Then
-    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month with an
-    email, and paid plans that start at
-    ${config.PLAN_ALLOWANCES['plus']['price_cents'] // 100} when charting
-    becomes a habit.</p>
-    <a class="btn btn-primary" href="/app" data-action="signin">Open twoHelixes</a>
+    <h2>Your next decision starts with a question.</h2>
+    <p class="lead-in">Ask one question now without an account. Sign in for
+    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month &mdash;
+    no card, and the sample data is already loaded.</p>
+    <a class="btn btn-primary" href="/app?sample=orders" data-conversion="footer-sample">Explore sample data ↗</a>
+    <a class="btn btn-ghost" href="/pricing">See plans</a>
   </div>
 </div></section>
 </main>"""
 
     return router.html(
         _page(
-            "twoHelixes — charts of your data, from a sentence",
-            "Ask for a chart of any data you have - a spreadsheet, a database, "
-            "a warehouse - and get one back in seconds, correct and readable.",
+            "twoHelixes — AI data intelligence, from question to decision",
+            "Connect files and databases. Explore with AI, build charts and dashboards, "
+            "and go deeper with SQL, sheets, Python notebooks, and agents. Try sample data free.",
             body,
             "/",
+            head=f"<style>{landing.CSS}</style>",
         )
     )
 
@@ -1141,12 +1176,9 @@ def features(ctx: router.Context) -> router.Result:
   <div>
     <p class="kicker">Get started</p>
     <h2>Make your first chart</h2>
-    <p class="sub">One question with no account at all, then
-    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month with an
-    email. Sample datasets are already loaded, so you can see it work before
-    connecting anything of your own.</p>
-    <div class="actions" style="margin-top:var(--s5);display:flex;gap:.65rem;
-      flex-wrap:wrap">
+    <p class="sub">Ask one question now without an account. Sign in for
+    {config.PLAN_ALLOWANCES['free']['chat_query']} free charts a month &mdash;
+    no card, and the sample data is already loaded.</p>
       <a class="btn btn-primary" href="/app" data-action="signin">Start free</a>
       <a class="btn btn-ghost" href="/pricing">See pricing</a>
     </div>
@@ -1731,14 +1763,15 @@ def app_shell(ctx: router.Context) -> router.Result:
 <title>twoHelixes</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>{_css()}</style>
-<link rel="stylesheet" href="/static/styles.css">
-</head><body>
+<link rel="stylesheet" href="{_asset('styles.css')}">
+</head><body data-topojson-url="{html.escape(_topojson_url())}"
+      data-static-url="{html.escape(config.static_url().rstrip('/'))}">
 <div id="root" data-boot="{int(time.time())}">
   <div class="boot-splash" style="display:grid;place-items:center;min-height:100vh">
     {helix.spinner(72, uid="boot")}
   </div>
 </div>
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="{_asset('app.js')}"></script>
 {_analytics_snippet()}
 </body></html>"""
     )
@@ -1808,14 +1841,31 @@ def billing_complete(ctx: router.Context) -> router.Result:
 
 @router.get("/share/{token}")
 def shared_page(ctx: router.Context) -> router.Result:
-    row = store.one(
-        "SELECT title FROM dashboards WHERE share_token = ? AND is_public = 1",
-        (ctx.params["token"],),
-    )
+    from twohelixes.routes import teams
+
+    token = ctx.params["token"]
+    share = teams.resolve_share(token)
+    kind = str(share["kind"]) if share else "dashboard"
+    row = None
+    if share:
+        table = teams.OWNER_COLUMN.get(kind)
+        if table:
+            label = "name" if kind in ("dataset", "query") else "title"
+            row = store.one(
+                f"SELECT {label} AS title FROM {table} WHERE id = ?",
+                (share["object_id"],),
+            )
+    else:
+        # Keep links minted by the first dashboard sharing implementation
+        # working while all new links use the unified capability table.
+        row = store.one(
+            "SELECT title FROM dashboards WHERE share_token = ? AND is_public = 1",
+            (token,),
+        )
     if row is None:
         return router.html(
             _page("Not found — twoHelixes", "", "<main><section><div class='shell'>"
-                  "<h1>This dashboard is not shared</h1></div></section></main>"),
+                  "<h1>This item is not shared</h1></div></section></main>"),
             status=404,
         )
 
@@ -1828,58 +1878,140 @@ def shared_page(ctx: router.Context) -> router.Result:
 <title>{title} — twoHelixes</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>{_css()}</style>
-<link rel="stylesheet" href="/static/styles.css">
-</head><body>
-<div id="root" data-share="{html.escape(ctx.params['token'])}">
+<link rel="stylesheet" href="{_asset('styles.css')}">
+</head><body data-topojson-url="{html.escape(_topojson_url())}"
+      data-static-url="{html.escape(config.static_url().rstrip('/'))}">
+<div id="root" data-share="{html.escape(token)}" data-share-kind="{html.escape(kind)}">
   <div style="display:grid;place-items:center;min-height:100vh">
     {helix.spinner(72, uid="shareboot")}
   </div>
 </div>
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="{_asset('app.js')}"></script>
 </body></html>"""
     )
 
 
 # --------------------------------------------------------------------------
-# Sign-in
+# Account + password reset pages
 # --------------------------------------------------------------------------
 
 
-@router.post("/v1/auth/signin")
-def signin(ctx: router.Context) -> router.Result:
-    """Create or resume an account.
+@router.get("/account")
+def account(ctx: router.Context) -> router.Result:
+    """Plan, credits, paywall CTA, and logout — logout sits at the bottom."""
+    identity = ctx.user
+    if identity is None or not identity.signed_in:
+        body = f"""
+<main id="content"><div class="shell" style="padding:var(--s7) 0;max-width:32rem">
+  <h1>Account</h1>
+  <p class="lede" style="margin:var(--s3) 0 var(--s5)">Sign in to see your plan
+  and credits.</p>
+  <a class="btn btn-primary" href="/app" data-action="signin" id="account-signin">
+    Sign in</a>
+</div></main>"""
+        return router.html(
+            _page("Account — twoHelixes", "Your twoHelixes account.", body, "/account")
+        )
 
-    In production this is fronted by the app.nz shared-cookie SSO; the email
-    path exists so a self-hosted or local instance is usable on its own.
-    """
-    email = str(ctx.field("email") or "").strip().lower()
-    if "@" not in email or len(email) > 320:
-        return router.error(400, "invalid_email")
+    public = identity.to_public()
+    plan = html.escape(str(public.get("plan") or "free").title())
+    email = html.escape(public.get("email") or "")
+    credits = int(public.get("api_credits") or 0)
+    free_left = int(public.get("free_queries_left") or 0)
+    subscribed = bool(public.get("is_subscribed"))
 
-    user = store.get_user_by_email(email) or store.create_user(email)
-    token = auth.mint_session(user["id"], ctx.header("user-agent"))
+    if subscribed:
+        wall = f"""
+  <section class="account-card" id="account-plan">
+    <h2>Subscription</h2>
+    <p><strong>{plan}</strong> is active.
+    You have {credits:,} credits on hand.</p>
+  </section>"""
+    else:
+        wall = f"""
+  <section class="account-card account-paywall" id="account-plan">
+    <h2>Upgrade</h2>
+    <p>You are on the free plan with {free_left} charts left this period
+    and {credits:,} credits. Paid plans include more charts and unlock
+    everything on the pricing page.</p>
+    <div class="actions" style="display:flex;gap:.65rem;flex-wrap:wrap;margin-top:var(--s4)">
+      <a class="btn btn-primary" href="/pricing" id="account-upgrade">See pricing</a>
+      <button class="btn btn-ghost" type="button" data-action="buy" data-plan="plus"
+              id="account-subscribe">Subscribe to Plus</button>
+    </div>
+  </section>"""
 
-    identity = auth.Identity(
-        user_id=user["id"],
-        email=user["email"],
-        plan=user.get("plan") or "free",
-        api_credits=int(user.get("api_credits") or 0),
-        free_queries_used=int(user.get("free_queries_used") or 0),
+    body = f"""
+<main id="content"><div class="shell" style="padding:var(--s7) 0;max-width:36rem">
+  <h1>Account</h1>
+  <section class="account-card" id="account-info" style="margin-top:var(--s5)">
+    <h2>Signed in</h2>
+    <p id="account-email">{email}</p>
+    <p class="form-note"><a href="/app">Open the app</a></p>
+  </section>
+  {wall}
+  <section class="account-card" id="account-danger" style="margin-top:var(--s7)">
+    <h2>Sign out</h2>
+    <p class="form-note">Clears this browser. Your account and charts stay.</p>
+    <button class="btn btn-ghost" type="button" id="account-logout">Log out</button>
+  </section>
+</div></main>
+<style>
+.account-card{{border:1px solid var(--border);padding:var(--s4);margin-top:var(--s4)}}
+.account-card h2{{font-size:1rem;font-weight:640;margin:0 0 .55rem}}
+.account-paywall{{background:color-mix(in srgb, var(--accent) 6%, transparent)}}
+</style>
+"""
+    return router.html(
+        _page(
+            "Account — twoHelixes",
+            "Your plan, credits and sign-out.",
+            body,
+            "/account",
+        )
     )
-    return router.Result(
-        status=200,
-        body=identity.to_public(),
-        headers={"Set-Cookie": auth.cookie_header(token, secure=not config.is_dev())},
+
+
+@router.get("/reset-password")
+def reset_password_page(ctx: router.Context) -> router.Result:
+    token = html.escape(str(ctx.q("token") or ""))
+    has_token = bool(token)
+    title = "Choose a new password" if has_token else "Forgot password"
+    lede = (
+        "Pick a password of at least 6 characters."
+        if has_token
+        else "Enter the email on your account and we will send a reset link."
     )
-
-
-@router.post("/v1/auth/signout")
-def signout(ctx: router.Context) -> router.Result:
-    token = ctx.cookie(auth.COOKIE_NAME)
-    if token:
-        auth.revoke_session(token)
-    return router.Result(
-        status=200,
-        body={"signed_out": True},
-        headers={"Set-Cookie": auth.clear_cookie_header()},
+    password_field = ""
+    if has_token:
+        password_field = """
+      <div class="field">
+        <label for="reset-password">New password</label>
+        <input id="reset-password" type="password" required minlength="6"
+               maxlength="1024" autocomplete="new-password"
+               placeholder="At least 6 characters">
+      </div>"""
+    email_hidden = " hidden" if has_token else ""
+    body = f"""
+<main id="content"><div class="shell" style="padding:var(--s7) 0;max-width:28rem">
+  <h1>{html.escape(title)}</h1>
+  <p class="lede" style="margin:var(--s3) 0 var(--s5)">{html.escape(lede)}</p>
+  <form id="reset-form" data-token="{token}" novalidate>
+    <div class="field"{email_hidden}>
+      <label for="reset-email">Email</label>
+      <input id="reset-email" type="email" {"required" if not has_token else ""}
+             autocomplete="email" placeholder="you@company.com">
+    </div>
+    {password_field}
+    <button class="btn btn-primary" type="submit" style="width:100%">
+      {"Save password" if has_token else "Send reset link"}</button>
+    <p class="form-error" id="reset-error"></p>
+    <p class="form-note" id="reset-ok" hidden></p>
+  </form>
+  <p class="form-note" style="margin-top:var(--s4)">
+    <a href="/" data-action="signin">Back to sign in</a>
+  </p>
+</div></main>"""
+    return router.html(
+        _page(f"{title} — twoHelixes", lede, body, "/reset-password")
     )

@@ -47,6 +47,7 @@ export const CHART_TYPES = [
   "sunburst",
   "sankey",
   "map",
+  "wordcloud",
   "stat",
   "table",
 ] as const;
@@ -79,7 +80,15 @@ export async function renderFigure(
     console.warn("twoHelixes: unregistered trace type(s)", unknown);
   }
   const layout = fitTop({ ...figure.layout, autosize: true }, figure.data ?? [], host.clientWidth);
-  const config = { ...(figure.config ?? {}), responsive: true, displaylogo: false };
+  const topojsonURL =
+    document.body.dataset.topojsonUrl ||
+    `${window.location.origin}/static/libs/topojson/`;
+  const config = {
+    ...(figure.config ?? {}),
+    responsive: true,
+    displaylogo: false,
+    topojsonURL,
+  };
 
   // Plotly.react reuses the existing plot, which is what makes a redraw
   // cheap - but it cannot cross between forms that have cartesian axes and
@@ -274,10 +283,12 @@ export class ChartView {
       this.notes.append(note);
     }
 
-    const meta = el("div", "chart-meta");
-    meta.textContent =
-      `${result.row_count.toLocaleString()} rows · ${formatDuration(result.elapsed_ms)}`;
-    this.notes.append(meta);
+    if (result.row_count || result.elapsed_ms) {
+      const meta = el("div", "chart-meta");
+      meta.textContent =
+        `${result.row_count.toLocaleString()} rows · ${formatDuration(result.elapsed_ms)}`;
+      this.notes.append(meta);
+    }
 
     for (const warning of result.warnings ?? []) {
       const note = el("p", "note note-warn");
@@ -295,6 +306,11 @@ export class ChartView {
       const pin = button("Add to dashboard", () => this.options.onPin?.(result));
       pin.classList.add("btn-primary", "btn-small");
       actions.append(pin);
+    }
+    if (result.chart_id) {
+      const share = button("Share graph", () => void this.shareChart(result.chart_id!));
+      share.classList.add("btn-small");
+      actions.append(share);
     }
     // Four export buttons is a row on a laptop and a wall on a phone, so the
     // exports fold into a disclosure and the one action that changes something
@@ -445,6 +461,68 @@ export class ChartView {
     ].join("\n");
     await navigator.clipboard?.writeText(csv);
     this.flash("Copied as CSV");
+  }
+
+  private async shareChart(chartId: string): Promise<void> {
+    const dialog = document.createElement("dialog");
+    dialog.className = "pick-sheet share-dialog";
+    const heading = el("h2");
+    heading.textContent = "Share graph";
+    const options = el("div", "share-options");
+    const status = el("p", "note");
+    status.textContent = "Loading teams…";
+    const close = button("Close", () => dialog.close());
+    dialog.append(heading, options, status, close);
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+
+    const publicLink = button("Copy read-only link", () => {
+      void api.post<{ url: string }>("/v1/shares", {
+        kind: "chart",
+        object_id: chartId,
+      }).then(async (result) => {
+        try {
+          await navigator.clipboard.writeText(result.url);
+          status.textContent = "Graph link copied.";
+        } catch {
+          status.textContent = result.url;
+        }
+      }).catch((error) => {
+        status.textContent = (error as Error).message;
+      });
+    });
+    publicLink.classList.add("pick-item");
+    options.append(publicLink);
+
+    try {
+      const result = await api.get<{
+        teams: { id: string; name: string; role: string }[];
+      }>("/v1/teams");
+      const teams = result.teams ?? [];
+      if (teams.length) {
+        const label = el("p", "share-label");
+        label.textContent = "Or share with a team";
+        options.append(label);
+      }
+      for (const team of teams) {
+        const node = button(`${team.name} · ${team.role}`, () => {
+          void api.post(`/v1/teams/${team.id}/objects`, {
+            kind: "chart",
+            object_id: chartId,
+          }).then(() => {
+            status.textContent = `Shared with ${team.name}.`;
+          }).catch((error) => {
+            status.textContent = (error as Error).message;
+          });
+        });
+        node.classList.add("pick-item");
+        options.append(node);
+      }
+      status.textContent = "Choose who can see this graph.";
+    } catch (error) {
+      status.textContent = (error as Error).message;
+    }
   }
 
   private flash(message: string): void {

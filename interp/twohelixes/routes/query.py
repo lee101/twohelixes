@@ -13,16 +13,32 @@ success, so a pipeline that fails does not burn a free query.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
 from twohelixes import auth, config, ratelimit, router, store
 from twohelixes.connectors import registry
 from twohelixes.pipeline import orchestrator
+from twohelixes.routes import teams
 
 log = logging.getLogger("twohelixes.routes.query")
 
 MAX_QUESTION_CHARS = 2000
+MAX_SEARCHABLE_DATASETS = 500
+MAX_AUTO_DATASETS = 3
+SCHEMA_SHORTLIST = 24
+SCHEMA_COLUMNS_PER_PHRASE = 12
+MAX_SCHEMA_COLUMNS = 120
+
+
+class DataSelectionError(Exception):
+    """A useful, actionable refusal from dataset discovery."""
+
+    def __init__(self, code: str, message: str, candidates: list[str] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.candidates = candidates or []
 
 
 def _sample_key(ctx: router.Context) -> str:
@@ -37,7 +53,9 @@ def _sample_key(ctx: router.Context) -> str:
     return key if key in samples.BY_KEY else ""
 
 
-def _load_frames(identity: Any, ctx: router.Context) -> dict[str, Any]:
+def _load_frames(
+    identity: Any, ctx: router.Context, question: str = ""
+) -> dict[str, Any]:
     """Resolve whatever data the request points at into named frames."""
     frames: dict[str, Any] = {}
 
@@ -104,18 +122,48 @@ def _load_frames(identity: Any, ctx: router.Context) -> dict[str, Any]:
         connector = registry.for_source(str(source_id), identity.user_id)
         frames[str(ctx.field("name") or "query")] = connector.frame(str(sql))
         return frames
+    if source_id:
+        source = store.one(
+            "SELECT name FROM data_sources WHERE id = ? AND user_id = ?",
+            (str(source_id), identity.user_id),
+        )
+        label = str(source["name"]) if source else "That connection"
+        raise DataSelectionError(
+            "source_query_required",
+            f"{label} is a database connection, not a loaded dataset. "
+            "Choose a dataset from the Library, or open SQL to select a table.",
+        )
 
     dataset_ids = ctx.field("dataset_ids") or []
     if isinstance(dataset_ids, str):
         dataset_ids = [dataset_ids]
-    for dataset_id in dataset_ids:
-        row = store.one(
-            "SELECT * FROM datasets WHERE id = ? AND user_id = ?",
-            (dataset_id, identity.user_id),
-        )
-        if row is None:
-            continue
-        frames[row["name"]] = _load_dataset(row)
+    rows: list[Any] = []
+    if dataset_ids:
+        for dataset_id in dataset_ids:
+            if not teams.can_read(identity.user_id, "dataset", str(dataset_id)):
+                continue
+            row = store.one("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
+            if row is not None:
+                rows.append(row)
+        if not rows:
+            raise DataSelectionError(
+                "dataset_not_found",
+                "The selected dataset is no longer available. Choose another from the Library.",
+            )
+    elif getattr(identity, "signed_in", False):
+        visible = _visible_datasets(identity.user_id)
+        if not visible:
+            raise DataSelectionError(
+                "no_datasets",
+                "You don’t have any datasets yet. Upload a file or attach a sample "
+                "from the Library, then ask again.",
+            )
+        rows = _select_datasets(question, visible)
+
+    for row in rows:
+        name = str(row["name"] or "Dataset")
+        key = name if name not in frames else f"{name} ({str(row['id'])[:6]})"
+        frames[key] = _load_dataset(row)
 
     return frames
 
@@ -131,12 +179,152 @@ def _load_dataset(row: Any) -> Any:
     return pd.read_json(storage)
 
 
-def _catalog(identity: Any) -> list[dict[str, Any]]:
+def _visible_datasets(user_id: str) -> list[dict[str, Any]]:
+    """Dataset metadata visible directly or through a team; no files opened."""
+    teams.ensure_schema()
     rows = store.query(
-        "SELECT id, name, description FROM datasets WHERE user_id = ? LIMIT 50",
-        (identity.user_id,),
+        "SELECT DISTINCT d.* FROM datasets d "
+        "LEFT JOIN team_objects o ON o.kind = 'dataset' AND o.object_id = d.id "
+        "LEFT JOIN team_members m ON m.team_id = o.team_id AND m.user_id = ? "
+        "WHERE d.user_id = ? OR m.user_id = ? "
+        "ORDER BY d.updated_at DESC, d.created_at DESC LIMIT ?",
+        (user_id, user_id, user_id, MAX_SEARCHABLE_DATASETS),
     )
     return store.rows_to_dicts(rows)
+
+
+_SEARCH_STOPWORDS = {
+    "a", "an", "and", "are", "at", "be", "by", "did", "do", "does",
+    "for", "from", "has", "have", "how", "i", "in", "is", "it", "me",
+    "of", "on", "or", "our", "show", "that", "the", "this", "to", "was",
+    "what", "when", "where", "which", "who", "with",
+}
+
+
+def _terms(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", value.casefold().replace("_", " "))
+    return {
+        word[:-1] if len(word) > 4 and word.endswith("s") else word
+        for word in words
+        if len(word) > 1 and word not in _SEARCH_STOPWORDS
+    }
+
+
+def _dataset_columns(row: Any) -> list[str]:
+    columns = store.load_json(row.get("columns"), [])
+    return [str(column) for column in columns] if isinstance(columns, list) else []
+
+
+def _select_datasets(question: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Narrow a large library using lexical + local schema embeddings."""
+    if len(rows) == 1:
+        return rows
+    if not question:
+        raise DataSelectionError(
+            "dataset_not_selected",
+            f"You have {len(rows)} datasets. Choose one from the Library so I know what to analyse.",
+            [str(row.get("name") or "Dataset") for row in rows[:5]],
+        )
+
+    from twohelixes.pipeline import semantic
+
+    query_terms = _terms(question)
+    coarse_documents: dict[str, list[str]] = {}
+    columns_by_id: dict[str, list[str]] = {}
+    lexical: dict[str, float] = {}
+    by_id = {str(row["id"]): row for row in rows}
+    for dataset_id, row in by_id.items():
+        name = str(row.get("name") or "Dataset")
+        description = str(row.get("description") or "")
+        columns = _dataset_columns(row)[:MAX_SCHEMA_COLUMNS]
+        columns_by_id[dataset_id] = columns
+        chunks = [
+            columns[index : index + SCHEMA_COLUMNS_PER_PHRASE]
+            for index in range(0, len(columns), SCHEMA_COLUMNS_PER_PHRASE)
+        ]
+        coarse_documents[dataset_id] = [
+            f"{name}. {description}",
+            *(f"{name} columns: {', '.join(chunk)}" for chunk in chunks),
+        ]
+        name_terms = _terms(name)
+        schema_terms = _terms(" ".join([description, *columns]))
+        name_hits = len(query_terms & name_terms)
+        schema_hits = len(query_terms & schema_terms)
+        lexical[dataset_id] = name_hits * 0.3 + schema_hits * 0.12
+
+    coarse = dict(semantic.rank_documents(question, coarse_documents))
+    preliminary = sorted(
+        (
+            coarse.get(dataset_id, -1.0) + lexical[dataset_id],
+            lexical[dataset_id],
+            dataset_id,
+        )
+        for dataset_id in by_id
+    )[::-1]
+    shortlist_ids = {
+        dataset_id for _score, _lexical, dataset_id in preliminary[:SCHEMA_SHORTLIST]
+    }
+    # A literal schema/name match is always worth the fine pass even if a
+    # noisy coarse embedding did not put it in the first page.
+    shortlist_ids.update(key for key, value in lexical.items() if value > 0)
+    fine_documents = {
+        dataset_id: [
+            coarse_documents[dataset_id][0],
+            *(
+                f"{by_id[dataset_id].get('name') or 'Dataset'}: {column}"
+                for column in columns_by_id[dataset_id]
+            ),
+        ]
+        for dataset_id in shortlist_ids
+    }
+    embedded = dict(semantic.rank_documents(question, fine_documents))
+    scored = sorted(
+        (
+            embedded.get(dataset_id, coarse.get(dataset_id, -1.0))
+            + lexical[dataset_id],
+            lexical[dataset_id],
+            dataset_id,
+        )
+        for dataset_id in by_id
+    )[::-1]
+    top_score = scored[0][0]
+    qualified = [
+        item
+        for item in scored
+        if item[1] > 0
+        or embedded.get(item[2], -1.0) >= semantic.ACCEPT_SCORE
+    ]
+    if not qualified:
+        names = [str(by_id[item[2]].get("name") or "Dataset") for item in scored[:5]]
+        raise DataSelectionError(
+            "dataset_not_selected",
+            f"I found {len(rows)} datasets, but none of their names or columns clearly "
+            "match that question. Choose one from the Library or mention its name.",
+            names,
+        )
+
+    selected = [
+        by_id[dataset_id]
+        for score, _lexical, dataset_id in qualified
+        if score >= top_score - 0.08
+    ][:MAX_AUTO_DATASETS]
+    return selected or [by_id[qualified[0][2]]]
+
+
+def _catalog(identity: Any, available: set[str] | None = None) -> list[dict[str, Any]]:
+    rows = _visible_datasets(identity.user_id)
+    catalog = [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row.get("description") or "",
+            "columns": _dataset_columns(row),
+        }
+        for row in rows
+    ]
+    if available is not None:
+        catalog = [entry for entry in catalog if str(entry["name"]) in available]
+    return catalog
 
 
 # Refusals that mean "pay or sign in", not "slow down".
@@ -179,17 +367,23 @@ def run_query(ctx: router.Context) -> router.Result:
         return router.error(400, "question_too_long")
 
     try:
-        frames = _load_frames(identity, ctx)
+        frames = _load_frames(identity, ctx, question)
+    except DataSelectionError as exc:
+        return router.error(400, exc.code, str(exc), candidates=exc.candidates)
     except Exception as exc:  # noqa: BLE001
         return router.error(400, "data_unavailable", str(exc))
 
     if not frames:
-        return router.error(400, "no_data", "Connect a data source or upload a file.")
+        return router.error(
+            400,
+            "no_datasets",
+            "You don’t have any datasets available. Upload a file or attach a sample.",
+        )
 
     result = orchestrator.run(
         question,
         frames,
-        catalog=_safe_catalog(identity),
+        catalog=_safe_catalog(identity, set(frames)),
         model=_model_for(identity),
         mode=str(ctx.field("mode") or "light"),
         existing_config=ctx.field("config"),
@@ -242,7 +436,13 @@ def stream_query(stream: Any, ctx: router.Context) -> None:
     stream.emit("accepted", {"question": question, "at": time.time()})
 
     try:
-        frames = _load_frames(identity, ctx)
+        frames = _load_frames(identity, ctx, question)
+    except DataSelectionError as exc:
+        stream.emit(
+            "error",
+            {"code": exc.code, "message": str(exc), "candidates": exc.candidates},
+        )
+        return
     except Exception as exc:  # noqa: BLE001
         stream.emit("error", {"code": "data_unavailable", "message": str(exc)})
         return
@@ -250,7 +450,10 @@ def stream_query(stream: Any, ctx: router.Context) -> None:
     if not frames:
         stream.emit(
             "error",
-            {"code": "no_data", "message": "Connect a data source or upload a file."},
+            {
+                "code": "no_datasets",
+                "message": "You don’t have any datasets available. Upload a file or attach a sample.",
+            },
         )
         return
 
@@ -262,7 +465,7 @@ def stream_query(stream: Any, ctx: router.Context) -> None:
     result = orchestrator.run(
         question,
         frames,
-        catalog=_safe_catalog(identity),
+        catalog=_safe_catalog(identity, set(frames)),
         stream=stream,
         model=_model_for(identity),
         mode=str(ctx.field("mode") or "light"),
@@ -299,11 +502,13 @@ def _charge(identity: Any) -> None:
         log.exception("could not charge for a successful query")
 
 
-def _safe_catalog(identity: Any) -> list[dict[str, Any]]:
+def _safe_catalog(
+    identity: Any, available: set[str] | None = None
+) -> list[dict[str, Any]]:
     """The catalog is context, not data. A broken source listing should cost a
     little discovery quality, not the whole chart."""
     try:
-        return _catalog(identity)
+        return _catalog(identity, available)
     except Exception:  # noqa: BLE001
         log.exception("could not load the catalog")
         return []
@@ -386,10 +591,9 @@ def update_chart_config(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
     chart_id = ctx.params["chart_id"]
 
-    row = store.one(
-        "SELECT * FROM charts WHERE id = ? AND user_id = ?",
-        (chart_id, identity.user_id),
-    )
+    if not teams.can_write(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT * FROM charts WHERE id = ?", (chart_id,))
     if row is None:
         return router.error(404, "not_found")
 
@@ -457,9 +661,9 @@ def edit_chart(ctx: router.Context) -> router.Result:
     if not request:
         return router.error(400, "missing_edit")
 
-    row = store.one(
-        "SELECT * FROM charts WHERE id = ? AND user_id = ?", (chart_id, identity.user_id)
-    )
+    if not teams.can_write(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT * FROM charts WHERE id = ?", (chart_id,))
     if row is None:
         return router.error(404, "not_found")
 
@@ -511,9 +715,12 @@ def edit_chart(ctx: router.Context) -> router.Result:
 @router.delete("/v1/chart/{chart_id}")
 def delete_chart(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    chart_id = ctx.params["chart_id"]
+    if not teams.can_write(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    store.execute("DELETE FROM charts WHERE id = ?", (chart_id,))
     store.execute(
-        "DELETE FROM charts WHERE id = ? AND user_id = ?",
-        (ctx.params["chart_id"], identity.user_id),
+        "DELETE FROM team_objects WHERE kind = 'chart' AND object_id = ?", (chart_id,)
     )
     return router.json_result({"deleted": True})
 
@@ -529,7 +736,10 @@ def _frame_for_chart(identity: Any, row: Any) -> Any:
     query = row["query"]
     if source_id and query:
         try:
-            connector = registry.for_source(source_id, identity.user_id)
+            # Access to the chart has already been checked. A team editor must
+            # re-run the chart through the owner's connection; looking it up
+            # as the editor made every shared warehouse chart non-editable.
+            connector = registry.for_source(source_id, str(row["user_id"]))
             return connector.frame(query)
         except Exception:  # noqa: BLE001
             log.exception("could not re-query the source for a chart")
@@ -568,10 +778,10 @@ def _column(row: Any, name: str) -> Any:
 @router.get("/v1/chart/{chart_id}")
 def get_chart(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
-    row = store.one(
-        "SELECT * FROM charts WHERE id = ? AND user_id = ?",
-        (ctx.params["chart_id"], identity.user_id),
-    )
+    chart_id = ctx.params["chart_id"]
+    if not teams.can_read(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    row = store.one("SELECT * FROM charts WHERE id = ?", (chart_id,))
     if row is None:
         return router.error(404, "not_found")
 
@@ -599,4 +809,15 @@ def me(ctx: router.Context) -> router.Result:
     identity = ctx.user
     if identity is None:
         return router.json_result({"signed_in": False})
+    token = ctx.cookie(auth.COOKIE_NAME)
+    if identity.signed_in and token and auth.renew_session(token):
+        # Browsers cap persistent cookies (Chrome currently caps at roughly
+        # 400 days), so re-issuing on app boot is what makes "remember me"
+        # durable in practice instead of silently ending at that cap.
+        return router.Result(
+            body=identity.to_public(),
+            headers={
+                "Set-Cookie": auth.cookie_header(token, secure=not config.is_dev())
+            },
+        )
     return router.json_result(identity.to_public())

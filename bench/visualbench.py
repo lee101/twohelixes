@@ -25,6 +25,8 @@ Run with the server already up (the chart pass needs `interp` importable):
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import sys
 import time
@@ -72,17 +74,58 @@ SAMPLE_QUERY = {
     ],
 }
 
+CSV_JOURNEY_TEXT = """order_date,region,revenue
+2024-01-15,North,1200
+2024-02-15,North,1500
+2024-03-15,North,1800
+2024-01-15,South,900
+2024-02-15,South,850
+2024-03-15,South,700
+2024-01-15,East,400
+2024-02-15,East,650
+2024-03-15,East,980
+"""
+
+
+def _csv_journey_payload() -> dict[str, object]:
+    """Parse the same on-disk CSV artifact a person can inspect beside the shots."""
+    fixture_dir = OUT / "fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    fixture = fixture_dir / "regional-revenue.csv"
+    fixture.write_text(CSV_JOURNEY_TEXT, encoding="utf-8")
+    rows = list(csv.DictReader(io.StringIO(fixture.read_text(encoding="utf-8"))))
+    return {
+        "q": "How did revenue trend over time by region?",
+        "data": rows,
+        "file": str(fixture.relative_to(OUT)),
+    }
+
+
+def _sign_in(page, email: str) -> None:
+    """Use the current password-protected local sign-in flow."""
+    page.wait_for_selector("input.signin-input[type=email]", timeout=10000)
+    page.fill("input.signin-input[type=email]", email)
+    password = page.locator("input.signin-input[type=password]")
+    if password.count():
+        password.fill("Visualbench-2026!")
+    page.click("button[type=submit]")
+    page.wait_for_selector("textarea.ask-input", timeout=15000)
+
 
 def main() -> int:
+    global OUT
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:7474")
+    parser.add_argument("--out", type=Path, default=OUT)
     parser.add_argument("--email", default="visualbench@twohelixes.com")
     parser.add_argument("--skip-pages", action="store_true")
     parser.add_argument("--skip-query", action="store_true")
     parser.add_argument("--skip-gallery", action="store_true")
     parser.add_argument("--skip-library", action="store_true")
     parser.add_argument("--skip-dashboards", action="store_true")
+    parser.add_argument("--skip-workbenches", action="store_true")
     args = parser.parse_args()
+    OUT = args.out.expanduser().resolve()
 
     try:
         from playwright.sync_api import sync_playwright
@@ -172,6 +215,9 @@ def main() -> int:
         if not args.skip_dashboards:
             report.extend(_capture_dashboards(browser, args))
 
+        if not args.skip_workbenches:
+            report.extend(_capture_workbenches(browser, args))
+
         browser.close()
 
     (OUT / "report.json").write_text(json.dumps(report, indent=2))
@@ -189,6 +235,10 @@ def main() -> int:
     spills = [r for r in report if isinstance(r.get("spill_px"), int) and r["spill_px"] > 1]
     console = [r for r in report if r.get("console_errors")]
     failures = [r for r in report if r.get("error")]
+    workbench_failures = [
+        r for r in report
+        if r.get("editor_leads") is False or r.get("proposal_reviewable") is False
+    ]
     imgs = [r for r in report if r.get("broken_images")]
 
     print(f"captured {len([r for r in report if r.get('file')])} screenshots -> {OUT}")
@@ -216,12 +266,109 @@ def main() -> int:
     for row in failures[:6]:
         print(f"  {row['page']}: {str(row['error'])[:120]}")
 
-    return 1 if (overflows or failures or imgs or empty or spills or blank) else 0
+    print(f"workbench layout failures: {len(workbench_failures)}")
+
+    return 1 if (overflows or failures or imgs or empty or spills or blank or console or workbench_failures) else 0
+
+
+def _capture_workbenches(browser, args) -> list[dict[str, object]]:
+    """Capture the SQL and Sheets editing states without touching real account data."""
+    out: list[dict[str, object]] = []
+    for theme in THEMES:
+        for name in GALLERY_VIEWPORTS:
+            viewport = VIEWPORTS[name]
+            context = browser.new_context(
+                viewport={"width": viewport["width"], "height": viewport["height"]},
+                device_scale_factor=viewport["scale"],
+                is_mobile=viewport["mobile"],
+                has_touch=viewport["mobile"],
+                color_scheme=theme,
+            )
+            page = context.new_page()
+            errors: list[str] = []
+            page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+            page.on("pageerror", lambda error: errors.append(str(error)))
+
+            def payload(route, value, status=200):
+                route.fulfill(status=status, content_type="application/json", body=json.dumps(value))
+
+            def api_route(route):
+                request = route.request
+                path = request.url.split("?", 1)[0]
+                if path.endswith("/v1/me"):
+                    payload(route, {"signed_in": True, "email": "visualbench@twohelixes.com", "plan": "pro", "paid": True, "is_admin": False, "api_credits": 25})
+                elif path.endswith("/v1/sources"):
+                    payload(route, {"sources": [{"id": "warehouse", "name": "Analytics warehouse", "kind": "postgresql", "supports_sql": True}]})
+                elif path.endswith("/v1/datasets"):
+                    payload(route, {"datasets": []})
+                elif path.endswith("/v1/sql/schema"):
+                    payload(route, {"dialect": "PostgreSQL", "supports_sql": True, "tables": [{"name": "orders", "qualified": "analytics.orders", "schema": "analytics", "columns": [{"name": "ordered_at", "type": "date", "nullable": False}, {"name": "region", "type": "text", "nullable": False}, {"name": "revenue", "type": "numeric", "nullable": False}]}]})
+                elif path.endswith("/v1/sql/run"):
+                    payload(route, {"columns": ["region", "revenue"], "rows": [["North", 18420], ["South", 15310], ["West", 12980]], "row_count": 3, "duration_ms": 42, "truncated": False})
+                elif path.endswith("/v1/sql/generate"):
+                    payload(route, {"sql": "SELECT region, SUM(revenue) AS revenue\nFROM analytics.orders\nGROUP BY region\nORDER BY revenue DESC;", "explanation": "Drafted from the selected warehouse schema. Review it, then run."})
+                elif path.endswith("/v1/queries"):
+                    payload(route, {"queries": []})
+                elif path.endswith("/v1/sql/history"):
+                    payload(route, {"history": []})
+                elif path.endswith("/v1/sheets"):
+                    payload(route, {"sheets": []})
+                elif path.endswith("/v1/sheets/agent"):
+                    payload(route, {"reply": "I prepared a totals row and a revenue chart for review.", "ops": [{"op": "setCells", "sheet": "Sheet1", "cells": [{"ref": "A5", "value": "Total"}, {"ref": "B5", "formula": "SUM(B2:B4)"}]}, {"op": "addChart", "sheet": "Sheet1", "type": "bar", "range": "A1:B4", "title": "Revenue by region"}]})
+                else:
+                    payload(route, {})
+
+            page.route("**/v1/**", api_route)
+
+            def capture(label: str, **extra: object) -> None:
+                page.evaluate("() => window.scrollTo(0, 0)")
+                page.wait_for_timeout(100)
+                shot = OUT / f"workbench-{label}-{theme}-{name}.png"
+                page.screenshot(path=str(shot), full_page=True)
+                overflow = page.evaluate("() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
+                out.append({"page": f"workbench:{label}", "theme": theme, "viewport": name, "file": shot.name, "h_overflow_px": overflow, "console_errors": list(errors), **extra})
+                errors.clear()
+
+            try:
+                page.goto(f"{args.base}/app", wait_until="networkidle", timeout=30000)
+                page.wait_for_selector(".app-nav-item:has-text('SQL')", timeout=10000)
+                page.click(".app-nav-item:has-text('SQL')")
+                page.wait_for_selector(".sql-workbench .cm-editor", timeout=15000)
+                page.wait_for_selector(".sql-table", timeout=10000)
+                main_box = page.locator(".sql-main").bounding_box()
+                side_box = page.locator(".sql-side").bounding_box()
+                editor_leads = bool(main_box and side_box and (
+                    main_box["x"] < side_box["x"] if name == "desktop" else main_box["y"] < side_box["y"]
+                ))
+                capture("sql-editor", editor_leads=editor_leads)
+
+                page.click(".sql-editor-bar .btn-primary")
+                page.wait_for_selector(".sql-result-table tbody tr")
+                capture("sql-results", editor_leads=editor_leads)
+
+                page.click(".app-nav-item:has-text('Sheets')")
+                page.wait_for_selector(".sheets-workbench .sheet-grid")
+                for ref, value in (("A1", "Region"), ("B1", "Revenue"), ("A2", "North"), ("B2", "18420"), ("A3", "South"), ("B3", "15310"), ("A4", "West"), ("B4", "12980")):
+                    cell = page.locator(f'.sheet-cell-input[data-ref="{ref}"]')
+                    cell.fill(value)
+                    cell.press("Enter")
+                capture("sheets-edit")
+
+                page.fill(".sheet-side .ask-input", "Add a totals row and chart revenue by region")
+                page.click(".sheet-agent-actions button:has-text('Propose changes')")
+                page.wait_for_selector(".sheet-agent-actions button:has-text('Apply changes'):visible")
+                capture("sheets-agent-review", proposal_reviewable=True)
+            except Exception as exc:  # noqa: BLE001
+                out.append({"page": "workbenches", "theme": theme, "viewport": name, "error": str(exc)})
+            finally:
+                context.close()
+    return out
 
 
 def _capture_query(browser, args) -> list[dict[str, object]]:
-    """Sign in, run a real query, and capture the trace and chart."""
+    """Sign in, parse a real CSV, then capture prompt, live trace, and chart."""
     out: list[dict[str, object]] = []
+    payload = _csv_journey_payload()
     for theme in THEMES:
         for name in ("mobile", "desktop"):
             viewport = VIEWPORTS[name]
@@ -240,22 +387,64 @@ def _capture_query(browser, args) -> list[dict[str, object]]:
                 email = args.email.replace("@", f"+{theme}-{name}-{stamp}@")
                 # An anonymous visitor now lands on the product, not a form.
                 page.click("button:has-text('Sign in')")
-                page.wait_for_selector("input.signin-input", timeout=10000)
-                page.fill("input.signin-input", email)
-                page.click("button[type=submit]")
-                page.wait_for_selector("textarea.ask-input", timeout=15000)
+                _sign_in(page, email)
 
-                # Drive the app's own code path so the capture exercises
-                # the real renderer, not a parallel fetch.
+                page.fill("textarea.ask-input", str(payload["q"]))
+                prompt_shot = OUT / f"csv-journey-01-prompt-{theme}-{name}.png"
+                page.screenshot(path=str(prompt_shot), full_page=True)
+                out.append(
+                    {
+                        "page": "csv-journey:01-prompt",
+                        "theme": theme,
+                        "viewport": name,
+                        "file": prompt_shot.name,
+                        "csv_file": payload["file"],
+                    }
+                )
+
+                # Start the app's own async path without waiting for it so the
+                # model trace is a first-class visual artifact, not skipped on
+                # the way to the final Plotly card.
                 page.evaluate(
-                    "(payload) => window.__thAsk(payload.q, {data: payload.data})",
-                    SAMPLE_QUERY,
+                    "(payload) => { window.__csvJourney = "
+                    "window.__thAsk(payload.q, {data: payload.data}); }",
+                    payload,
+                )
+                page.wait_for_selector(".trace, .trace-stage", timeout=60000)
+                page.wait_for_timeout(250)
+                trace_shot = OUT / f"csv-journey-02-agent-trace-{theme}-{name}.png"
+                page.screenshot(path=str(trace_shot), full_page=True)
+                out.append(
+                    {
+                        "page": "csv-journey:02-agent-trace",
+                        "theme": theme,
+                        "viewport": name,
+                        "file": trace_shot.name,
+                        "csv_file": payload["file"],
+                        "agent_model": "See the live trace for actual routing and fallbacks",
+                    }
                 )
                 page.wait_for_selector(".chart-plot.js-plotly-plot", timeout=180000)
                 page.wait_for_timeout(1200)
-                shot = OUT / f"query-{theme}-{name}.png"
+                shot = OUT / f"csv-journey-03-chart-{theme}-{name}.png"
                 page.screenshot(path=str(shot), full_page=True)
-                out.append({"page": "query", "theme": theme, "viewport": name, "file": shot.name})
+                marks = page.locator(
+                    ".chart-plot .main-svg path, .chart-plot .main-svg rect, "
+                    ".chart-plot .main-svg text, .chart-plot .main-svg circle"
+                ).count()
+                out.append(
+                    {
+                        "page": "csv-journey:03-chart",
+                        "theme": theme,
+                        "viewport": name,
+                        "file": shot.name,
+                        "csv_file": payload["file"],
+                        "marks": marks,
+                        # SVG text and paths prove rendering, not correctness.
+                        # Do not turn their count into a fictional quality score.
+                        "empty_plot": marks == 0,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
                 out.append({"page": "query", "theme": theme, "viewport": name, "error": str(exc)})
             finally:
@@ -366,10 +555,7 @@ def _capture_dashboards(browser, args) -> list[dict[str, object]]:
                 stamp = int(time.time() * 1000)
                 email = args.email.replace("@", f"+dash-{theme}-{name}-{stamp}@")
                 page.click("button:has-text('Sign in')")
-                page.wait_for_selector("input.signin-input", timeout=10000)
-                page.fill("input.signin-input", email)
-                page.click("button[type=submit]")
-                page.wait_for_selector("textarea.ask-input", timeout=15000)
+                _sign_in(page, email)
 
                 # The empty state is the first thing a new account sees here,
                 # and an empty page with one button on it is easy to ship badly.
@@ -910,13 +1096,10 @@ def _capture_gallery(browser, args) -> list[dict[str, object]]:
                 page.goto(f"{args.base}/app", wait_until="networkidle", timeout=30000)
                 stamp = int(time.time() * 1000)
                 page.click("button:has-text('Sign in')")
-                page.wait_for_selector("input.signin-input", timeout=10000)
-                page.fill(
-                    "input.signin-input",
+                _sign_in(
+                    page,
                     args.email.replace("@", f"+gallery-{theme}-{name}-{stamp}@"),
                 )
-                page.click("button[type=submit]")
-                page.wait_for_selector("textarea.ask-input", timeout=15000)
             except Exception as exc:  # noqa: BLE001
                 out.append({"page": "gallery", "theme": theme, "viewport": name, "error": str(exc)})
                 context.close()
@@ -941,9 +1124,18 @@ def _capture_gallery(browser, args) -> list[dict[str, object]]:
                         "spill_px": int(measured["spill"]),
                         "console_errors": list(errors),
                     }
+                    audit_count = len(result.get("audit") or [])
+                    score = 100 - audit_count * 15
+                    if int(measured["overflow"]) > 1:
+                        score -= 20
+                    if int(measured["spill"]) > 1:
+                        score -= 20
                     # An empty plot is the failure Plotly does not raise on.
                     if int(measured["marks"]) < _FLOORS.get(form, DEFAULT_MARK_FLOOR):
                         row["empty_plot"] = True
+                        score -= 40
+                    row["quality_score"] = max(0, score)
+                    row["audit_findings"] = audit_count
                     out.append(row)
                 except Exception as exc:  # noqa: BLE001
                     out.append(
@@ -972,6 +1164,10 @@ def _write_index(report: list[dict[str, object]]) -> None:
             flag += " <b style='color:#e34948'>empty plot</b>"
         if isinstance(row.get("spill_px"), int) and row["spill_px"] > 1:
             flag += f" <b style='color:#e34948'>spills {row['spill_px']}px</b>"
+        if isinstance(row.get("quality_score"), int):
+            flag += f" <b style='color:#3366cc'>quality {row['quality_score']}/100</b>"
+        if row.get("editor_leads") is False:
+            flag += " <b style='color:#e34948'>editor is not primary</b>"
         cards.append(
             f"<figure style='margin:0'><figcaption style='font:12px system-ui;"
             f"padding:6px 0'>{row['page']} · {row['theme']} · {row['viewport']} {flag}"

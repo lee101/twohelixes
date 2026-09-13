@@ -32,6 +32,8 @@ secrets/
 # Python environments - this repo's own, built by scripts/setup-venvs.sh
 .venv/
 .venv-*/
+.venv
+.venv-*
 *.egg-info/
 
 # Embedding weights: 16 MB of int8 model copied out of ../gobed by
@@ -48,3 +50,5 @@ __pycache__/
 .deploy-backups/
 AGENTS.md.local
 requirements.txt.tmp
+schoolmap/public/
+schoolmap/data/raw/naplan_results.csv

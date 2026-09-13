@@ -17,6 +17,7 @@ export interface DashboardSummary {
   share_token?: string | null;
   created_at?: number;
   updated_at?: number;
+  can_edit?: boolean;
 }
 
 export interface DashboardListOptions {
@@ -85,10 +86,12 @@ export class DashboardListView {
       open.append(name, meta);
       open.addEventListener("click", () => this.options.onOpen(item.id));
 
-      const remove = button("Delete", () => void this.remove(item));
-      remove.classList.add("btn-small");
-
-      row.append(open, remove);
+      row.append(open);
+      if (item.can_edit !== false) {
+        const remove = button("Delete", () => void this.remove(item));
+        remove.classList.add("btn-small");
+        row.append(remove);
+      }
       this.list.append(row);
     }
   }

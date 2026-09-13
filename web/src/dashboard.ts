@@ -31,7 +31,7 @@ interface Chart {
 
 interface SourceOption {
   /** The body key the query and builder endpoints expect for this data. */
-  key: "source_id" | "sample";
+  key: "source_id" | "dataset_ids" | "sample" | "auto";
   id: string;
   label: string;
 }
@@ -45,6 +45,7 @@ interface DashboardPayload {
   charts: Chart[];
   is_public?: number;
   share_token?: string | null;
+  can_edit?: boolean;
 }
 
 export class DashboardView {
@@ -62,6 +63,7 @@ export class DashboardView {
   private readonly heading: HTMLInputElement;
   private readonly status: HTMLElement;
   private readonly composer: HTMLElement;
+  private readonly actions: HTMLElement;
 
   constructor(private readonly options: { readOnly?: boolean } = {}) {
     this.root = el("section", "dash");
@@ -74,6 +76,7 @@ export class DashboardView {
     this.heading.addEventListener("change", () => void this.save());
 
     const actions = el("div", "dash-actions");
+    this.actions = actions;
     if (!options.readOnly) {
       const add = button("Add pane", () => this.toggleComposer());
       add.classList.add("btn-primary", "dash-add");
@@ -115,18 +118,32 @@ export class DashboardView {
     }
   }
 
-  /**
-   * What this dashboard can ask questions of. Sources first, then the samples,
-   * because a signed-in account with nothing connected still has to be able to
-   * put a pane on the board.
-   */
+  /** What this dashboard can ask questions of, including schema auto-detect. */
   private async loadSources(): Promise<void> {
     const options: SourceOption[] = [];
     try {
-      const payload = await api.get<{
-        sources: { id: string; name: string; kind: string }[];
-      }>("/v1/sources");
-      for (const source of payload.sources ?? []) {
+      const [sourcePayload, datasetPayload] = await Promise.all([
+        api.get<{ sources: { id: string; name: string; kind: string }[] }>("/v1/sources"),
+        api.get<{
+          datasets: { id: string; name: string; row_count: number }[];
+        }>("/v1/datasets"),
+      ]);
+      const datasets = datasetPayload.datasets ?? [];
+      if (datasets.length > 1) {
+        options.push({
+          key: "auto",
+          id: "",
+          label: `Auto-detect from ${datasets.length} datasets`,
+        });
+      }
+      for (const dataset of datasets) {
+        options.push({
+          key: "dataset_ids",
+          id: dataset.id,
+          label: `${dataset.name} (${dataset.row_count.toLocaleString()} rows)`,
+        });
+      }
+      for (const source of sourcePayload.sources ?? []) {
         options.push({ key: "source_id", id: source.id, label: `${source.name} (${source.kind})` });
       }
     } catch {
@@ -151,6 +168,8 @@ export class DashboardView {
 
   private body(): Record<string, unknown> {
     if (!this.active) return {};
+    if (this.active.key === "auto") return {};
+    if (this.active.key === "dataset_ids") return { dataset_ids: [this.active.id] };
     return { [this.active.key]: this.active.id };
   }
 
@@ -299,6 +318,9 @@ export class DashboardView {
   }
 
   private adopt(payload: DashboardPayload): void {
+    if (payload.can_edit === false) this.options.readOnly = true;
+    this.heading.disabled = Boolean(this.options.readOnly);
+    this.actions.hidden = Boolean(this.options.readOnly);
     this.id = payload.id ?? this.id;
     this.title = payload.title ?? "";
     this.heading.value = this.title;
@@ -611,15 +633,140 @@ export class DashboardView {
   }
 
   private async share(): Promise<void> {
-    try {
-      const result = await api.post<{ url: string; token: string }>("/v1/shares", {
+    const dialog = document.createElement("dialog");
+    dialog.className = "pick-sheet share-dialog";
+    const heading = el("h2");
+    heading.textContent = "Share dashboard";
+    const status = el("p", "dash-status");
+    status.textContent = "Loading teams…";
+    status.hidden = false;
+    const content = el("div", "share-options");
+    const close = button("Close", () => dialog.close());
+    dialog.append(heading, content, status, close);
+    dialog.addEventListener("close", () => dialog.remove());
+    document.body.append(dialog);
+    dialog.showModal();
+
+    const copyPublicLink = async () => {
+      const result = await api.post<{ url: string }>("/v1/shares", {
         kind: "dashboard",
         object_id: this.id,
       });
-      await navigator.clipboard?.writeText(result.url).catch(() => undefined);
-      this.setStatus(`Share link copied: ${result.url}`);
+      try {
+        await navigator.clipboard.writeText(result.url);
+        status.textContent = "Anyone-with-the-link URL copied.";
+      } catch {
+        status.textContent = result.url;
+      }
+    };
+
+    type Team = { id: string; name: string; role: string };
+    const renderTeams = (teams: Team[]) => {
+      content.replaceChildren();
+      const link = button("Copy read-only link", () => {
+        void copyPublicLink().catch((error) => {
+          status.textContent = (error as Error).message;
+        });
+      });
+      link.classList.add("pick-item");
+      content.append(link);
+
+      const label = el("p", "share-label");
+      label.textContent = teams.length ? "Or share with a team" : "Create a team to collaborate";
+      content.append(label);
+      for (const team of teams) {
+        const node = button(`${team.name} · ${team.role}`, () => {
+          void api.post(`/v1/teams/${team.id}/objects`, {
+            kind: "dashboard",
+            object_id: this.id,
+          }).then(() => {
+            status.textContent = `Shared with ${team.name}. Members can now open it from Dashboards.`;
+          }).catch((error) => {
+            status.textContent = (error as Error).message;
+          });
+        });
+        node.classList.add("pick-item");
+        content.append(node);
+      }
+
+      const administered = teams.filter(
+        (team) => team.role === "owner" || team.role === "admin",
+      );
+      if (administered.length) {
+        const invite = el("form", "share-team-invite") as HTMLFormElement;
+        const teamSelect = document.createElement("select");
+        teamSelect.className = "control-input";
+        for (const team of administered) {
+          const option = document.createElement("option");
+          option.value = team.id;
+          option.textContent = team.name;
+          teamSelect.append(option);
+        }
+        const email = document.createElement("input");
+        email.type = "email";
+        email.className = "control-input";
+        email.placeholder = "teammate@company.com";
+        email.required = true;
+        const inviteButton = document.createElement("button");
+        inviteButton.type = "submit";
+        inviteButton.className = "btn btn-ghost btn-small";
+        inviteButton.textContent = "Invite";
+        invite.append(teamSelect, email, inviteButton);
+        invite.addEventListener("submit", (event) => {
+          event.preventDefault();
+          inviteButton.disabled = true;
+          void api.post<{ url: string }>(`/v1/teams/${teamSelect.value}/invite`, {
+            email: email.value.trim(),
+            role: "member",
+          }).then(async (result) => {
+            try {
+              await navigator.clipboard.writeText(result.url);
+              status.textContent = "Team invite link copied.";
+            } catch {
+              status.textContent = `Invite link: ${result.url}`;
+            }
+            inviteButton.disabled = false;
+          }).catch((error) => {
+            status.textContent = (error as Error).message;
+            inviteButton.disabled = false;
+          });
+        });
+        content.append(invite);
+      }
+
+      const create = el("form", "share-team-create") as HTMLFormElement;
+      const input = document.createElement("input");
+      input.className = "control-input";
+      input.placeholder = "New team name";
+      input.required = true;
+      const submit = document.createElement("button");
+      submit.type = "submit";
+      submit.className = "btn btn-ghost btn-small";
+      submit.textContent = "Create team";
+      create.append(input, submit);
+      create.addEventListener("submit", (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        void api.post<Team>("/v1/teams", { name: input.value.trim() })
+          .then((team) => {
+            teams.push(team);
+            renderTeams(teams);
+            status.textContent = `${team.name} created. Choose it above to share.`;
+          })
+          .catch((error) => {
+            status.textContent = (error as Error).message;
+            submit.disabled = false;
+          });
+      });
+      content.append(create);
+    };
+
+    try {
+      const result = await api.get<{ teams: Team[] }>("/v1/teams");
+      renderTeams(result.teams ?? []);
+      status.textContent = "Choose who can see this dashboard.";
     } catch (error) {
-      this.setStatus((error as Error).message, true);
+      status.textContent = (error as Error).message;
     }
   }
 

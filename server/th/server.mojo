@@ -43,6 +43,7 @@ from th.libc import (
     SOCK_NONBLOCK,
     SOCK_STREAM,
     SOL_SOCKET,
+    SO_KEEPALIVE,
     SO_REUSEADDR,
     SO_REUSEPORT,
     TCP_NODELAY,
@@ -211,6 +212,7 @@ struct Loop(Movable):
                 continue
             self._ensure_slot(cfd)
             _ = set_sockopt_int(cfd, IPPROTO_TCP, TCP_NODELAY, 1)
+            _ = set_sockopt_int(cfd, SOL_SOCKET, SO_KEEPALIVE, 1)
             self.conns[Int(cfd)].open()
             if epoll_add(self.epfd, cfd, EPOLLIN | EPOLLRDHUP) != 0:
                 self.conns[Int(cfd)].close()
@@ -330,6 +332,11 @@ struct Loop(Movable):
             resp.keepalive = req.keepalive and resp.keepalive
 
             self.conns[i].outbuf.clear()
+            # Avoid grow-on-write for the common small response (status line +
+            # a few headers + body). Undershoot is fine; overshoot is free.
+            self.conns[i].outbuf.reserve(
+                64 + resp.headers.byte_length() + len(resp.body)
+            )
             serialize(resp, self.conns[i].outbuf, req.method == 5)
             self.conns[i].outpos = 0
             self.conns[i].keepalive = resp.keepalive

@@ -8,6 +8,7 @@ replaces the files, so the cache keys on mtime and size rather than path alone.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import mimetypes
 import threading
@@ -58,6 +59,13 @@ def serve(ctx: router.Context) -> router.Result:
 @router.get("/static/{folder}/{path}")
 def serve_nested(ctx: router.Context) -> router.Result:
     return _serve(f"{ctx.params['folder']}/{ctx.params['path']}")
+
+
+@router.get("/static/{folder}/{subfolder}/{path}")
+def serve_deeply_nested(ctx: router.Context) -> router.Result:
+    # Plotly requests /static/libs/topojson/world_110m.json. The two-segment
+    # route above cannot match it, even though the asset is present on disk.
+    return _serve(f"{ctx.params['folder']}/{ctx.params['subfolder']}/{ctx.params['path']}")
 
 
 def _serve(relative: str) -> router.Result:
@@ -116,7 +124,9 @@ def _result(body: str, content_type: str, suffix: str) -> router.Result:
     )
     return router.Result(
         status=200,
-        body=body,
+        # Result.render JSON-encodes application/json bodies. Passing the raw
+        # file string double-encodes it, so Plotly gets no Topology object.
+        body=json.loads(body) if content_type.startswith("application/json") else body,
         content_type=content_type,
         headers={"Cache-Control": cache_control},
     )

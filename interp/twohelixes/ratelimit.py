@@ -77,11 +77,35 @@ def _count(identity: str, bucket: str, window: int) -> int:
     return int(row["n"]) if row else 0
 
 
-def record(identity: str, bucket: str) -> None:
-    store.execute(
-        "INSERT INTO rate_events (identity, bucket, created_at) VALUES (?, ?, ?)",
-        (identity, bucket, time.time()),
-    )
+def _claim(identity: str, limits: list[tuple[str, int, int]]) -> Decision | None:
+    """Atomically reserve capacity in each rate window.
+
+    Admission is recorded before model work starts.  Recording only after a
+    successful generation lets a bot start many requests in parallel while
+    every worker still sees zero usage.  The transaction makes checking and
+    reserving one operation across all server workers.
+    """
+    now = time.time()
+    with store.transaction() as conn:
+        for bucket, window, limit in limits:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM rate_events "
+                "WHERE identity = ? AND bucket = ? AND created_at > ?",
+                (identity, bucket, now - window),
+            ).fetchone()
+            if row and int(row["n"]) >= limit:
+                detail = (
+                    "Too many requests in the last minute."
+                    if bucket == "any"
+                    else f"Included usage allows {limit} queries per {bucket}."
+                )
+                return Decision(False, "rate_limited", retry_after=window, detail=detail)
+        for bucket, _, _ in limits:
+            conn.execute(
+                "INSERT INTO rate_events (identity, bucket, created_at) VALUES (?, ?, ?)",
+                (identity, bucket, now),
+            )
+    return None
 
 
 def sweep(older_than: int = 86400 * 2) -> None:
@@ -99,13 +123,6 @@ def check(identity: Any, operation: str, *, sample_data: bool = False) -> Decisi
     """Decide whether `identity` may run `operation` right now."""
     key = identity.key
 
-    # Global valve applies to everyone, paid included.
-    if _count(key, "any", 60) >= config.HARD_RATE_PER_MINUTE:
-        return Decision(
-            False, "rate_limited", retry_after=60,
-            detail="Too many requests in the last minute.",
-        )
-
     if not identity.signed_in:
         if operation not in ANON_OPERATIONS or config.ANON_QUERIES_PER_DAY <= 0:
             return Decision(
@@ -117,21 +134,32 @@ def check(identity: Any, operation: str, *, sample_data: bool = False) -> Decisi
             return Decision(
                 False, "signin_required",
                 detail=(
-                    "Try it on the sample data first, or sign in to use your own - "
-                    "it takes an email and nothing else."
+                    "Your free question runs on the sample data - "
+                    "sign in to use your own."
                 ),
                 upgrade="signin",
             )
-        if anonymous_trial_left(identity) <= 0:
-            return Decision(
-                False, "trial_used",
-                detail=(
-                    "That is today's free question. An email gets you "
-                    f"{config.PLAN_ALLOWANCES['free']['chat_query']} charts a "
-                    "month on your own data, renewing, with no card."
-                ),
-                upgrade="signin",
-            )
+        # Claim both limits together.  In particular, the anonymous claim is
+        # made before returning allowed so simultaneous first requests cannot
+        # all receive the one-question trial.
+        refusal = _claim(
+            key,
+            [
+                ("any", 60, config.HARD_RATE_PER_MINUTE),
+                ("anon", 86400, config.ANON_QUERIES_PER_DAY),
+            ],
+        )
+        if refusal is not None:
+            if _count(key, "anon", 86400) >= config.ANON_QUERIES_PER_DAY:
+                refusal.reason = "trial_used"
+                refusal.retry_after = 86400
+                refusal.detail = (
+                    "That was your one free question. Sign in for "
+                    f"{config.PLAN_ALLOWANCES['free']['chat_query']} free charts "
+                    "a month - no card, and the sample data is already loaded."
+                )
+                refusal.upgrade = "signin"
+            return refusal
         return Decision(True)
 
     quote = entitlements.quote(identity, operation)
@@ -150,17 +178,20 @@ def check(identity: Any, operation: str, *, sample_data: bool = False) -> Decisi
     # Credits are the paid path: not throttled beyond the global valve, because
     # the capacity has been bought.
     if quote.payer == "credits":
+        refusal = _claim(key, [("any", 60, config.HARD_RATE_PER_MINUTE)])
+        if refusal is not None:
+            return refusal
         return Decision(True, quote=quote.as_dict())
 
     # Included allowance: keep the burst windows, so one account cannot turn a
     # month of allowance into a minute of load.
-    for bucket, window, limit in WINDOWS:
-        if _count(key, bucket, window) >= limit:
-            return Decision(
-                False, "rate_limited", retry_after=window,
-                detail=f"Included usage allows {limit} queries per {bucket}.",
-                quote=quote.as_dict(),
-            )
+    refusal = _claim(
+        key,
+        [("any", 60, config.HARD_RATE_PER_MINUTE), *WINDOWS],
+    )
+    if refusal is not None:
+        refusal.quote = quote.as_dict()
+        return refusal
 
     return Decision(True, quote=quote.as_dict())
 
@@ -171,19 +202,12 @@ def consume(identity: Any, operation: str, ref: str = "") -> dict[str, Any]:
     Called only after the work succeeded, so a failed pipeline does not burn
     anyone's allowance or credits.
     """
-    key = identity.key
-    record(key, "any")
-
     if not identity.signed_in:
-        record(f"ip:{getattr(identity, 'ip', '0.0.0.0')}", "anon")
         return {"payer": "trial"}
 
     quote = entitlements.charge(identity, operation, ref=ref)
 
-    if quote.payer == "allowance":
-        for bucket, _, _ in WINDOWS:
-            record(key, bucket)
-    elif quote.payer == "credits":
+    if quote.payer == "credits":
         identity.api_credits = max(0, identity.api_credits - quote.credits_required)
 
     return quote.as_dict()

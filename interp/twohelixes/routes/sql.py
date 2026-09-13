@@ -57,6 +57,17 @@ IDENTIFIER_TAIL = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)$")
 MAX_SQL_CHARS = 20_000
 
 
+def _bounded_int(
+    ctx: router.Context, name: str, default: int, minimum: int, maximum: int
+) -> int:
+    """Read an integer from JSON or query parameters and keep driver limits sane."""
+    try:
+        value = int(ctx.field(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def _connector(ctx: router.Context, identity: Any):
     source_id = ctx.field("source_id")
     if not source_id:
@@ -97,9 +108,10 @@ def run_sql(ctx: router.Context) -> router.Result:
         return router.error(400, "unsafe_query", str(exc))
 
     started = time.time()
+    limit = _bounded_int(ctx, "limit", 500, 1, 5000)
     try:
         connector = _connector(ctx, identity)
-        result = connector.execute(sql, limit=ctx.q_int("limit", 5000))
+        result = connector.execute(sql, limit=limit)
     except (ConnectorError, UnsafeQuery) as exc:
         _record_history(identity, ctx, sql, False, 0, started, str(exc))
         return router.error(400, "query_failed", str(exc))
@@ -108,7 +120,7 @@ def run_sql(ctx: router.Context) -> router.Result:
         return router.error(400, "query_failed", str(exc))
 
     _record_history(identity, ctx, sql, True, result.row_count, started, "")
-    return router.json_result(result.to_dict())
+    return router.json_result(result.to_dict(max_rows=limit))
 
 
 def _record_history(
@@ -253,12 +265,26 @@ def generate(ctx: router.Context) -> router.Result:
         return router.error(400, "connector_error", str(exc))
 
     try:
-        answer = llm.json_call(
-            f"Dialect: {connector.dialect}\nSchema:\n{schema_text}\n\nRequest: {question}",
-            system=prompts.SQL_GENERATE_SYSTEM,
-            model=config.MODEL_DEFAULT,
-        )
-    except llm.LLMError as exc:
+        prompt = f"Dialect: {connector.dialect}\nSchema:\n{schema_text}\n\nRequest: {question}"
+        try:
+            answer = llm.json_call(
+                prompt,
+                system=prompts.SQL_GENERATE_SYSTEM,
+                model=config.MODEL_MINI,
+                attempts=2,
+            )
+        except llm.CircuitOpen:
+            raise
+        except llm.LLMError:
+            # SQL is validated again below; a malformed/declined Flash response
+            # gets one quality escalation instead of becoming an empty editor.
+            answer = llm.json_call(
+                prompt,
+                system=prompts.SQL_GENERATE_SYSTEM,
+                model=config.MODEL_DEFAULT,
+                attempts=2,
+            )
+    except (llm.LLMError, llm.CircuitOpen) as exc:
         return router.error(503, "llm_unavailable", str(exc))
 
     sql = str(answer.get("sql") or "").strip()
@@ -403,6 +429,6 @@ def history(ctx: router.Context) -> router.Result:
     rows = store.query(
         "SELECT sql, ok, row_count, duration_ms, error, created_at FROM query_history "
         "WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-        (identity.user_id, ctx.q_int("limit", 50)),
+        (identity.user_id, _bounded_int(ctx, "limit", 50, 1, 200)),
     )
     return router.json_result({"history": store.rows_to_dicts(rows)})

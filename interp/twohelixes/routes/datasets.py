@@ -212,6 +212,26 @@ def _mode(ctx: router.Context) -> str:
 # --------------------------------------------------------------------------
 
 
+def _clear_button(query: str) -> str:
+    if not query:
+        return ""
+    return '<a class="btn btn-ghost" href="/datasets">Clear</a>'
+
+
+def _result_note(query: str, shown: list[Any], total: int) -> str:
+    if not query:
+        return ""
+    if not shown:
+        return (
+            '<p class="sub">Nothing matched. Try a broader word, or '
+            '<a href="/datasets">browse everything</a>.</p>'
+        )
+    return (
+        f'<p class="sub">{len(shown)} of {total} datasets match '
+        f"&ldquo;{html.escape(query)}&rdquo;.</p>"
+    )
+
+
 @router.get("/datasets")
 def index(ctx: router.Context) -> router.Result:
     mode = _mode(ctx)
@@ -289,10 +309,9 @@ def index(ctx: router.Context) -> router.Result:
 <section class="page-head"><div class="shell">
   <p class="kicker">Datasets</p>
   <h1>Datasets you can ask questions of right now</h1>
-  <p class="sub">{dataset_count} datasets are loaded into every account &mdash; four
-  curated business datasets shared with askfelix, four open
-  reference sets everyone benchmarks against, five generated to have the shapes
-  real business data has: seasonality, a long tail, a funnel, a cohort. Every
+  <p class="sub">{dataset_count} datasets are loaded into every account &mdash;
+  open reference data, a historical school directory, curated business datasets,
+  and generated data with seasonality, a long tail, a funnel and a cohort. Every
   chart below was drawn by the live pipeline from the real rows, and every one
   shows its reasoning.</p>
 </div></section>
@@ -309,7 +328,6 @@ def index(ctx: router.Context) -> router.Result:
   <div class="ds-grid">{cards}</div>
   {empty_markup}
 </div></section>
-
 <section class="band"><div class="shell">
   <h2>Or point it at your own data</h2>
   <p class="lead-in">A spreadsheet, a warehouse, an API. The datasets here are
@@ -324,7 +342,7 @@ def index(ctx: router.Context) -> router.Result:
     return router.html(
         _page(
             "Sample datasets with worked example charts — twoHelixes",
-            "Thirteen sample datasets with schemas, rows, and example charts drawn "
+            f"{dataset_count} sample datasets with schemas, rows, and example charts drawn "
             "by the live pipeline with their reasoning traces attached.",
             body,
             "/datasets",
@@ -385,6 +403,7 @@ def detail(ctx: router.Context) -> router.Result:
     <a class="btn btn-ghost" href="/v1/samples/{_esc(key)}/download.csv">
       Download CSV</a>
     {notebook_link}
+    {'<a class="btn btn-ghost" href="/schools">Explore school map</a>' if key == 'queensland_schools' else ''}
   </div>
   <div class="ds-meta" style="margin-top:var(--s4)">
     <span>{len(frame):,} rows</span><span>{len(frame.columns)} columns</span>

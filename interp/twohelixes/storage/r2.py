@@ -74,7 +74,16 @@ def endpoint() -> str:
 
 
 def public_host() -> str:
-    return config.get("R2_PUBLIC_HOST", "") or ""
+    """Browser-facing R2 host. Empty means 'not published yet'."""
+    explicit = config.get("R2_PUBLIC_HOST") or config.get("TWOHELIXES_STATIC_URL") or ""
+    return explicit.rstrip("/")
+
+
+def public_url(key: str) -> str:
+    host = public_host() or "https://twohelixesstatic.twohelixes.com"
+    if not host.startswith("http"):
+        host = f"https://{host}"
+    return f"{host.rstrip('/')}/{key.lstrip('/')}"
 
 
 def credentials() -> tuple[str, str]:

@@ -142,12 +142,22 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Any:
         "TWOHELIXES_PORT": str(port),
         "TWOHELIXES_WORKERS": str(WORKERS),
         "TWOHELIXES_DEV": "1",
+        "TWOHELIXES_DISABLE_EMAIL": "1",
         "TWOHELIXES_INTERP": str(ROOT / "interp"),
         "TWOHELIXES_SITE_PACKAGES": str(SITE_PACKAGES_312),
         # Its own database and its own uploads: an e2e run must never touch
         # the developer's data, and the billing tests move real balances.
         "TWOHELIXES_DATA_DIR": str(data_dir),
     }
+
+    # Load the same runtime as the selected venv, rather than the shell's
+    # system Python. Embedded Mojo needs the C symbols globally visible.
+    runtime = json.loads(subprocess.check_output([
+        str(ROOT / ".venv" / "bin" / "python"), "-c",
+        "import json,sys,sysconfig; print(json.dumps([sys.base_prefix, sysconfig.get_config_var('LIBDIR'), sysconfig.get_config_var('LDLIBRARY')]))",
+    ], text=True))
+    library = str(Path(runtime[1]) / runtime[2])
+    env.update(PYTHONHOME=runtime[0], LD_PRELOAD=library, MOJO_PYTHON_LIBRARY=library)
 
     # To a file rather than a pipe: a pipe nobody drains fills its buffer and
     # blocks the server mid-test, which looks exactly like a hang in whatever
@@ -299,8 +309,21 @@ class Client:
     def post(self, path: str, body: Any = None, **kwargs: Any) -> Any:
         return self.request("POST", path, body, **kwargs)
 
-    def sign_in(self, email: str) -> dict[str, Any]:
-        status, body = self.post("/v1/auth/signin", {"email": email})
+    def sign_in(self, email: str, password: str = "test-password-123") -> dict[str, Any]:
+        status, body = self.post(
+            "/v1/auth/signup", {"email": email, "password": password}
+        )
+        if status == 409:
+            status, body = self.post(
+                "/v1/auth/signin", {"email": email, "password": password}
+            )
+        assert status == 200, body
+        return body
+
+    def sign_up(self, email: str, password: str = "test-password-123") -> dict[str, Any]:
+        status, body = self.post(
+            "/v1/auth/signup", {"email": email, "password": password}
+        )
         assert status == 200, body
         return body
 

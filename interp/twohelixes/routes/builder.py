@@ -20,6 +20,7 @@ from typing import Any
 from twohelixes import auth, config, credits, llm, ratelimit, router, store
 from twohelixes.charts import defaults as chart_defaults
 from twohelixes.pipeline import figures, transform
+from twohelixes.routes import teams
 
 log = logging.getLogger("twohelixes.routes.builder")
 
@@ -301,12 +302,15 @@ def save(ctx: router.Context) -> router.Result:
     chart_config = ctx.field("config") or {}
     figure = ctx.field("figure") or {}
     chart_id = str(ctx.field("chart_id") or "") or store.new_id()
+    dashboard_id = str(ctx.field("dashboard_id") or "")
     now = time.time()
     shaped_rows = _shaped_rows(identity, ctx, steps)
 
-    existing = store.one(
-        "SELECT id FROM charts WHERE id = ? AND user_id = ?", (chart_id, identity.user_id)
-    )
+    existing = store.one("SELECT id FROM charts WHERE id = ?", (chart_id,))
+    if existing and not teams.can_write(identity.user_id, "chart", chart_id):
+        return router.error(404, "not_found")
+    if dashboard_id and not teams.can_write(identity.user_id, "dashboard", dashboard_id):
+        return router.error(404, "dashboard_not_found")
     # The descriptor travels with the chart. Without it a built chart could be
     # looked at and nothing else: the manual controls, the tile editor and
     # dashboard refresh all need a frame, and there was nothing to rebuild one
@@ -343,7 +347,7 @@ def save(ctx: router.Context) -> router.Result:
             (
                 chart_id,
                 identity.user_id,
-                ctx.field("dashboard_id"),
+                dashboard_id or None,
                 str(chart_config.get("title") or "Chart")[:200],
                 str(ctx.field("sql") or ctx.field("request") or ""),
                 ctx.field("source_id"),

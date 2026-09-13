@@ -50,7 +50,7 @@ interface ConnectionTest {
   kind: string;
 }
 
-interface UploadResult {
+export interface UploadResult {
   dataset_id: string;
   name: string;
   rows: number;
@@ -78,9 +78,13 @@ export interface SourcesPanelOptions {
     datasets: DatasetSummary[],
     selected?: { type: "source" | "dataset"; id: string },
   ) => void;
+  onUploaded?: (datasets: UploadResult[]) => void;
 }
 
-const ACCEPTED_FILES = ".csv,.tsv,.xlsx,.xls,.ods,.parquet,.json";
+const ACCEPTED_FILES =
+  ".csv,.tsv,.txt,.json,.ndjson,.jsonl,.parquet,.pq,.xlsx,.xls,.xlsm,.xlsb," +
+  ".ods,.xml,.dbf,.gz,.zip,.pdf,.doc,.docx,.pptx,.html,.htm,.md," +
+  ".rtf,.epub,.msg";
 const FOCUSABLE =
   'button:not([disabled]), input:not([disabled]), select:not([disabled]), ' +
   'textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
@@ -153,7 +157,7 @@ export class SourcesPanel {
     this.inventory = el("div", "library-scroll");
 
     const actions = el("footer", "library-action-bar");
-    const upload = this.actionButton("Upload", () => this.openUploadSheet());
+    const upload = this.actionButton("Upload", () => this.chooseFiles());
     upload.classList.add("btn-primary");
     const connect = this.actionButton("Connect", () => void this.openConnectSheet());
     actions.append(upload, connect);
@@ -184,6 +188,27 @@ export class SourcesPanel {
     node.textContent = "Library";
     node.addEventListener("click", () => void this.open());
     return node;
+  }
+
+  uploadButton(): HTMLButtonElement {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "btn";
+    node.textContent = "Upload";
+    node.addEventListener("click", () => this.chooseFiles());
+    return node;
+  }
+
+  chooseFiles(): void {
+    this.fileInput.click();
+  }
+
+  async acceptFiles(files: File[]): Promise<void> {
+    await this.addFiles(files);
+  }
+
+  dismiss(): void {
+    this.close();
   }
 
   sync(sources: SourceSummary[], datasets: DatasetSummary[]): void {
@@ -739,6 +764,8 @@ export class SourcesPanel {
     if (this.pendingDeletes.has(key)) return;
     if (item.type === "dataset") {
       this.library.datasets = this.library.datasets.filter((value) => value.id !== item.value.id);
+      this.datasets = this.datasets.filter((value) => value.id !== item.value.id);
+      this.propagate();
     } else {
       this.library.sources = this.library.sources.filter((value) => value.id !== item.value.id);
       this.sources = this.sources.filter((value) => value.id !== item.value.id);
@@ -753,8 +780,18 @@ export class SourcesPanel {
       if (timer) window.clearTimeout(timer);
       this.pendingDeletes.delete(key);
       toast.remove();
-      if (item.type === "dataset") this.library.datasets.push(item.value);
-      else {
+      if (item.type === "dataset") {
+        this.library.datasets.push(item.value);
+        this.datasets.push({
+          id: item.value.id,
+          name: item.value.name,
+          description: item.value.description ?? "",
+          columns: [],
+          row_count: item.value.rows,
+          created_at: 0,
+        });
+        this.propagate();
+      } else {
         this.library.sources.push(item.value);
         this.sources.push({
           ...item.value,
@@ -773,8 +810,18 @@ export class SourcesPanel {
       try {
         await api.del(`/v1/${item.type === "dataset" ? "datasets" : "sources"}/${encodeURIComponent(item.value.id)}`);
       } catch (error) {
-        if (item.type === "dataset") this.library.datasets.push(item.value);
-        else {
+        if (item.type === "dataset") {
+          this.library.datasets.push(item.value);
+          this.datasets.push({
+            id: item.value.id,
+            name: item.value.name,
+            description: item.value.description ?? "",
+            columns: [],
+            row_count: item.value.rows,
+            created_at: 0,
+          });
+          this.propagate();
+        } else {
           this.library.sources.push(item.value);
           this.sources.push({
             ...item.value,
@@ -806,7 +853,7 @@ export class SourcesPanel {
     const title = el("strong");
     title.textContent = "Drop files here or tap to choose";
     const detail = el("span");
-    detail.textContent = "CSV, TSV, Excel, ODS, Parquet, or JSON";
+    detail.textContent = "Tables, spreadsheets, documents, archives, and more";
     zone.append(title, detail);
     zone.addEventListener("click", () => this.fileInput.click());
     zone.addEventListener("keydown", (event) => {
@@ -870,14 +917,21 @@ export class SourcesPanel {
   }
 
   private async addFiles(files: File[]): Promise<void> {
+    if (!files.length) return;
     const additions = files.map<UploadItem>((file) => ({
       file,
       progress: 0,
       state: "queued",
     }));
     this.uploads.push(...additions);
+    await this.open();
+    this.openUploadSheet();
     this.renderUploads();
     await Promise.all(additions.map((item) => this.uploadOne(item)));
+    const uploaded = additions
+      .filter((item) => item.state === "success" && item.result)
+      .map((item) => item.result!);
+    if (uploaded.length) this.options.onUploaded?.(uploaded);
   }
 
   private async uploadOne(item: UploadItem): Promise<void> {

@@ -329,11 +329,17 @@ def _prepare(identity: Any, ctx: router.Context) -> tuple[dict[str, Any] | None,
     from twohelixes.routes import query as query_routes
 
     try:
-        frames = query_routes._load_frames(identity, ctx)
+        frames = query_routes._load_frames(identity, ctx, goal)
+    except query_routes.DataSelectionError as exc:
+        return {"code": exc.code, "status": 400, "message": str(exc)}, {}
     except Exception as exc:  # noqa: BLE001
         return {"code": "data_unavailable", "status": 400, "message": str(exc)}, {}
     if not frames:
-        return {"code": "no_data", "status": 400}, {}
+        return {
+            "code": "no_datasets",
+            "status": 400,
+            "message": "You don’t have any datasets available. Upload a file or attach a sample.",
+        }, {}
 
     job_id = store.new_id()
     now = time.time()

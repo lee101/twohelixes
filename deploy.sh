@@ -154,7 +154,7 @@ upload_r2() {
     --endpoint-url "$R2_ENDPOINT" \
     --exclude 'chunk-*' \
     --cache-control 'public, max-age=300, must-revalidate' \
-    --delete --no-progress
+    --no-progress
 }
 
 purge_cache() {
@@ -205,7 +205,7 @@ if [ "$DRY_RUN" = 0 ]; then
   # The dataset pages and the crawl surface are verified too: they are the
   # largest bodies the server produces and the ones a crawler hits first, so a
   # deploy that breaks them breaks the part nobody is watching.
-  for path in / /pricing /features /docs /app /healthz \
+  for path in / /pricing /features /docs /app /healthz /account \
               /datasets /datasets/orders /robots.txt /sitemap.xml; do
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "${PUBLIC_URL}${path}" || echo 000)
     printf '    %-10s %s\n' "$path" "$code"
@@ -229,6 +229,24 @@ if [ "$DRY_RUN" = 0 ]; then
     fail=1
   fi
 
+  # Assets must resolve from the R2 public host in production, not only from
+  # the origin disk path. A deploy that uploads nowhere leaves the CDN stale.
+  for asset in marketing.js app.js libs/topojson/world_110m.json; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 \
+      "https://${R2_PUBLIC_HOST}/${asset}" || echo 000)
+    printf '    cdn/%-20s %s\n' "$asset" "$code"
+    [ "$code" = 200 ] || fail=1
+  done
+
+  html=$(curl -fsS -m 20 "${PUBLIC_URL}/pricing" || true)
+  if printf '%s' "$html" | grep -q "${R2_PUBLIC_HOST}/marketing.js"; then
+    printf '    %-10s %s\n' "cdn-html" "marketing.js from ${R2_PUBLIC_HOST}"
+  elif printf '%s' "$html" | grep -q '/static/marketing.js'; then
+    warn "pricing still points at /static/marketing.js (dev mode or STATIC_URL unset)"
+  else
+    warn "pricing page has no marketing.js reference"
+    fail=1
+  fi
   # Whether the *server's* embedded interpreter found pybed, which is not the
   # same question as whether ./.venv/bin/python can import it: the binary adds
   # site-packages with sys.path.insert and never runs a `.pth`, so an editable

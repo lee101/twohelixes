@@ -16,7 +16,7 @@ import math
 import re
 from typing import Any
 
-from twohelixes.charts import palette
+from twohelixes.charts import geo, palette
 
 log = logging.getLogger("twohelixes.charts.forms")
 
@@ -396,21 +396,40 @@ def map_chart(
         else:
             grouped = frame.groupby(country, dropna=False).size().reset_index(name="_count")
             measure = "_count"
+        raw_locations = grouped[country].astype(str).tolist()
+        codes, unmatched = geo.locations_to_iso3(raw_locations)
+        warnings: list[str] = []
+        if unmatched:
+            warnings.append(
+                f"{unmatched} location(s) could not be matched to a country code."
+            )
+        if not codes:
+            return [], ["No country codes could be resolved for a map."]
+        # Re-align z with the matched locations only.
+        z_values: list[float] = []
+        kept_codes: list[str] = []
+        for location, number in zip(raw_locations, grouped[measure].tolist()):
+            code = geo.to_iso3(location)
+            if code is None:
+                continue
+            kept_codes.append(code)
+            z_values.append(float(number))
         return [
             {
                 "type": "choropleth",
-                "locations": grouped[country].astype(str).tolist(),
-                "locationmode": detected["locationmode"],
-                "z": [float(number) for number in grouped[measure].tolist()],
+                "locations": kept_codes,
+                "locationmode": "ISO-3",
+                "z": z_values,
                 "colorscale": ramp,
                 "showscale": True,
+                "autocolorscale": False,
                 "_series_index": 0,
             }
-        ], []
+        ], warnings
 
     latitude, longitude = detected["lat"], detected["lon"]
     groups = [None]
-    warnings: list[str] = []
+    warnings = []
     if color and color not in (latitude, longitude) and color != value:
         groups = list(frame[color].dropna().unique())
         limit = palette.max_series_for("map")
@@ -444,6 +463,115 @@ def map_chart(
             }
         )
     return traces, warnings
+
+
+# --------------------------------------------------------------------------
+# Word cloud
+# --------------------------------------------------------------------------
+
+
+_STOP = frozenset(
+    """
+    a an the and or but if in on at to for of from by with without about into
+    through during before after above below between under again further then
+    once here there when where why how all each few more most other some such
+    no nor not only own same so than too very can will just should now is are
+    was were be been being it its this that these those i you he she we they
+    """.split()
+)
+
+
+def _text_blob(frame: Any, column: str | None) -> str:
+    if column and column in {str(c) for c in frame.columns}:
+        return " ".join(str(value) for value in frame[column].dropna().tolist())
+    parts: list[str] = []
+    for name in frame.columns:
+        series = frame[name]
+        if getattr(series.dtype, "kind", "") in "OUS":
+            parts.extend(str(value) for value in series.dropna().tolist())
+    return " ".join(parts)
+
+
+def _word_frequencies(text: str) -> dict[str, float]:
+    counts: dict[str, int] = {}
+    for raw in re.findall(r"[A-Za-z][A-Za-z'-]{1,}", text.casefold()):
+        if raw in _STOP or len(raw) < 3:
+            continue
+        counts[raw] = counts.get(raw, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:80]
+    return {word: float(count) for word, count in ranked}
+
+
+def wordcloud(
+    frame: Any, config: dict[str, Any], mode: str = "light"
+) -> tuple[list, list[str]]:
+    """Frequency cloud of free text. Falls back to a bar if there is no text."""
+    text_col = _column(frame, config.get("x") or config.get("text"))
+    blob = _text_blob(frame, text_col)
+    frequencies = _word_frequencies(blob)
+    if len(frequencies) < 3:
+        return [], ["Not enough distinct words for a word cloud."]
+
+    face = palette.surface(mode)
+    try:
+        from wordcloud import WordCloud
+
+        image = WordCloud(
+            background_color=face.background,
+            max_words=120,
+            width=1280,
+            height=720,
+            prefer_horizontal=0.85,
+            relative_scaling=0.45,
+            colormap="Blues" if mode == "light" else "Blues_r",
+        ).generate_from_frequencies(frequencies)
+        import base64
+        from io import BytesIO
+
+        buffer = BytesIO()
+        image.to_image().save(buffer, format="PNG")
+        payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return [
+            {
+                "type": "image",
+                "source": f"data:image/png;base64,{payload}",
+                "xref": "paper",
+                "yref": "paper",
+                "x": 0,
+                "y": 1,
+                "sizex": 1,
+                "sizey": 1,
+                "sizing": "stretch",
+                "layer": "below",
+                "_series_index": 0,
+            }
+        ], []
+    except Exception as exc:  # noqa: BLE001 - optional dependency / render
+        log.info("wordcloud image path unavailable (%s); using text marks", exc)
+
+    words = list(frequencies.keys())
+    weights = list(frequencies.values())
+    peak = max(weights) or 1.0
+    sizes = [12 + 28 * (weight / peak) for weight in weights]
+    # Deterministic scatter so the same question redraws the same cloud.
+    xs = [(index % 10) + (index % 3) * 0.15 for index in range(len(words))]
+    ys = [(index // 10) + (index % 5) * 0.08 for index in range(len(words))]
+    return [
+        {
+            "type": "scatter",
+            "mode": "text",
+            "x": xs,
+            "y": ys,
+            "text": words,
+            "textfont": {
+                "size": sizes,
+                "color": palette.categorical(mode)[0],
+            },
+            "hovertext": [f"{word}: {int(weight)}" for word, weight in frequencies.items()],
+            "hoverinfo": "text",
+            "_series_index": 0,
+        }
+    ], ["Drew words as text marks because the image renderer was unavailable."]
 
 
 # --------------------------------------------------------------------------
@@ -644,6 +772,7 @@ BUILDERS = {
     "funnel": funnel,
     "waterfall": waterfall,
     "box": box,
+    "wordcloud": wordcloud,
 }
 
 

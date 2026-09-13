@@ -1,9 +1,8 @@
 """LLM access through the OpenPaths gateway.
 
-Interactive chart work runs on `gpt-5.6-luna` (the cheap tier) because every
-interactive request is rate limited and the pipeline calls the model several
-times per query. Long-running and deep-research agents escalate to terra/sol,
-which only paying callers can reach.
+Analysis runs on Muse Spark 1.3 through the OpenPaths gateway. Small structured
+decisions use DeepSeek Flash and escalate when needed. Each model has its own
+circuit breaker; a provider outage can fall back without blocking other routes.
 
 Every call is priced. `usage` comes back on the response, `PRICES` mirrors the
 gateway's own table, and `spend()` accumulates the cost of a whole pipeline run
@@ -36,17 +35,25 @@ log = logging.getLogger("twohelixes.llm")
 
 _client_lock = threading.Lock()
 _client: Any = None
+_deepseek_client: Any = None
 
 JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
-# The gateway serves aliases (gpt-5.6-luna, auto-easy-task). Talking straight
-# to OpenAI, those do not exist, so map each to its nearest public model.
+# The gateway serves aliases (deepseek-v4-flash, openpaths/stealth/ox-alpha).
+# Talking straight to OpenAI, those do not exist, so map each to its nearest
+# public model. Kept for the no-gateway fallback path only.
 DIRECT_MODEL_FALLBACK = {
+    config.MODEL_PRIMARY: "gpt-4.1-mini",
     config.MODEL_DEFAULT: "gpt-4.1-mini",
     config.MODEL_ESCALATE: "gpt-4.1",
     config.MODEL_DEEP: "gpt-4.1",
     config.MODEL_FAST: "gpt-4.1-nano",
     config.MODEL_MINI: "gpt-4.1-nano",
+    "deepseek-v4-flash": "gpt-4.1-mini",
+    "deepseek-v4-pro": "gpt-4.1",
+    "gpt-5.6-luna": "gpt-4.1-mini",
+    "gpt-5.6-terra": "gpt-4.1",
+    "gpt-5.6-sol": "gpt-4.1",
 }
 
 
@@ -55,14 +62,26 @@ DIRECT_MODEL_FALLBACK = {
 # a network call - and because a silent gateway price change should show up as
 # a margin discrepancy here, not as an invisible one.
 PRICES = {
+    # Verified against the gateway catalogue, September 2026. Contributor is
+    # opt-in (config); it must also be provisioned by the gateway operator.
+    "muse-spark-1.3": (1.25, 4.25),
+    # The stealth route is free at the gateway (openpaths config.yaml prices
+    # it 0/0); the entry exists so spend accounting never silently falls back
+    # to DEFAULT_PRICE for the model that serves most requests.
+    "openpaths/stealth/ox-alpha": (0.0, 0.0),
+    "stealth/ox-alpha": (0.0, 0.0),
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),
     "gpt-5.6-luna": (1.00, 6.00),
     "gpt-5.6-terra": (2.50, 15.00),
     "gpt-5.6-sol": (5.00, 30.00),
     "auto-easy-task": (0.15, 0.60),
-    "deepseek-v4-flash": (0.14, 0.28),
-    "deepseek-v4-pro": (0.435, 0.87),
 }
-DEFAULT_PRICE = (1.00, 6.00)
+
+# Conservative estimate for custom/unpriced routes, not a provider price quote.
+# dict.get evaluates its default eagerly, even for known models. Without this
+# constant _record swallowed NameError and every run appeared to cost zero.
+DEFAULT_PRICE = (5.00, 30.00)
 
 
 @dataclass
@@ -173,11 +192,85 @@ class Circuit:
                 log.warning("LLM circuit opened after %d failures", self.failures)
 
 
-_circuit = Circuit()
+_circuits: dict[str, Circuit] = {}
+_circuits_lock = threading.Lock()
 
 
-def client() -> Any:
-    global _client
+def _circuit_for(model: str) -> Circuit:
+    """One breaker per model id, not per gateway: the stealth route and the
+    legacy DeepSeek routes fail independently, and an ox-alpha outage must
+    not stop a call that can complete on deepseek."""
+    with _circuits_lock:
+        circuit = _circuits.get(model)
+        if circuit is None:
+            circuit = Circuit()
+            _circuits[model] = circuit
+        return circuit
+
+
+# Where each tier goes when its model's circuit is open or the calls keep
+# failing. The legacy DeepSeek routes are the "current model" every tier
+# migrated away from; they stay wired in permanently so the migration cannot
+# turn into an outage.
+MODEL_FALLBACKS: dict[str, str] = {
+    config.MODEL_DEFAULT: "deepseek-v4-flash",
+    config.MODEL_FAST: "deepseek-v4-flash",
+    config.MODEL_MINI: "deepseek-v4-flash",
+    config.MODEL_ESCALATE: "deepseek-v4-flash",
+    config.MODEL_DEEP: "deepseek-v4-flash",
+}
+# The fast tier must also have a distinct fallback. Do not fall back from an
+# explicitly chosen non-contributor route to a contributor model.
+MODEL_FALLBACKS["deepseek-v4-flash"] = "deepseek-v4-pro"
+
+
+def fallback_model(model: str) -> str | None:
+    fallback = MODEL_FALLBACKS.get(model)
+    return fallback if fallback and fallback != model else None
+
+
+def _route_dead(exc: Exception) -> bool:
+    """A 429 / no-healthy-provider reply means this route is out for now.
+
+    Retrying within seconds only burns the caller's latency: the gateway has
+    already marked the provider unhealthy, and the upstream pool is shared.
+    One failure books on the circuit and the request moves to the fallback.
+    """
+    text = str(exc).lower()
+    return (
+        "429" in text
+        or "rate-limited" in text
+        or "no healthy provider" in text
+        or "provider returned error" in text
+    )
+
+
+def client(model: str | None = None) -> Any:
+    global _client, _deepseek_client
+    # Prefer the openpaths gateway when configured - including for deepseek
+    # ids - so local DEV hits `../openpaths` and production stays one path.
+    # Direct DeepSeek is only for the no-gateway fallback.
+    if (
+        model
+        and model.startswith("deepseek-")
+        and not config.using_gateway()
+    ):
+        key, base_url = config.deepseek_credentials()
+        if key:
+            if _deepseek_client is not None:
+                return _deepseek_client
+            with _client_lock:
+                if _deepseek_client is None:
+                    from openai import OpenAI
+
+                    _deepseek_client = OpenAI(
+                        api_key=key,
+                        base_url=base_url,
+                        timeout=180.0,
+                        max_retries=0,
+                    )
+                    log.info("llm provider=deepseek base=%s", base_url)
+            return _deepseek_client
     if _client is not None:
         return _client
     with _client_lock:
@@ -207,6 +300,8 @@ def client() -> Any:
 def resolve_model(model: str) -> str:
     """Map a gateway alias to a public model when talking to OpenAI directly."""
     if config.using_gateway():
+        return model
+    if model.startswith("deepseek-") and config.deepseek_credentials()[0]:
         return model
     return DIRECT_MODEL_FALLBACK.get(model, model)
 
@@ -251,6 +346,12 @@ def extract_json(text: str) -> Any:
     raise LLMError(f"no JSON in response: {text[:200]}")
 
 
+def _candidates(model: str) -> list[str]:
+    """The requested model first, then its circuit-break fallback."""
+    fallback = fallback_model(model)
+    return [model, fallback] if fallback else [model]
+
+
 def call(
     prompt: str,
     *,
@@ -260,42 +361,62 @@ def call(
     max_tokens: int = 4096,
     attempts: int = 3,
 ) -> str:
-    """One completion, with backoff. Returns raw text."""
+    """One completion, with backoff. Returns raw text.
+
+    Each candidate model gets its own circuit breaker and its own backoff;
+    when the primary is open or exhausted, the legacy route takes the request
+    rather than the caller seeing an error.
+    """
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
     last: Exception | None = None
-    for attempt in range(attempts):
-        _circuit.before()
-        try:
-            started = time.time()
-            response = client().chat.completions.create(
-                model=resolve_model(model),
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            _circuit.ok()
-            _record(model, getattr(response, "usage", None))
-            text = response.choices[0].message.content or ""
-            log.debug(
-                "llm %s ok in %dms (%d chars)",
-                model,
-                int((time.time() - started) * 1000),
-                len(text),
-            )
-            return text
-        except CircuitOpen:
-            raise
-        except Exception as exc:  # noqa: BLE001 - gateway errors are varied
-            last = exc
-            _circuit.fail()
-            if attempt + 1 < attempts:
-                time.sleep(0.5 * (2**attempt))
-            log.warning("llm %s attempt %d failed: %s", model, attempt + 1, exc)
+    opened = False
+    for candidate in _candidates(model):
+        circuit = _circuit_for(candidate)
+        for attempt in range(attempts):
+            try:
+                circuit.before()
+            except CircuitOpen:
+                opened = True
+                break
+            try:
+                started = time.time()
+                response = client(candidate).chat.completions.create(
+                    model=resolve_model(candidate),
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                # Attribute spend to the model that actually served: after a
+                # fallback the price is the legacy route's, not the primary's.
+                _record(candidate, getattr(response, "usage", None))
+                text = response.choices[0].message.content or ""
+                if not text.strip():
+                    raise LLMError("model returned no answer (possibly exhausted reasoning budget)")
+                circuit.ok()
+                log.debug(
+                    "llm %s%s ok in %dms (%d chars)",
+                    candidate,
+                    "" if candidate == model else f" (fallback for {model})",
+                    int((time.time() - started) * 1000),
+                    len(text),
+                )
+                return text
+            except Exception as exc:  # noqa: BLE001 - gateway errors are varied
+                last = exc
+                circuit.fail()
+                if _route_dead(exc):
+                    log.warning("llm %s route unavailable, falling back: %s", candidate, exc)
+                    break
+                if attempt + 1 < attempts:
+                    time.sleep(0.5 * (2**attempt))
+                log.warning("llm %s attempt %d failed: %s", candidate, attempt + 1, exc)
 
+    if opened and last is None:
+        raise CircuitOpen("LLM gateway circuit is open")
     raise LLMError(f"LLM call failed after {attempts} attempts: {last}")
 
 
@@ -350,47 +471,76 @@ def stream(
     """Stream a completion, invoking `on_delta` per token chunk.
 
     This is what makes the reasoning trace feel live: the caller forwards each
-    delta straight onto the SSE stream.
+    delta straight onto the SSE stream. A candidate that fails before its
+    first delta hands the request to the fallback; once deltas have been
+    forwarded there is no clean replay, so a mid-stream failure surfaces.
     """
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    _circuit.before()
-    parts: list[str] = []
-    try:
-        response = client().chat.completions.create(
-            model=resolve_model(model),
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-            # A streamed call reports its usage only in a final, choice-less
-            # chunk, and only if asked. Without this the trace - the most
-            # visible thing the product does - would be the one call whose cost
-            # we never counted.
-            stream_options={"include_usage": True},
-        )
-        for chunk in response:
-            if getattr(chunk, "usage", None) is not None:
-                _record(model, chunk.usage)
-            if not chunk.choices:
+    last: Exception | None = None
+    opened = False
+    for candidate in _candidates(model):
+        circuit = _circuit_for(candidate)
+        try:
+            circuit.before()
+        except CircuitOpen:
+            opened = True
+            continue
+        parts: list[str] = []
+        try:
+            response = client(candidate).chat.completions.create(
+                model=resolve_model(candidate),
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                # A streamed call reports its usage only in a final, choice-less
+                # chunk, and only if asked. Without this the trace - the most
+                # visible thing the product does - would be the one call whose
+                # cost we never counted.
+                stream_options={"include_usage": True},
+            )
+            for chunk in response:
+                if getattr(chunk, "usage", None) is not None:
+                    _record(candidate, chunk.usage)
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                piece = getattr(delta, "content", None)
+                if piece:
+                    parts.append(piece)
+                    if on_delta is not None:
+                        on_delta(piece)
+            answer = "".join(parts)
+            if not answer.strip():
+                raise LLMError("model stream returned no answer")
+            circuit.ok()
+            return answer
+        except CircuitOpen:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            circuit.fail()
+            last = exc
+            if parts:
+                # Deltas already went to the caller; replaying them on another
+                # model would duplicate the answer half-formed.
+                break
+            if _route_dead(exc):
+                log.warning("llm stream %s route unavailable, falling back: %s", candidate, exc)
                 continue
-            delta = chunk.choices[0].delta
-            piece = getattr(delta, "content", None)
-            if piece:
-                parts.append(piece)
-                if on_delta is not None:
-                    on_delta(piece)
-        _circuit.ok()
-    except CircuitOpen:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        _circuit.fail()
-        raise LLMError(f"streaming call failed: {exc}") from exc
+            log.warning(
+                "llm stream %s%s failed before first delta: %s",
+                candidate,
+                "" if candidate == model else f" (fallback for {model})",
+                exc,
+            )
 
-    return "".join(parts)
+    if opened and last is None:
+        raise CircuitOpen("LLM gateway circuit is open")
+    raise LLMError(f"streaming call failed: {last}")
 
 
 def parallel(calls: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:

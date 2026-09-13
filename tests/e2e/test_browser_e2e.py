@@ -66,7 +66,11 @@ def _app(browser: Any, server: Any, viewport: dict, theme: str = "light") -> Any
     # header carries the way in for someone who has already decided.
     page.click("button:has-text('Sign in')")
     page.wait_for_selector("input.signin-input", timeout=10000)
-    page.fill("input.signin-input", f"browser-{page.evaluate('Date.now()')}@twohelixes.test")
+    page.fill(
+        "input.signin-input[type=email]",
+        f"browser-{page.evaluate('Date.now()')}@twohelixes.test",
+    )
+    page.fill("input.signin-input[type=password]", "test-password-123")
     page.click("button[type=submit]")
     page.wait_for_selector("textarea.ask-input", timeout=15000)
     return page

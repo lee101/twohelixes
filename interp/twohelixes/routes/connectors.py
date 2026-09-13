@@ -550,11 +550,18 @@ def attach_sample(ctx: router.Context) -> router.Result:
 @router.get("/v1/datasets")
 def list_datasets(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    from twohelixes.routes import teams
+
+    teams.ensure_schema()
     rows = store.query(
-        "SELECT id, name, description, folder_id, columns, row_count, shape_report, "
-        "created_at, updated_at FROM datasets "
-        "WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
-        (identity.user_id,),
+        "SELECT DISTINCT d.id, d.name, d.description, d.folder_id, d.columns, "
+        "d.row_count, d.shape_report, d.created_at, d.updated_at "
+        "FROM datasets d "
+        "LEFT JOIN team_objects o ON o.kind = 'dataset' AND o.object_id = d.id "
+        "LEFT JOIN team_members m ON m.team_id = o.team_id AND m.user_id = ? "
+        "WHERE d.user_id = ? OR m.user_id = ? "
+        "ORDER BY d.created_at DESC LIMIT 200",
+        (identity.user_id, identity.user_id, identity.user_id),
     )
     out = store.rows_to_dicts(rows)
     for entry in out:

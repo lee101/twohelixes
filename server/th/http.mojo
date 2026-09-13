@@ -96,10 +96,9 @@ struct Request(Movable):
     var target: Slice
     var path: Slice
     var query: Slice
-    # Header references have a small fixed upper bound. Keeping them inline
-    # avoids allocating and growing a heap-backed List on every request while
-    # retaining the same zero-copy slices into the connection buffer.
-    var headers: InlineArray[HeaderRef, MAX_HEADERS]
+    # Preallocate the bounded header storage; parsing only changes its count.
+    # The pinned Mojo toolchain does not expose InlineArray.
+    var headers: List[HeaderRef]
     var header_count: Int
     var body: Slice
     var content_length: Int
@@ -112,7 +111,8 @@ struct Request(Movable):
         self.target = Slice()
         self.path = Slice()
         self.query = Slice()
-        self.headers = InlineArray[HeaderRef, MAX_HEADERS](fill=HeaderRef())
+        self.headers = List[HeaderRef](capacity=MAX_HEADERS)
+        self.headers.resize(MAX_HEADERS, HeaderRef())
         self.header_count = 0
         self.body = Slice()
         self.content_length = 0
@@ -543,7 +543,8 @@ def append_int(mut out: List[UInt8], value: Int):
     var neg = v < 0
     if neg:
         v = -v
-    var digits = InlineArray[UInt8, 24](fill=0)
+    var digits = List[UInt8](capacity=24)
+    digits.resize(24, 0)
     var n = 0
     while v > 0:
         digits[n] = UInt8(48 + (v % 10))
@@ -578,7 +579,7 @@ def serialize(resp: Response, mut out: List[UInt8], head_only: Bool):
     else:
         append_str(out, "Connection: close\r\n")
     append_str(out, "\r\n")
-    if not head_only:
-        # One bounds check and memcpy instead of one append/capacity check for
-        # every byte of a chart, export, or analytics response.
+    if not head_only and len(resp.body) > 0:
+        # One memcpy, not one bounds-checked append per body byte. Healthz is
+        # tiny; static/API bodies are not, and both share this path.
         out.extend(Span(resp.body))

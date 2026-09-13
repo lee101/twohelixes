@@ -12,8 +12,11 @@ import { logo, spinner } from "./helix";
 import { Builder } from "./builder";
 import { DashboardView } from "./dashboard";
 import { DashboardListView } from "./dashboards";
-import { SourcesPanel } from "./sources";
+import { SourcesPanel, type DatasetSummary, type UploadResult } from "./sources";
 import { TraceView } from "./trace";
+import type { SQLWorkbench } from "./sql-workbench";
+import type { SheetsView } from "./sheets";
+import { clearUser, persistUser } from "./user";
 
 interface Sample {
   key: string;
@@ -23,17 +26,21 @@ interface Sample {
   rows: number;
 }
 
-type View = "chat" | "builder" | "dashboard" | "dashboards";
+type View = "chat" | "builder" | "dashboard" | "dashboards" | "sql" | "sheets";
 
 interface State {
   view: View;
   builder: Builder | null;
   dashboard: DashboardView | null;
+  sql: SQLWorkbench | null;
+  sheets: SheetsView | null;
   user: User | null;
   lastResult: PipelineResult | null;
   lastQuestion: string;
   sources: { id: string; name: string; kind: string; supports_sql: boolean }[];
+  datasets: DatasetSummary[];
   activeSource: string | null;
+  activeDataset: string | null;
   /** The sample a signed-out visitor is trying. The only data the trial can
    *  reach, so it is sent by key rather than attached to an account. */
   activeSample: string | null;
@@ -43,23 +50,30 @@ interface State {
   ran: boolean;
   /** The visitor asked for the sign-in form before spending the trial. */
   showSignIn: boolean;
+  /** Team invite carried through account creation/sign-in. */
+  pendingJoin: string | null;
 }
 
 const state: State = {
   view: "chat",
   builder: null,
   dashboard: null,
+  sql: null,
+  sheets: null,
   user: null,
   lastResult: null,
   lastQuestion: "",
   sources: [],
+  datasets: [],
   activeSource: null,
+  activeDataset: null,
   activeSample: null,
   cancel: null,
   samples: [],
   suggestions: [],
   ran: false,
   showSignIn: false,
+  pendingJoin: null,
 };
 
 const root = document.getElementById("root")!;
@@ -72,13 +86,48 @@ const chart = new ChartView({
 });
 
 boot().catch((error) => showFatal(error));
+installGlobalFileDrop();
 
 async function boot(): Promise<void> {
+  const sharedToken = root.dataset.share;
+  const sharedKind = root.dataset.shareKind;
+  if (sharedToken) {
+    state.user = null;
+    if (sharedKind === "dashboard") {
+      await openDashboard(sharedToken, true);
+      return;
+    }
+    if (sharedKind === "chart") {
+      const payload = await api.get<{
+        object: { id: string; title: string; spec: PlotlyFigure; graph_args: ChartConfig };
+      }>(`/v1/shared/${sharedToken}?mode=${prefersDark() ? "dark" : "light"}`);
+      const sharedChart = new ChartView();
+      const main = el("main", "app-main shared-chart-page");
+      main.append(sharedChart.root);
+      root.replaceChildren(header(), main);
+      await sharedChart.show({
+        figure: payload.object.spec,
+        config: payload.object.graph_args ?? {},
+        preview: [],
+        columns: [],
+        row_count: 0,
+        warnings: [],
+        audit: [],
+        transform_code: "",
+        elapsed_ms: 0,
+      });
+      return;
+    }
+  }
+
   try {
     state.user = await api.me();
     identify(state.user.user_id);
+    if (state.user?.signed_in) persistUser(state.user);
+    else clearUser();
   } catch {
     state.user = null;
+    clearUser();
   }
 
   // A dataset page links here with the question it just showed. Arriving with
@@ -87,14 +136,19 @@ async function boot(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
   const sample = params.get("sample");
   const question = params.get("q");
+  state.pendingJoin = params.get("join");
   if (sample) state.activeSample = sample;
   // Through state, not through the DOM: loadSources() and loadSamples() both
   // re-render, and a value written straight onto the textarea is gone by the
   // time either of them lands.
   if (question) state.lastQuestion = question;
 
+  const joined = state.user?.signed_in ? await acceptPendingInvite() : false;
+  if (state.pendingJoin && !state.user?.signed_in) state.showSignIn = true;
+  if (joined) state.view = "dashboards";
   render();
-  if (state.user?.signed_in) void loadSources();
+  if (joined) void dashboardList().load();
+  else if (state.user?.signed_in) void loadSources();
   // The samples are what an anonymous visitor can ask about, so they have to
   // load before sign-in rather than after it.
   else void loadSamples();
@@ -135,7 +189,10 @@ function header(): HTMLElement {
       meta.textContent = `${state.user.api_credits.toLocaleString()} credits`;
       right.append(meta);
     }
-    right.append(themeToggle(), button("Sign out", signOut));
+    const account = el("a", "btn btn-ghost") as HTMLAnchorElement;
+    account.href = "/account";
+    account.textContent = "Account";
+    right.append(themeToggle(), account);
   } else {
     // A visitor who has decided to sign up should not have to spend the trial
     // first to find the form.
@@ -171,6 +228,8 @@ function nav(): HTMLElement {
       view: "dashboards",
       go: () => void openDashboardList(),
     },
+    { label: "SQL", view: "sql", go: () => void openSqlWorkbench() },
+    { label: "Sheets", view: "sheets", go: () => void openSheets() },
   ];
 
   for (const item of items) {
@@ -230,7 +289,7 @@ function main(): HTMLElement {
   // Anonymous visitors get the product, not a form. They can ask one question
   // on the sample data; the sign-in panel appears when they have seen it work,
   // which is the only moment an email is worth asking for.
-  if (!state.user?.signed_in && (state.ran || state.showSignIn)) {
+  if (!state.user?.signed_in && state.showSignIn) {
     wrap.append(
       signInPanel(state.ran ? "You have seen it work. Keep going?" : ""),
     );
@@ -254,6 +313,16 @@ function main(): HTMLElement {
     wrap.append(dashboardList().root);
     return wrap;
   }
+  if (state.view === "sql" && state.sql) {
+    wrap.classList.add("app-main-wide");
+    wrap.append(state.sql.root);
+    return wrap;
+  }
+  if (state.view === "sheets" && state.sheets) {
+    wrap.classList.add("app-main-wide");
+    wrap.append(state.sheets.root);
+    return wrap;
+  }
 
   const left = el("div", "app-left");
   left.append(askPanel());
@@ -266,6 +335,16 @@ function main(): HTMLElement {
   // Before the first run there is no chart, and an empty panel is a dead end.
   // The samples are the only thing a brand-new account can actually ask about.
   right.append(state.ran || !state.samples.length ? chart.root : starterPanel());
+  if (!state.user?.signed_in && state.lastResult) {
+    const invite = el("div", "card");
+    const note = el("p");
+    note.textContent = "Your first answer is ready. Create a free account to keep exploring.";
+    invite.append(note, button("Keep exploring — create account", () => {
+      state.showSignIn = true;
+      render();
+    }));
+    right.append(invite);
+  }
 
   wrap.append(left, right);
   return wrap;
@@ -283,8 +362,9 @@ function starterPanel(): HTMLElement {
   const heading = el("h2");
   heading.textContent = "Start with a sample";
   const lede = el("p", "starter-lede");
-  lede.textContent =
-    "Nothing connected yet. Load one of these and ask it something — or connect your own source from the picker above.";
+  lede.textContent = state.user?.signed_in
+    ? "Nothing connected yet. Load one of these and ask it something — or connect your own source from the picker above."
+    : `Ask one question now without an account. Sign in for ${state.user?.free_queries_total || 10} free charts a month — no card, and the sample data is already loaded.`;
 
   const list = el("ul", "sample-list");
   for (const sample of state.samples.slice(0, 6)) {
@@ -381,7 +461,9 @@ function signInPanel(prompt = ""): HTMLElement {
   heading.textContent = prompt || "Sign in to start asking";
   const lede = el("p", "signin-lede");
   lede.textContent =
-    "An email, and nothing else — no password, no card. Then point it at your own data.";
+    "Sign in once and this browser stays signed in until you sign out.";
+
+  let mode: "login" | "signup" | "forgot" = "signup";
 
   const form = el("form", "signin-form") as HTMLFormElement;
   const input = document.createElement("input");
@@ -391,33 +473,133 @@ function signInPanel(prompt = ""): HTMLElement {
   input.className = "signin-input";
   input.autocomplete = "email";
 
+  const password = document.createElement("input");
+  password.type = "password";
+  password.required = true;
+  password.minLength = 6;
+  password.maxLength = 1024;
+  password.placeholder = "Password (at least 6 characters)";
+  password.className = "signin-input";
+  password.autocomplete = "new-password";
+
   const submit = document.createElement("button");
   submit.type = "submit";
   submit.className = "btn btn-primary";
-  submit.textContent = "Continue";
+  submit.textContent = "Create account";
+
+  const switcher = el("p", "note");
+  const syncMode = (): void => {
+    if (mode === "signup") {
+      lede.textContent = `${state.user?.free_queries_total || 10} free charts a month — no card. The sample data is already loaded.`;
+      password.hidden = false;
+      password.required = true;
+      password.autocomplete = "new-password";
+      submit.textContent = "Create account";
+      switcher.innerHTML =
+        'Already have an account? <a href="#" data-mode="login">Sign in</a>';
+    } else if (mode === "forgot") {
+      heading.textContent = "Forgot password";
+      lede.textContent =
+        "Enter your email and we will send a reset link if an account exists.";
+      password.hidden = true;
+      password.required = false;
+      submit.textContent = "Send reset link";
+      switcher.innerHTML = '<a href="#" data-mode="login">Back to sign in</a>';
+    } else {
+      heading.textContent = prompt || "Sign in to start asking";
+      lede.textContent =
+        "Sign in once and this browser stays signed in until you sign out.";
+      password.hidden = false;
+      password.required = true;
+      password.autocomplete = "current-password";
+      submit.textContent = "Sign in";
+      switcher.innerHTML =
+        '<a href="#" data-mode="forgot">Forgot password?</a> · ' +
+        '<a href="#" data-mode="signup">Create an account</a>';
+    }
+  };
+  switcher.addEventListener("click", (event) => {
+    const link = (event.target as HTMLElement).closest<HTMLElement>("[data-mode]");
+    if (!link) return;
+    event.preventDefault();
+    mode = link.dataset.mode as typeof mode;
+    syncMode();
+  });
+  syncMode();
 
   const error = el("p", "note note-warn");
   error.hidden = true;
 
-  form.append(input, submit);
+  form.append(input, password, submit);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     submit.disabled = true;
+    error.hidden = true;
     try {
-      state.user = await api.signIn(input.value.trim());
+      if (mode === "forgot") {
+        const result = await api.forgotPassword(input.value.trim());
+        error.hidden = false;
+        error.className = "note";
+        error.textContent =
+          result.detail ||
+          "If an account exists for that email, a reset link is on its way.";
+        if (result.reset_url) {
+          error.innerHTML =
+            `${error.textContent} <a href="${result.reset_url}">Open reset link</a>`;
+        }
+        mode = "login";
+        syncMode();
+        return;
+      }
+      state.user =
+        mode === "signup"
+          ? await api.signUp(input.value.trim(), password.value)
+          : await api.signIn(input.value.trim(), password.value);
+      persistUser(state.user);
+      const joined = await acceptPendingInvite();
+      if (joined) state.view = "dashboards";
       render();
       identify(state.user.user_id);
       track("sign_in_completed", { surface: "app" });
-      void loadSources();
+      if (joined) void dashboardList().load();
+      else void loadSources();
     } catch (exc) {
       error.hidden = false;
+      error.className = "note note-warn";
       error.textContent = (exc as Error).message;
+      if (mode === "signup" && /already exists/i.test(error.textContent)) {
+        mode = "login";
+        syncMode();
+      }
+    } finally {
       submit.disabled = false;
     }
   });
 
-  panel.append(heading, lede, form, error);
+  panel.append(heading, lede, form, switcher, error);
   return panel;
+}
+
+async function acceptPendingInvite(): Promise<boolean> {
+  const token = state.pendingJoin;
+  if (!token) return false;
+  try {
+    await api.post(`/v1/teams/join/${encodeURIComponent(token)}`);
+    state.pendingJoin = null;
+    history.replaceState(null, "", "/app");
+    return true;
+  } catch (error) {
+    // Keep the form usable, but do not keep retrying a dead or mismatched
+    // invite on every render. The user is signed in and can request a fresh
+    // invitation from their teammate.
+    state.pendingJoin = null;
+    history.replaceState(null, "", "/app");
+    window.setTimeout(
+      () => showError({ code: (error as ApiError).code, message: (error as Error).message }),
+      0,
+    );
+    return false;
+  }
 }
 
 function askPanel(): HTMLElement {
@@ -444,7 +626,17 @@ function askPanel(): HTMLElement {
   });
   stop.hidden = !state.cancel;
 
-  row.append(sourcePicker(), sourcesPanel().button(), submit, stop);
+  const dropHint = el("span", "ask-upload-hint");
+  dropHint.textContent = "or drop a file anywhere";
+
+  row.append(
+    sourcePicker(),
+    sourcesPanel().uploadButton(),
+    dropHint,
+    sourcesPanel().button(),
+    submit,
+    stop,
+  );
   form.append(input, row);
 
   // Enter submits; Shift+Enter is a newline.
@@ -472,18 +664,33 @@ function sourcePicker(): HTMLElement {
 
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = state.sources.length ? "Choose a source" : "No sources yet";
+  none.textContent = state.datasets.length
+    ? `Auto-detect from ${state.datasets.length} dataset${state.datasets.length === 1 ? "" : "s"}`
+    : state.sources.length
+      ? "Choose a dataset or source"
+      : "No datasets yet";
   node.append(none);
+
+  for (const dataset of state.datasets) {
+    const item = document.createElement("option");
+    item.value = `dataset:${dataset.id}`;
+    item.textContent = `${dataset.name} (${dataset.row_count.toLocaleString()} rows)`;
+    if (dataset.id === state.activeDataset) item.selected = true;
+    node.append(item);
+  }
 
   for (const source of state.sources) {
     const item = document.createElement("option");
-    item.value = source.id;
+    item.value = `source:${source.id}`;
     item.textContent = `${source.name} (${source.kind})`;
     if (source.id === state.activeSource) item.selected = true;
     node.append(item);
   }
   node.addEventListener("change", () => {
-    state.activeSource = node.value || null;
+    const [kind, id] = node.value.split(":", 2);
+    state.activeSample = null;
+    state.activeDataset = kind === "dataset" ? id : null;
+    state.activeSource = kind === "source" ? id : null;
   });
 
   wrap.append(node);
@@ -498,32 +705,183 @@ let panel: SourcesPanel | null = null;
  */
 function sourcesPanel(): SourcesPanel {
   panel ??= new SourcesPanel({
-    onChange: (sources, _datasets, selected) => {
+    onChange: (sources, datasets, selected) => {
       state.sources = sources;
+      state.datasets = datasets;
+      state.sql?.setSources(sources);
+      if (state.activeDataset && !datasets.some((item) => item.id === state.activeDataset)) {
+        state.activeDataset = null;
+      }
+      if (state.activeSource && !sources.some((item) => item.id === state.activeSource)) {
+        state.activeSource = null;
+      }
       // Whatever was just added is almost certainly what the next question is
       // about, so select it rather than making the user find it in the picker.
-      if (selected?.type === "source") state.activeSource = selected.id;
-      else if (sources.length === 1) state.activeSource = sources[0].id;
+      if (selected?.type === "source") {
+        state.activeSample = null;
+        state.activeSource = selected.id;
+        state.activeDataset = null;
+      } else if (selected?.type === "dataset") {
+        state.activeSample = null;
+        state.activeDataset = selected.id;
+        state.activeSource = null;
+      }
       render();
     },
+    onUploaded: (datasets) => void buildDashboardForUploads(datasets),
   });
   return panel;
 }
 
+function installGlobalFileDrop(): void {
+  const overlay = el("div", "global-drop-overlay");
+  overlay.setAttribute("aria-hidden", "true");
+  const card = el("div", "global-drop-card");
+  const title = el("strong");
+  title.textContent = "Drop files to upload";
+  const detail = el("span");
+  detail.textContent = "We’ll build a dashboard automatically.";
+  card.append(title, detail);
+  overlay.append(card);
+  document.body.append(overlay);
+
+  let dragDepth = 0;
+  const hasFiles = (event: DragEvent): boolean =>
+    [...(event.dataTransfer?.types ?? [])].includes("Files");
+  const hide = (): void => {
+    dragDepth = 0;
+    overlay.classList.remove("is-visible");
+    overlay.setAttribute("aria-hidden", "true");
+  };
+
+  document.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    if (!state.user?.signed_in) return;
+    dragDepth += 1;
+    overlay.classList.add("is-visible");
+    overlay.setAttribute("aria-hidden", "false");
+  });
+  document.addEventListener("dragover", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  });
+  document.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget === null) {
+      hide();
+      return;
+    }
+    if (!hasFiles(event)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) hide();
+  });
+  document.addEventListener("drop", (event) => {
+    const alreadyHandled = event.defaultPrevented;
+    const files = [...(event.dataTransfer?.files ?? [])];
+    hide();
+    if (!files.length) return;
+    event.preventDefault();
+    if (alreadyHandled) return;
+    if (!state.user?.signed_in) {
+      showError({
+        code: "signin_required",
+        message: "Sign in before uploading this file so it can stay in your workspace.",
+      });
+      return;
+    }
+    void sourcesPanel().acceptFiles(files);
+  });
+  window.addEventListener("dragend", hide);
+}
+
+function buildDashboardForUploads(datasets: UploadResult[]): void {
+  const names = datasets.map((dataset) => dataset.name);
+  const label = names.length === 1 ? names[0] : `${names.length} uploaded files`;
+  const banner = el("div", "banner banner-progress");
+  const icon = spinner(18);
+  const text = el("span");
+  text.textContent = `Uploaded ${label}. Building its dashboard…`;
+  banner.append(icon, text);
+
+  // The progress sheet has done its job once the upload lands. Put the user
+  // back in the app while the dashboard tiles are being generated.
+  sourcesPanel().dismiss();
+  root.prepend(banner);
+
+  const goal = names.length === 1
+    ? `Build a useful overview dashboard for the newly uploaded dataset “${names[0]}”. ` +
+      "Show the most informative headline metrics, trends, breakdowns, and notable patterns."
+    : `Build one useful overview dashboard for these newly uploaded datasets: ${names.join(", ")}. ` +
+      "Use them together when their schemas are meaningfully related; otherwise show the clearest " +
+      "headline metrics, trends, and breakdowns across the files.";
+
+  let dashboardId = "";
+  let finished = false;
+  stream(
+    "/v1/dashboard/stream",
+    {
+      goal,
+      dataset_ids: datasets.map((dataset) => dataset.dataset_id),
+      mode: prefersDark() ? "dark" : "light",
+    },
+    (event, data) => {
+      if (event === "dashboard") {
+        dashboardId = String(data.id ?? "");
+        text.textContent = `Building ${data.title || `${label} dashboard`}…`;
+      } else if (event === "tile") {
+        text.textContent = `Building ${label} dashboard… adding charts`;
+      } else if (event === "complete") {
+        if (finished) return;
+        finished = true;
+        banner.remove();
+        const id = String(data.dashboard_id ?? dashboardId);
+        if (id) {
+          void openDashboard(id).catch((error) => showError({
+            message: `The dashboard was built, but could not be opened: ${String(error)}`,
+          }));
+        }
+      } else if (event === "error") {
+        if (finished) return;
+        finished = true;
+        banner.remove();
+        showError({
+          code: data.code,
+          message: `Uploaded ${label}, but the automatic dashboard could not be built. ` +
+            `${data.message ?? data.code ?? "Please try again."}`,
+        });
+      }
+    },
+  );
+}
+
 async function loadSources(): Promise<void> {
   try {
-    const payload = await api.get<{ sources: State["sources"] }>("/v1/sources");
-    state.sources = payload.sources ?? [];
+    const [sourcePayload, datasetPayload] = await Promise.all([
+      api.get<{ sources: State["sources"] }>("/v1/sources"),
+      api.get<{ datasets: DatasetSummary[] }>("/v1/datasets"),
+    ]);
+    state.sources = sourcePayload.sources ?? [];
+    state.datasets = datasetPayload.datasets ?? [];
+    sourcesPanel().sync(state.sources, state.datasets);
+    state.sql?.setSources(state.sources);
     // Not when a sample was named in the URL: someone who arrived from a
     // dataset page asked about that dataset, not about whatever source they
     // happen to have connected.
-    if (!state.activeSource && !state.activeSample && state.sources.length === 1) {
+    if (
+      !state.activeSource &&
+      !state.activeSample &&
+      !state.datasets.length &&
+      state.sources.length === 1
+    ) {
       // One source is not a choice. Pre-selecting it removes a step that only
       // ever has one right answer.
       state.activeSource = state.sources[0].id;
     }
     render();
-    if (!state.sources.length && !state.samples.length) void loadSamples();
+    if (!state.sources.length && !state.datasets.length && !state.samples.length) {
+      void loadSamples();
+    }
   } catch {
     /* a missing source list must not block asking */
   }
@@ -550,6 +908,7 @@ function ask(question: string, edit = ""): void {
     if (state.lastResult) body.config = state.lastResult.config;
   }
   if (state.activeSource) body.source_id = state.activeSource;
+  else if (state.activeDataset) body.dataset_ids = [state.activeDataset];
   else if (state.activeSample) body.sample = state.activeSample;
 
   track("query_started", {
@@ -565,10 +924,14 @@ function ask(question: string, edit = ""): void {
     if (event === "result") {
       state.lastResult = data as PipelineResult;
       track("query_completed", { surface: "app", chart: Boolean(state.lastResult.chart_id) });
+      // Keep the result mounted for the anonymous trial; invite signup below
+      // it instead of replacing the chart with a form before it can be seen.
+      if (!state.user?.signed_in) render();
       void chart.show(state.lastResult).then(revealChart);
     } else if (event === "user") {
       state.user = data as User;
       identify(state.user.user_id);
+      persistUser(state.user);
       root.replaceChild(header(), root.firstChild!);
     } else if (event === "done") {
       state.cancel = null;
@@ -624,10 +987,13 @@ function revealChart(): void {
   chart.root.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
-function showError(data: { code?: string; message?: string }): void {
+function showError(data: { code?: string; message?: string; candidates?: string[] }): void {
   const banner = el("div", "banner banner-error");
   const text = el("span");
   text.textContent = data.message ?? data.code ?? "Something went wrong";
+  if (data.candidates?.length) {
+    text.textContent += ` Closest datasets: ${data.candidates.join(", ")}.`;
+  }
   banner.append(text);
 
   // A wall that only says "no" is a wall. Each refusal carries the one action
@@ -637,6 +1003,7 @@ function showError(data: { code?: string; message?: string }): void {
     banner.append(
       button("Sign in — free", () => {
         state.ran = false;
+        state.showSignIn = true;
         render();
         document.querySelector<HTMLInputElement>(".signin-input")?.focus();
       }),
@@ -651,6 +1018,13 @@ function showError(data: { code?: string; message?: string }): void {
     link.textContent =
       data.code === "insufficient_credits" ? "Add credits" : "See plans";
     banner.append(link);
+  } else if (
+    data.code === "no_datasets" ||
+    data.code === "dataset_not_selected" ||
+    data.code === "dataset_not_found" ||
+    data.code === "source_query_required"
+  ) {
+    banner.append(button("Open Library", () => sourcesPanel().button().click()));
   }
 
   banner.append(button("Dismiss", () => banner.remove()));
@@ -673,9 +1047,15 @@ async function signOut(): Promise<void> {
   track("sign_out", { surface: "app" });
   identify(null);
   state.user = null;
+  clearUser();
+  state.view = "chat";
+  state.sql = null;
+  state.sheets = null;
   state.lastResult = null;
   state.sources = [];
+  state.datasets = [];
   state.activeSource = null;
+  state.activeDataset = null;
   state.samples = [];
   state.suggestions = [];
   state.ran = false;
@@ -804,6 +1184,26 @@ async function openDashboardList(): Promise<void> {
   await dashboardList().load();
 }
 
+async function openSqlWorkbench(): Promise<void> {
+  if (!state.sql) {
+    const { SQLWorkbench } = await import("./sql-workbench");
+    state.sql = new SQLWorkbench(state.sources);
+  } else {
+    state.sql.setSources(state.sources);
+  }
+  state.view = "sql";
+  render();
+}
+
+async function openSheets(): Promise<void> {
+  if (!state.sheets) {
+    const { SheetsView } = await import("./sheets");
+    state.sheets = new SheetsView();
+  }
+  state.view = "sheets";
+  render();
+}
+
 /**
  * Put the chart that is on screen onto a dashboard.
  *
@@ -822,10 +1222,12 @@ async function pinToDashboard(result: PipelineResult): Promise<void> {
   }
 
   try {
-    const payload = await api.get<{ dashboards: { id: string; title: string }[] }>(
-      "/v1/dashboards",
+    const payload = await api.get<{
+      dashboards: { id: string; title: string; can_edit?: boolean }[];
+    }>("/v1/dashboards");
+    const existing = (payload.dashboards ?? []).filter(
+      (dashboard) => dashboard.can_edit !== false,
     );
-    const existing = payload.dashboards ?? [];
     // One dashboard is not a choice, and none is not a question - it is a
     // dashboard waiting to be made.
     const target = existing.length
