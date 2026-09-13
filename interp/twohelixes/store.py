@@ -594,8 +594,17 @@ def init() -> None:
         if _initialised:
             return
         conn = connection()
-        conn.executescript(_postgres_schema() if is_postgres() else SCHEMA)
-        _add_missing_columns(conn)
+        postgres = is_postgres()
+        # IF NOT EXISTS still races on PostgreSQL's type catalog when several
+        # workers create a new table together. Serialize the whole migration.
+        if postgres:
+            conn.execute("SELECT pg_advisory_lock(7474001)")
+        try:
+            conn.executescript(_postgres_schema() if postgres else SCHEMA)
+            _add_missing_columns(conn)
+        finally:
+            if postgres:
+                conn.execute("SELECT pg_advisory_unlock(7474001)")
         _initialised = True
         log.info("store ready on %s", "postgres" if is_postgres() else _db_path())
 
