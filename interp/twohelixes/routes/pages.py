@@ -840,15 +840,32 @@ def home(ctx: router.Context) -> router.Result:
         for s in sample_data.SAMPLES
     )
 
+    from twohelixes import machines
+    from twohelixes.routes.billing import PLANS as plan_cards
+
+    gpus = [m for m in machines.catalog_for("") if m["gpu"]]
+    gpu_from = html.escape(min(gpus, key=lambda m: m["credits_per_minute"])["price_per_hour"]) if gpus else "$1"
+    plan_strip = "".join(
+        f'<a class="plan-mini{" is-highlight" if p.get("highlight") else ""}" href="/pricing">'
+        f'<span class="pm-name">{html.escape(p["name"])}</span>'
+        f'<span class="pm-price">{html.escape(p["price"])}<small>{" / month" if p["cadence"] else ""}</small></span>'
+        f'<span class="pm-detail">{p["included"]["chat_query"]:,} AI charts a month</span>'
+        f'<span class="pm-blurb">{html.escape(p["blurb"])}</span></a>'
+        for p in plan_cards
+    )
+
     body = f"""
 <main id="content" class="intelligence-home">
 <div class="hero"><div class="shell hero-layout">
   <div>
     <span class="eyebrow">Your data. A new perspective.</span>
     <h1>Turn connected data into <em>clear decisions.</em></h1>
-    <p class="lede">Bring your files, databases, and questions together.
-    Explore with AI, uncover the story, and turn it into charts, dashboards,
-    and analysis your team can build on.</p>
+    <p class="lede">Ask in plain language. twoHelixes finds the right tables,
+    joins and shapes them in real Python, and draws a chart that does not
+    mislead &mdash; streaming its reasoning while it works, so every step is
+    yours to check.</p>
+    <p class="hero-for">For operators, analysts and founders who have the data
+    but not a BI team &mdash; and for data teams tired of being the queue.</p>
     <div class="actions">
       <a class="btn btn-primary" href="/app?sample=orders&amp;q=How+did+net+revenue+trend+over+time+by+region%3F"
          data-conversion="hero-sample">Explore sample data <span aria-hidden="true">↗</span></a>
@@ -898,6 +915,37 @@ def home(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 
+<section id="different"><div class="shell">
+  <div class="section-heading"><div><p class="kicker">How it is different</p>
+    <h2>Not a chatbot over one table.</h2></div>
+    <p class="sub">Most AI analytics answers from a single pre-modelled table.
+    twoHelixes does the analyst&rsquo;s part too: finding, joining and shaping.</p></div>
+  <div class="diff-layout">
+    <div class="diff-points">
+      <div class="diff-point"><b>Joined and shaped, not just queried</b>
+        <p>It picks join keys by measured value overlap, checks the row count
+        survived, and reshapes in pandas &mdash; resampling at the data&rsquo;s own grain.</p></div>
+      <div class="diff-point"><b>Reasoning you can watch</b>
+        <p>Every stage streams as it runs: what it chose, the code it executed,
+        the chart forms it rejected. A failure stays open on the step that failed.</p></div>
+      <div class="diff-point"><b>Charts audited by rule</b>
+        <p>Fixed colour order, no dual axes, colour-blind-safe series caps.
+        Anything approximated is printed beside the chart, never hidden.</p></div>
+      <div class="diff-point"><b>Edits that cost nothing</b>
+        <p>Chart type, axes, grouping, sort, top N, log scale, labels and number
+        format change instantly with no model call. Only a new question spends one.</p></div>
+    </div>
+    <ol class="trace-mock" aria-label="What the reasoning trace shows">
+      <li><span class="tm-stage">Finding the data</span><span class="tm-detail">which tables can answer this, and how sure it is</span></li>
+      <li><span class="tm-stage">Joining</span><span class="tm-detail">the key it chose, the value overlap it measured, rows kept</span></li>
+      <li><span class="tm-stage">Shaping the data</span><span class="tm-detail">the pandas it ran, in full, editable</span></li>
+      <li><span class="tm-stage">Choosing the chart</span><span class="tm-detail">the form it picked and the forms it rejected</span></li>
+      <li><span class="tm-stage">Applying defaults</span><span class="tm-detail">palette, labels and a re-audit of the finished figure</span></li>
+      <li class="tm-done"><span class="tm-stage">A chart titled with the finding</span><span class="tm-detail">trace folds to one line; SQL, Python and notebook one click away</span></li>
+    </ol>
+  </div>
+</div></section>
+
 <section class="band"><div class="shell">
   <div class="section-heading"><div><p class="kicker">One connected workspace</p>
     <h2>Go beyond the chart.</h2></div><p class="sub">From a quick business question to hands-on analysis,
@@ -912,6 +960,15 @@ def home(ctx: router.Context) -> router.Result:
     <article class="use-case"><div class="case-icon" aria-hidden="true">&lt;/&gt;</div><h3>Go deeper with code</h3>
       <p>Work in SQL, sheets, and Python notebooks. Use agents for multi-step analysis, with editable code and reusable outputs.</p>
       <a href="/docs">Explore the toolkit ↗</a></article>
+    <article class="use-case"><div class="case-icon" aria-hidden="true">SQL</div><h3>SQL workbench</h3>
+      <p>Schema-aware completions that never wait on a model, generated SQL you can edit and rerun for free, read-only execution and full history.</p>
+      <a href="/app">Open the editor ↗</a></article>
+    <article class="use-case"><div class="case-icon" aria-hidden="true">#</div><h3>Sheets with an agent</h3>
+      <p>A spreadsheet whose agent proposes cell edits and charts. You preview every change and approve it; model output never overwrites a workbook.</p>
+      <a href="/app">Try Sheets ↗</a></article>
+    <article class="use-case"><div class="case-icon" aria-hidden="true">GPU</div><h3>Machines when you need them</h3>
+      <p>CPU sessions are included in paid plans. GPUs from {gpu_from} an hour, billed by the minute and stopped when idle &mdash; for forecasting, embeddings and heavy notebooks.</p>
+      <a href="/pricing#machines">See machine rates ↗</a></article>
   </div>
   <div class="model-note"><b>Frontier reasoning. Inspectable results.</b>
     <p>{model_label} powers the configured analysis route, with task-specific routing and fallback models.
@@ -1010,7 +1067,37 @@ def home(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 
-<section class="band"><div class="shell split">
+<section id="compare"><div class="shell">
+  <div class="section-heading"><div><p class="kicker">An honest comparison</p>
+    <h2>Pick by who does the work.</h2></div>
+    <p class="sub">Looker, ThoughtSpot and Hex are good products built for
+    different people. Here is where each one wins.</p></div>
+  <div class="compare-scroll">
+  <table class="compare">
+    <thead><tr><th scope="col"></th><th scope="col" class="us">twoHelixes</th><th scope="col">Looker</th><th scope="col">ThoughtSpot</th><th scope="col">Hex</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">Built for</th><td class="us">Anyone with a question and a file or database</td><td>Data teams governing metrics in LookML</td><td>Business users searching modelled warehouse data</td><td>Analysts writing SQL and Python together</td></tr>
+      <tr><th scope="row">Before the first chart</th><td class="us">Drop a CSV or connect read-only; minutes</td><td>A LookML model built by the data team</td><td>Data modelled into ThoughtSpot first</td><td>Write the query yourself</td></tr>
+      <tr><th scope="row">Plain-language questions</th><td class="us">Yes, including joins and reshaping across sources</td><td>Over modelled Explores</td><td>Over modelled data, its core strength</td><td>AI assist inside notebook cells</td></tr>
+      <tr><th scope="row">Shows its work</th><td class="us">Streamed reasoning, the Python it ran, rejected chart forms</td><td>The semantic model is the source of truth</td><td>Search tokens behind each answer</td><td>Code cells are the work</td></tr>
+      <tr><th scope="row">Pricing</th><td class="us">Public and self-serve, free tier, no seat minimum</td><td>Sales-led</td><td>Published entry tiers, enterprise via sales</td><td>Free tier plus published team plans</td></tr>
+      <tr><th scope="row">Where it wins</th><td class="us">Fastest path from a messy question to a joined, honest chart</td><td>One governed definition of every metric at enterprise scale</td><td>Search at scale with fine-grained security on a warehouse</td><td>Collaborative notebooks and data apps for a data team</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="compare-note">From each vendor&rsquo;s public documentation, October 2026. If you need a governed semantic layer for thousands of users, buy Looker; if you want an answer from your own data this afternoon, start here.</p>
+</div></section>
+
+<section class="band"><div class="shell">
+  <div class="section-heading"><div><p class="kicker">Pricing</p>
+    <h2>Start free. Pay for what runs.</h2></div>
+    <p class="sub">One credit is one cent. Nothing is charged until a query
+    succeeds, and changing a chart by hand never costs anything.</p></div>
+  <div class="plan-strip">{plan_strip}</div>
+  <p class="compare-note"><a href="/pricing">Full pricing, credit packs, volume discounts and machine rates ↗</a></p>
+</div></section>
+
+<section><div class="shell split">
   <div class="stage" style="order:2">
     <span class="stage-mark" aria-hidden="true">{helix.logo(300, mode, uid="startmark")}</span>
     <div class="askline"><span class="tag">Ask</span>
@@ -1353,7 +1440,7 @@ def pricing(ctx: router.Context) -> router.Result:
   than rounded, so a discount is exact however small each call is.</p>
 </div></section>
 
-<section class="band"><div class="shell">
+<section class="band" id="machines"><div class="shell">
   <h2>Machines</h2>
   <p class="lead-in">A hosted notebook runs on a machine you pick, billed by
   the minute while it is up. Every paid plan includes {included_hours} hours or
