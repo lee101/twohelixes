@@ -2319,5 +2319,7 @@ html.th-focus .chart-focus-btn { background: var(--accent-soft); border-color: v
 .dash-tile-controls .dash-sizes .is-active { position: relative; z-index: 1; }
 .dash-tile-head { min-height: 28px; }
 .dash-tile-title { flex: 1 1 auto; min-width: 3rem; }
-.app-main section.dash, .app-main section.dash-list, .app-main section.builder, .app-main section.sql-workbench, .app-main section.sheets-workbench { padding: 0; }
+:where(.app-main, .library-shell, dialog) section { padding: 0; }
 .dash-grid { align-items: start; }
+.sql-result-table td.num, .sql-result-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.sql-result-bar { display: flex; justify-content: flex-end; margin-bottom: 0.35rem; }
