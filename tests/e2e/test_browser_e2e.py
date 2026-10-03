@@ -151,6 +151,7 @@ def test_the_answer_exports_as_a_notebook_from_the_page(browser: Any, server: An
     page = _app(browser, server, DESKTOP)
     _ask(page)
 
+    page.click(".chart-exports > summary")
     with page.expect_download(timeout=30000) as download:
         page.click("button:has-text('Notebook (.ipynb)')")
     path = download.value.path()
