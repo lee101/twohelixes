@@ -98,7 +98,7 @@ export async function renderFigure(
     document.body.dataset.topojsonUrl ||
     `${window.location.origin}/static/libs/topojson/`;
   const config = {
-    ...(host.clientWidth < 720 ? { displayModeBar: false } : {}),
+    ...(host.clientWidth < 720 || window.matchMedia?.("(hover: none)").matches ? { displayModeBar: false } : {}),
     ...(figure.config ?? {}),
     responsive: true,
     displaylogo: false,
