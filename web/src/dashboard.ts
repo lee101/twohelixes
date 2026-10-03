@@ -13,6 +13,7 @@
 import { api, stream, type ChartConfig, type PlotlyFigure } from "./api";
 import { Builder } from "./builder";
 import { CHART_TYPES, button, currentMode, el, renderFigure } from "./chart";
+import { applyView, type ChartViewState } from "./chart-tools";
 import { voiceField } from "./voice";
 
 export interface Tile {
@@ -64,6 +65,8 @@ export class DashboardView {
   private readonly status: HTMLElement;
   private readonly composer: HTMLElement;
   private readonly actions: HTMLElement;
+  private filter = "";
+  private refreshTimer = 0;
 
   constructor(private readonly options: { readOnly?: boolean } = {}) {
     this.root = el("section", "dash");
@@ -86,7 +89,39 @@ export class DashboardView {
         button("Share", () => this.share()),
       );
     }
-    bar.append(this.heading, actions);
+    const filter = document.createElement("input");
+    filter.type = "search";
+    filter.className = "dash-filter control-input";
+    filter.placeholder = "Filter series or categories";
+    filter.setAttribute("aria-label", "Filter every tile by series or category");
+    filter.addEventListener("input", () => {
+      this.filter = filter.value.trim();
+      this.redrawAll();
+    });
+    const auto = document.createElement("select");
+    auto.className = "dash-auto control-input";
+    auto.setAttribute("aria-label", "Auto refresh");
+    auto.title = "Reload the board on a timer";
+    for (const [value, label] of [["0", "Auto refresh off"], ["60", "Every minute"], ["300", "Every 5 min"], ["900", "Every 15 min"], ["3600", "Every hour"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      auto.append(option);
+    }
+    auto.addEventListener("change", () => {
+      clearInterval(this.refreshTimer);
+      const seconds = Number(auto.value);
+      if (seconds > 0) {
+        this.refreshTimer = window.setInterval(() => {
+          if (!this.root.isConnected) clearInterval(this.refreshTimer);
+          else if (!document.hidden) void this.open(this.id);
+        }, seconds * 1000);
+      }
+    });
+    const present = button("Present", () => this.present());
+    present.title = "Full-screen board";
+    actions.append(present);
+    bar.append(this.heading, filter, auto, actions);
 
     this.status = el("div", "dash-status");
     this.status.hidden = true;
@@ -265,7 +300,7 @@ export class DashboardView {
       await api.post(`/v1/dashboards/${this.id}/charts`, { chart_id: chartId, w: 1 });
       await this.open(this.id);
       this.setStatus("Added");
-      setTimeout(() => this.setStatus(""), 1500);
+      setTimeout(() => this.setStatus(this.filterNote()), 1500);
     } catch (error) {
       this.setStatus((error as Error).message, true);
     }
@@ -356,7 +391,7 @@ export class DashboardView {
   }
 
   private async renderTile(tile: Tile, chart: Chart, index: number): Promise<HTMLElement> {
-    const card = el("figure", `dash-tile span-${tile.w ?? 1}`);
+    const card = el("figure", `dash-tile span-${tile.w ?? 1} rows-${Math.min(3, Math.max(1, tile.h ?? 1))}`);
     // Which chart this tile is, for tests, the benchmark and anyone reading
     // the DOM to work out why a board looks wrong.
     card.dataset.chartId = chart.id;
@@ -369,6 +404,11 @@ export class DashboardView {
     const name = el("span", "dash-tile-title");
     name.textContent = chart.title || "Untitled";
     head.append(name);
+    const expand = button("", () => this.expandTile(card, chart));
+    expand.className = "btn btn-ghost btn-small dash-expand";
+    expand.title = "Full screen";
+    expand.setAttribute("aria-label", "Full screen");
+    expand.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
 
     if (!this.options.readOnly) {
       const controls = el("div", "dash-tile-controls");
@@ -386,6 +426,11 @@ export class DashboardView {
         sizes.append(size);
       }
       controls.append(sizes);
+      const tall = Math.min(3, Math.max(1, tile.h ?? 1));
+      const height = button(`↕ ${"SML"[tall - 1]}`, () => this.setHeight(index, (tall % 3) + 1));
+      height.classList.add("btn-small", "dash-height");
+      height.title = `Tile height: ${["short", "medium", "tall"][tall - 1]}. Click to change.`;
+      controls.append(height);
       const edit = button("Edit", () => void this.toggleEditor(card, chart));
       edit.classList.add("btn-small");
       edit.title = "Change this chart";
@@ -395,6 +440,7 @@ export class DashboardView {
       remove.classList.add("btn-small");
       remove.title = "Remove from dashboard";
       controls.append(remove);
+      controls.prepend(expand);
       head.append(controls);
 
       card.draggable = true;
@@ -424,6 +470,8 @@ export class DashboardView {
       });
     }
 
+    if (this.options.readOnly) head.append(expand);
+
     // A table is the one form that cannot be made to fit: ten columns squeezed
     // into a phone-width tile is ten columns of ellipsis. It gets a scroller of
     // its own instead - the tile keeps its width, the page never moves.
@@ -435,7 +483,7 @@ export class DashboardView {
     if (chart.spec?.data?.length) {
       sizeForTable(plot, chart.spec);
       // Render after the card is in the DOM, or Plotly sizes to zero width.
-      queueMicrotask(() => void renderFigure(plot, tileFigure(chart.spec)));
+      queueMicrotask(() => void renderFigure(plot, this.tileFigure(chart, card)));
     } else {
       const blank = el("p", "note");
       blank.textContent = "This chart has no saved figure. Refresh to rebuild it.";
@@ -475,7 +523,7 @@ export class DashboardView {
       chart.spec = figure;
       if (!plot) return;
       sizeForTable(plot, figure);
-      void renderFigure(plot, tileFigure(figure));
+      void renderFigure(plot, this.tileFigure(chart, card));
     };
 
     const rename = (title: string) => {
@@ -567,6 +615,81 @@ export class DashboardView {
     void this.save();
   }
 
+  private setHeight(index: number, height: number): void {
+    this.layout[index] = { ...this.layout[index], h: height };
+    void this.render();
+    void this.save();
+  }
+
+  private tileFigure(chart: Chart, card: HTMLElement): PlotlyFigure {
+    const view = { ...((chart.graph_args?.view ?? {}) as ChartViewState), title: "" };
+    const figure = applyView(tileFigure(chart.spec), view);
+    const terms = this.filter.toLowerCase().split(",").map((t) => t.trim()).filter(Boolean);
+    card.classList.remove("is-filtered-out", "is-filtered");
+    if (!terms.length) return figure;
+    const hit = (value: unknown) => terms.some((t) => String(value ?? "").toLowerCase().includes(t));
+    const data = (figure.data ?? []).map((t) => ({ ...t })) as Record<string, any>[];
+    const named = data.filter((t) => t.name && hit(t.name));
+    if (named.length && named.length < data.length) {
+      for (const t of data) if (!hit(t.name)) t.visible = "legendonly";
+      card.classList.add("is-filtered");
+      return { ...figure, data };
+    }
+    let matched = false;
+    for (const t of data) {
+      const horizontal = t.orientation === "h";
+      const catKey = horizontal ? "y" : "x";
+      const valKey = horizontal ? "x" : "y";
+      const keyed = t.type === "pie" ? ["labels", "values"] : [catKey, valKey];
+      const cats: unknown[] | undefined = t[keyed[0]];
+      if (!Array.isArray(cats) || !cats.some(hit)) continue;
+      const idx = cats.map((c, i) => (hit(c) ? i : -1)).filter((i) => i >= 0);
+      for (const key of [...keyed, "text", "customdata", "hovertext"]) {
+        if (Array.isArray(t[key])) t[key] = idx.map((i) => t[key][i]);
+      }
+      if (t.marker && Array.isArray(t.marker.color)) t.marker = { ...t.marker, color: idx.map((i) => t.marker.color[i]) };
+      matched = true;
+    }
+    card.classList.add(matched ? "is-filtered" : "is-filtered-out");
+    return matched ? { ...figure, data } : figure;
+  }
+
+  private redrawAll(): void {
+    for (const card of this.grid.querySelectorAll<HTMLElement>(".dash-tile")) {
+      const chart = this.charts.get(card.dataset.chartId ?? "");
+      const plot = card.querySelector<HTMLElement>(".dash-plot");
+      if (chart?.spec?.data?.length && plot) void renderFigure(plot, this.tileFigure(chart, card));
+    }
+    this.setStatus(this.filterNote());
+  }
+
+  private filterNote(): string {
+    if (!this.filter) return "";
+    const hidden = this.grid.querySelectorAll(".is-filtered-out").length;
+    return `Filtered by “${this.filter}”${hidden ? ` · ${hidden} tile${hidden === 1 ? "" : "s"} without a match` : ""}`;
+  }
+
+  private expandTile(card: HTMLElement, chart: Chart): void {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
+    const plot = card.querySelector<HTMLElement>(".dash-plot");
+    const redraw = () => {
+      if (plot && chart.spec?.data?.length) void renderFigure(plot, this.tileFigure(chart, card));
+    };
+    if (!card.dataset.fsBound) {
+      card.dataset.fsBound = "1";
+      card.addEventListener("fullscreenchange", redraw);
+    }
+    void card.requestFullscreen?.().catch(() => undefined);
+  }
+
+  private present(): void {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void this.root.requestFullscreen?.().catch(() => undefined);
+  }
+
   private reorder(from: number, to: number): void {
     if (from === to) return;
     const copy = [...this.layout];
@@ -607,7 +730,7 @@ export class DashboardView {
         layout: this.layout,
       });
       this.setStatus("Saved");
-      setTimeout(() => this.setStatus(""), 1500);
+      setTimeout(() => this.setStatus(this.filterNote()), 1500);
     } catch (error) {
       this.setStatus((error as Error).message, true);
     }
