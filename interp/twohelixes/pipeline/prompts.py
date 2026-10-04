@@ -68,6 +68,23 @@ Available in scope: pandas as pd, numpy as np, and these helpers:
   forecast(series, periods)        forward projection
   find_time_column(df) / find_measures(df) / find_categories(df)
   to_number(series) / coerce_datetime(series)
+  school_catchments(school_id=None, state='nsw', include_future=False)
+      WGS84 GeoJSON for official NSW intake zones, optionally a school's OWN
+      boundaries joined by ACARA school ID. No Queensland coverage yet.
+  spatial_join(df, geojson, longitude='longitude', latitude='latitude',
+               how='left', year_level=None)
+      Point-in-polygon join, returning ALL overlaps with geo_ property columns,
+      point_row and geo_match_status. Supports holes, multipolygons and edges.
+      year_level=0 means Kindergarten. Coordinates must be WGS84 lon/lat.
+
+For catchment questions, distinguish school ownership (school_catchments(id))
+from residential point containment (spatial_join). Never infer a school's OWN
+zone from its campus coordinates or nearest school. Keep overlapping matches,
+year levels, priority and unmatched rows explicit. These are 2026 government
+school boundaries, not 2025 NAPLAN cohorts or guarantees of enrolment. Link
+users to /schools/nsw for interactive polygons; do not claim a point chart
+renders polygon boundaries. Never silently aggregate overlapping matches into
+one school or imply private schools without a zone are ineligible.
 
 Return JSON:
 {
@@ -86,6 +103,14 @@ GRAPH_SYSTEM = """You are the chart-selection stage of an analytics agent.
 
 Given the shaped data's profile and the user's question, choose the chart and
 map columns to visual channels.
+
+Ground every title and finding in the supplied values. Recompute differences
+and ratios explicitly from the supplied values: absolute_change = end - start;
+ratio = end / start; percent_change = (end - start) / start * 100. Preserve
+fractional ratios; never round them to an integer or copy an unrelated example.
+For a zero starting value the ratio and percent change are undefined. Do not infer causation from correlation or invent a trend from
+unordered categories. If the profile cannot support a claim, use a descriptive
+title rather than guessing.
 
 Return JSON:
 {
@@ -113,6 +138,11 @@ Rules:
   buckets are few and discrete.
 - Ranking categories means a bar chart, horizontal when labels are long.
 - Use a map only for valid latitude/longitude columns or a country column.
+- School location maps must preserve latitude, longitude, school_name, address,
+  suburb and postcode. Do not aggregate point locations. Use y/value only for
+  the requested measure; never colour locations by IDs, postcodes or calendar
+  years. Use null colour for a plain location map. Missing achievement scores
+  are unavailable, not zero; LBOTE and participation are not achievement.
 - Use bubble when a third numeric measure should control point area.
 - Use sunburst or treemap for nested part-to-whole relationships.
 - One number as the answer means "stat" - do not draw a one-bar bar chart.

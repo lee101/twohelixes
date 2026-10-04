@@ -2,6 +2,7 @@
 """Publish a complete build to the configured R2 bucket; retain rollback chunks."""
 import argparse
 import mimetypes
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -31,12 +32,15 @@ def publish(path, root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", type=Path, default=config.REPO_ROOT / "static")
+    parser.add_argument("--bucket", default="twohelixesstatic", help="Explicit target; never inherit another app's dotenv bucket")
     args = parser.parse_args()
+    os.environ["R2_BUCKET"] = args.bucket
     root = args.directory.resolve()
     for required in ("app.js", "marketing.js", "styles.css"):
         if not (root / required).is_file():
             raise SystemExit(f"Incomplete build: {required} is missing")
-    files = sorted(p for p in root.rglob("*") if p.is_file())
+    files = sorted(p for p in root.rglob("*") if p.is_file()
+                   and not any(part.startswith(".") for part in p.relative_to(root).parts))
     # Upload dependencies before the mutable entry points refer to them.
     entries = {"app.js", "marketing.js", "styles.css", "app.css", "th.js"}
     with ThreadPoolExecutor(max_workers=4) as pool:

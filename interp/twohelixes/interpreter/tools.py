@@ -594,7 +594,10 @@ def format_number(value: Any, unit: str = "") -> str:
 
 def namespace() -> dict[str, Any]:
     """Names injected into the interpreter."""
+    from twohelixes.datasets.catchments import school_catchments, spatial_join
     return {
+        "school_catchments": school_catchments,
+        "spatial_join": spatial_join,
         "profile": profile,
         "column_role": column_role,
         "looks_like_dates": looks_like_dates,

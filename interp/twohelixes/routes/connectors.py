@@ -586,6 +586,9 @@ def delete_dataset(ctx: router.Context) -> router.Result:
     with store.transaction() as conn:
         conn.execute("DELETE FROM datasets WHERE id = ?", (ctx.params["dataset_id"],))
         conn.execute(
+            "DELETE FROM dataset_links WHERE dataset_id = ?", (ctx.params["dataset_id"],)
+        )
+        conn.execute(
             "DELETE FROM team_objects WHERE kind = 'dataset' AND object_id = ?",
             (ctx.params["dataset_id"],),
         )

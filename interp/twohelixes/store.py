@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS datasets (
 );
 CREATE INDEX IF NOT EXISTS datasets_user ON datasets(user_id);
 
+CREATE TABLE IF NOT EXISTS dataset_links (
+    id          TEXT PRIMARY KEY,
+    dataset_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    object_id   TEXT NOT NULL,
+    caption     TEXT,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    UNIQUE (dataset_id, kind, object_id)
+);
+CREATE INDEX IF NOT EXISTS dataset_links_dataset ON dataset_links(dataset_id, position);
+
 CREATE TABLE IF NOT EXISTS dashboards (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
@@ -639,6 +651,17 @@ _ADDED_COLUMNS = (
     ("datasets", "shape_report", "TEXT"),
     ("datasets", "sheet_name", "TEXT"),
     ("datasets", "updated_at", "REAL"),
+    ("datasets", "is_public", "INTEGER NOT NULL DEFAULT 0"),
+    ("datasets", "public_slug", "TEXT"),
+    ("datasets", "public_title", "TEXT"),
+    ("datasets", "public_description", "TEXT"),
+    ("datasets", "public_tags", "TEXT"),
+    ("datasets", "public_license", "TEXT"),
+    ("datasets", "public_author", "TEXT"),
+    ("datasets", "allow_download", "INTEGER NOT NULL DEFAULT 0"),
+    ("datasets", "cover_chart_id", "TEXT"),
+    ("datasets", "published_at", "REAL"),
+    ("charts", "is_public", "INTEGER NOT NULL DEFAULT 0"),
     ("analytics_events", "sample_rate", "REAL NOT NULL DEFAULT 1"),
     ("analytics_events", "sample_weight", "REAL NOT NULL DEFAULT 1"),
     ("analytics_events", "event_sequence", "INTEGER NOT NULL DEFAULT 0"),
@@ -670,6 +693,14 @@ def _add_missing_columns(conn: Any) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS analytics_events_dedupe"
         " ON analytics_events(site_id, source, external_id)"
         " WHERE external_id IS NOT NULL AND external_id != ''"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS datasets_public_slug"
+        " ON datasets(public_slug) WHERE public_slug IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS datasets_public_list"
+        " ON datasets(is_public, published_at)"
     )
 
 

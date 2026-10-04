@@ -5,8 +5,11 @@
  * the SQL editor never load it.
  */
 import { access, copyFile, mkdir, readdir, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 
-const outdir = new URL("../static/", import.meta.url).pathname;
+const outdir = process.env.TWOHELIXES_BUILD_OUT
+  ? resolve(process.env.TWOHELIXES_BUILD_OUT) + "/"
+  : new URL("../static/", import.meta.url).pathname;
 const watch = process.argv.includes("--watch");
 
 await rm(outdir, { recursive: true, force: true });

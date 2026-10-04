@@ -185,6 +185,8 @@ def _infer_type(traces: list[dict[str, Any]]) -> str:
     if not traces:
         return "scatter"
     kind = str(traces[0].get("type") or "scatter")
+    if kind in ("scattermap", "scattergeo"):
+        return "map"
     if kind == "scatter":
         mode = str(traces[0].get("mode") or "lines")
         if "lines" in mode:
@@ -200,6 +202,9 @@ def _fold_extra_series(traces: list[dict[str, Any]], chart_type: str) -> list[di
     a scatter with eight colours is unreadable under CVD no matter the hues.
     """
     limit = palette.max_series_for(chart_type)
+    # Geographic forms already fold categories by concatenating locations.
+    if chart_type == "map" and sum(not t.get("_neutral") and t.get("name") != palette.OTHER_LABEL for t in traces) <= limit:
+        return traces
     if len(traces) <= limit:
         return traces
 
@@ -266,7 +271,7 @@ def _assign_colors(traces: list[dict[str, Any]], mode: str, chart_type: str) -> 
     for position, trace in enumerate(traces):
         index = int(trace.get("_series_index", position))
         color = palette.series_color(index, mode)
-        if str(trace.get("name", "")).startswith(palette.OTHER_LABEL):
+        if trace.get("_neutral") or str(trace.get("name", "")).startswith(palette.OTHER_LABEL):
             color = (
                 palette.OTHER_COLOR_DARK if mode == "dark" else palette.OTHER_COLOR_LIGHT
             )
@@ -361,10 +366,11 @@ def _style_marks(traces: list[dict[str, Any]], mode: str, chart_type: str) -> No
             marker["line"] = {"color": face.background, "width": SPACER}
             trace["marker"] = marker
 
-        elif kind == "scattergeo":
+        elif kind in ("scattergeo", "scattermap"):
             marker = dict(trace.get("marker") or {})
             marker.setdefault("size", 10)
-            marker["line"] = {"color": face.background, "width": SPACER}
+            if kind == "scattergeo":
+                marker["line"] = {"color": face.background, "width": SPACER}
             if isinstance(marker.get("color"), (list, tuple)):
                 marker.setdefault("colorscale", _plotly_scale(palette.sequential(9, mode)))
             trace["marker"] = marker
@@ -459,7 +465,7 @@ def _configure_hover(
                 trace.setdefault("hovertemplate", "%{label}: %{value}<extra></extra>")
             elif kind in ("treemap", "sunburst"):
                 trace.setdefault("hovertemplate", "%{label}: %{value}<extra></extra>")
-            elif kind == "scattergeo":
+            elif kind in ("scattergeo", "scattermap"):
                 trace.setdefault(
                     "hovertemplate", "%{lat}, %{lon}<extra>%{fullData.name}</extra>"
                 )
@@ -549,6 +555,19 @@ def _looks_temporal(values: Any) -> bool:
 def _configure_geo(
     traces: list[dict[str, Any]], layout: dict[str, Any], mode: str
 ) -> None:
+    points = [t for t in traces if t.get("type") == "scattermap"]
+    if points:
+        import math
+        lats = [v for t in points for v in t.get("lat", []) if isinstance(v, (float, int)) and math.isfinite(v)]
+        lons = [v for t in points for v in t.get("lon", []) if isinstance(v, (float, int)) and math.isfinite(v)]
+        tile_map = dict(layout.get("map") or {})
+        tile_map.setdefault("style", "open-street-map")
+        if lats and lons:
+            tile_map.setdefault("center", {"lat": (min(lats) + max(lats)) / 2, "lon": (min(lons) + max(lons)) / 2})
+            span = max(max(lons) - min(lons), (max(lats) - min(lats)) * 1.5, .015)
+            tile_map.setdefault("zoom", max(0, min(13, math.log2(360 / span) + .2)))
+        layout["map"] = tile_map
+        layout["dragmode"] = "pan"
     if not any(str(trace.get("type")) in ("scattergeo", "choropleth") for trace in traces):
         return
     face = palette.surface(mode)

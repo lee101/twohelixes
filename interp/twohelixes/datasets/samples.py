@@ -510,6 +510,34 @@ SAMPLES.append(Sample(
     questions=["How many schools are in each sector?", "Show school locations on a map", "Which schools are in Brisbane?"],
 ))
 
+from twohelixes.datasets import schools as _school_data
+
+SAMPLES.extend([
+    Sample(key="nsw_schools", name="NSW schools and NAPLAN results",
+        description="3,402 NSW schools and campuses with coordinates, sourced street addresses and 2025 NAPLAN domain means as collected. Collection coverage is shown on the map. Missing results stay blank; the aggregate achievement index is calculated after collection completes. Explore /schools/nsw.",
+        build=lambda: _school_data.frame("nsw"),
+        source="ACARA My School; NSW Department of Education",
+        questions=["Show NSW school locations on a map with school names and addresses",
+                   "Map schools with available Year 3 reading results, coloured by reading_y3",
+                   "How many schools are in each sector?"]),
+    Sample(key="nsw_naplan_results", name="NSW NAPLAN domain results (2025)",
+        description="Collected 2025 school means by year level and domain, with national and similar-school means, margins and source links. Partial collection; blanks include suppressed values. Language background is not an achievement score.",
+        build=_school_data.naplan_frame, source="ACARA My School",
+        questions=["Compare the collected Year 3 reading means with the national mean",
+                   "Which schools have NAPLAN results collected so far?"]),
+])
+
+from twohelixes.datasets import world_schools as _world_schools
+
+for _region, _title in _world_schools.DATASETS.items():
+    SAMPLES.append(Sample(
+        key='world_schools_'+_region.replace('-','_'), name=_title+' · school locations',
+        description='Publicly sourced regional school directory. Location-only: no achievement scores or catchment polygons. Source dates and coverage vary; see /schools/region/'+_region+'.',
+        build=lambda key=_region: _world_schools.frame(key),
+        source=_world_schools.metadata(_region)['license'],
+        questions=['Map school locations by region', 'How many school locations are in each region?', 'Which schools have missing coordinates?'],
+    ))
+
 BY_KEY = {s.key: s for s in SAMPLES}
 _SEARCH_WEIGHTS = (
     (lambda s: s.name.lower(), 4),
@@ -581,7 +609,7 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
     for sample in SAMPLES:
         target = path_for(sample.key)
         try:
-            shared_fixture = sample.source == "Curated (shared with askfelix)" or sample.key == "queensland_schools"
+            shared_fixture = sample.source == "Curated (shared with askfelix)" or sample.key in {"queensland_schools", "nsw_schools", "nsw_naplan_results"} or sample.key.startswith('world_schools_')
             if force or not target.exists():
                 frame = sample.build()
                 # Multiple first visitors can warm samples concurrently. Only

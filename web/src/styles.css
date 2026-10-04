@@ -157,8 +157,8 @@ body {
 .app-main {
   display: grid;
   grid-template-columns: 1fr;
-  gap: var(--s4);
-  padding: clamp(1rem, 3vw, 1.75rem);
+  gap: var(--s2);
+  padding: clamp(0.5rem, 1vw, 1rem);
   align-items: start;
 }
 
@@ -168,6 +168,18 @@ body {
      than scrolling away above the reasoning that produced it. */
   .app-right { position: sticky; top: calc(58px + var(--s4)); }
 }
+
+/* Once an answer exists, give the visualization the whole workspace. */
+.app-main:has(.chart-plot .main-svg) { grid-template-columns: minmax(0, 1fr); }
+.app-main:has(.chart-plot .main-svg) > .app-right { position: static; }
+@media (min-width: 1080px) {
+  .app-main:has(.chart-plot .main-svg) > .app-left {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--s2);
+    align-items: start;
+  }
+}
+.chart-view { padding: var(--s2); }
 
 .app-left,
 .app-right {
@@ -451,8 +463,9 @@ body {
 
 .chart-plot {
   width: 100%;
+  min-width: 0;
   min-height: 320px;
-  height: clamp(320px, 46vh, 560px);
+  height: clamp(320px, 68dvh, 960px);
 }
 
 .chart-meta {
@@ -654,7 +667,7 @@ body {
   /* A phone cannot show the trace and the chart at once. The trace gets a
      third of the screen and scrolls; the chart keeps the rest. */
   .trace-list { max-height: 34vh; }
-  .chart-plot { height: clamp(260px, 42vh, 420px); min-height: 260px; }
+  .chart-plot { height: clamp(300px, 62dvh, 680px); min-height: 300px; }
 
   .chart-controls { gap: var(--s2); }
   .control { flex: 1 1 8.5rem; }
@@ -1986,3 +1999,7 @@ body.library-open {
 /* A table tile scrolls inside itself rather than squeezing ten columns into a
    phone. The scroller is the tile's, so the page never moves sideways. */
 .dash-plot-scroll { overflow-x: auto; min-width: 0; scrollbar-width: thin; }
+
+.publish-preview { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 0.5rem 0.75rem; margin: 0.5rem 0; max-height: 12rem; overflow: auto; }
+.publish-preview:empty { display: none; }
+.publish-link-row { display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; padding: 0.25rem 0; }

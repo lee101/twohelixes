@@ -85,7 +85,8 @@ def test_model_defaults_and_contributor_consent(monkeypatch):
                 "TWOHELIXES_MODEL_DEEP", "TWOHELIXES_ALLOW_CONTRIBUTOR"):
         monkeypatch.delenv(key, raising=False)
     values = runpy.run_path(config.__file__)
-    assert values["MODEL_PRIMARY"] == "muse-spark-1.3"
+    assert values["MODEL_PRIMARY"] == "deepseek-v4-flash"
+    assert values["MODEL_ESCALATE"] == "gpt-6-luna"
     assert values["MODEL_MINI"] == "deepseek-v4-flash"
     monkeypatch.setenv("TWOHELIXES_MODEL", "muse-spark-1.3-contributor")
     with pytest.raises(ValueError, match="Contributor"):
@@ -109,7 +110,7 @@ def test_empty_reasoning_completion_falls_back_and_accounts_for_both_calls(monke
     monkeypatch.setattr(llm, "_circuits", {})
     with llm.measure() as spend:
         assert llm.call("test", model=config.MODEL_PRIMARY, attempts=1) == '{"ok":true}'
-    assert called == [config.MODEL_PRIMARY, "deepseek-v4-flash"]
+    assert called == [config.MODEL_PRIMARY, "gpt-6-luna"]
     assert spend.calls == 2
     assert all("contributor" not in model for model in llm.MODEL_FALLBACKS.values())
 

@@ -447,7 +447,7 @@ def _normalise(
     raw_ts = event.get("ts") or event.get("timestamp") or event.get("timestamp_micros")
     ts = _timestamp_seconds(raw_ts, now) if raw_ts is not None else now
     # Never trust a client clock far from ours.
-    if ts - now > 86400 or (
+    if ts - now > 300 or (
         now - ts > 86400 and not bool(event.get("_allow_historical"))
     ):
         ts = now

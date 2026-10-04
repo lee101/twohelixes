@@ -527,6 +527,8 @@ def _small_call(prompt: str, system: str, model: str) -> dict[str, Any]:
         raise
     except llm.LLMError as exc:
         if model == config.MODEL_MINI:
+            model = config.MODEL_ESCALATE
+        if model == config.MODEL_MINI:
             raise
         log.info("mini model declined (%s); escalating to %s", exc, model)
         return llm.json_call(prompt, system=system, model=model)
@@ -594,6 +596,9 @@ def _edit(
 
 def _preview(frame: Any, limit: int = 50) -> list[dict[str, Any]]:
     try:
-        return frame.head(limit).to_dict("records")
+        import json
+        # Pandas missing addresses/measures must become JSON null, not NaN:
+        # Python's encoder accepts NaN but browsers reject the whole response.
+        return json.loads(frame.head(limit).to_json(orient="records", date_format="iso", double_precision=15))
     except Exception:  # noqa: BLE001
         return []

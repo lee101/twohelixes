@@ -17,7 +17,7 @@ env.update(PYTHONHOME=prefix, LD_PRELOAD=str(Path(libdir) / library),
            MOJO_PYTHON_LIBRARY=str(Path(libdir) / library),
            TWOHELIXES_INTERP=str(root / "interp"), TWOHELIXES_SITE_PACKAGES=packages,
            TWOHELIXES_DEV="1", TWOHELIXES_DISABLE_EMAIL="1",
-           TWOHELIXES_DATA_DIR=str(root / "var/dev"), TWOHELIXES_WORKERS="2")
+           TWOHELIXES_DATA_DIR=os.environ.get("TWOHELIXES_DATA_DIR", str(root / "var/dev")), TWOHELIXES_WORKERS="2")
 env["TWOHELIXES_PORT"] = os.environ.get("TWOHELIXES_PORT", "7485")
 os.chdir(root)
 os.execve(str(root / "build/twohelixes-server"), ["twohelixes-server"], env)

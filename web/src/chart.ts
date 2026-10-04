@@ -60,6 +60,8 @@ export function currentMode(): "light" | "dark" {
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+const chartObservers = new WeakMap<HTMLElement, ResizeObserver>();
+
 export async function renderFigure(
   host: HTMLElement,
   figure: PlotlyFigure,
@@ -79,7 +81,11 @@ export async function renderFigure(
   if (unknown.length) {
     console.warn("twoHelixes: unregistered trace type(s)", unknown);
   }
-  const layout = fitTop({ ...figure.layout, autosize: true }, figure.data ?? [], host.clientWidth);
+  // Export dimensions must not constrain the interactive card.
+  const responsiveLayout: Record<string, any> = { ...figure.layout, autosize: true };
+  delete responsiveLayout.width;
+  delete responsiveLayout.height;
+  const layout = fitTop(responsiveLayout, figure.data ?? [], host.clientWidth);
   const topojsonURL =
     document.body.dataset.topojsonUrl ||
     `${window.location.origin}/static/libs/topojson/`;
@@ -105,6 +111,41 @@ export async function renderFigure(
 
   await Plotly.react(host, figure.data as any, layout as any, config as any);
   await separateTitleAndLegend(Plotly, host);
+  chartObservers.get(host)?.disconnect();
+  let lastWidth = 0;
+  let lastHeight = 0;
+  const observer = new ResizeObserver(() => {
+    if (!host.isConnected) {
+      observer.disconnect();
+      chartObservers.delete(host);
+      return;
+    }
+    const width = host.clientWidth;
+    const height = host.clientHeight;
+    if (!width || !height || (width === lastWidth && height === lastHeight)) return;
+    lastWidth = width;
+    lastHeight = height;
+    // Container changes (sidebar, full-width answer, phone rotation) do not
+    // necessarily dispatch a window resize event.
+    const fitted = fitTop(responsiveLayout, figure.data ?? [], width);
+    void Plotly.relayout(host, { ...fitted, width, height } as any)
+      .then(() => separateTitleAndLegend(Plotly, host))
+      .catch((error: unknown) => console.warn("Chart resize failed", error));
+  });
+  observer.observe(host);
+  chartObservers.set(host, observer);
+  const pointTraces = figure.data.filter(t => t.type === "scattermap");
+  if (pointTraces.length) {
+    const lats = pointTraces.flatMap(t => t.lat as number[]).filter(Number.isFinite);
+    const lons = pointTraces.flatMap(t => t.lon as number[]).filter(Number.isFinite);
+    const map = (host as any)._fullLayout?.map?._subplot?.map;
+    if (map && lats.length && lons.length) {
+      // Use the actual canvas dimensions: one fixed zoom clips distant
+      // schools when the same map is drawn in a phone or beside a colourbar.
+      map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        {padding: 30, maxZoom: 13, duration: 0});
+    }
+  }
 }
 
 /**
@@ -340,6 +381,7 @@ export class ChartView {
    * back as an explained downgrade rather than a broken chart.
    */
   private renderControls(result: PipelineResult): void {
+    const controlsOpen = this.controls.querySelector<HTMLDetailsElement>("details")?.open ?? window.innerWidth >= 1080;
     this.controls.replaceChildren();
     const columns = result.columns ?? [];
     const config = result.config ?? ({} as ChartConfig);
@@ -354,7 +396,7 @@ export class ChartView {
     // it in words" box, which is the control most people actually want.
     const panel = document.createElement("details");
     panel.className = "chart-controls-panel";
-    panel.open = window.innerWidth >= 1080;
+    panel.open = controlsOpen;
     const summary = document.createElement("summary");
     summary.textContent = "Chart controls";
     const grid = el("div", "chart-controls-grid");

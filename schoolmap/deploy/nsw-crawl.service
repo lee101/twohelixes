@@ -1,0 +1,19 @@
+[Unit]
+Description=NSW My School resumable NAPLAN collection
+After=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/vfast/data/code/twohelixes
+Environment=SCHOOLMAP_RAW_DIR=/vfast/data/code/schoolmap/data/raw/nsw
+Environment=SCHOOLMAP_PUBLISH_HOST=administrator@93.127.141.100
+Environment=PATH=/vfast/data/code/twohelixes/.venv-13/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/vfast/data/code/twohelixes/.venv-13/bin/python /vfast/data/code/twohelixes/schoolmap/scripts/crawl_nsw.py --output /vfast/data/code/schoolmap/data/raw/nsw --year 2025 --workers 1 --interval 21 --snapshot-command /vfast/data/code/twohelixes/schoolmap/scripts/publish-nsw-snapshot.py
+Restart=on-failure
+RestartSec=300
+TimeoutStartSec=infinity
+StandardOutput=append:/vfast/data/code/schoolmap/data/raw/nsw/managed-crawl.log
+StandardError=append:/vfast/data/code/schoolmap/data/raw/nsw/managed-crawl.log
+
+[Install]
+WantedBy=default.target

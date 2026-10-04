@@ -378,6 +378,23 @@ def detail(ctx: router.Context) -> router.Result:
     )
 
     structured = _dataset_jsonld(sample, frame, site)
+    school_summary = ""
+    if key == "nsw_schools":
+        from twohelixes.datasets import schools
+        meta = schools.dataset("nsw")["metadata"]
+        school_summary = f'''<section><div class="shell">
+          <h2>Explore NSW schools</h2>
+          <p>{meta["responses_collected"]:,} of {meta["result_school_count"]:,} school responses collected;
+          {meta["address_count"]:,} street addresses; {meta["scored_schools"]:,} achievement indices.
+          Assessment year {meta["assessment_year"]}. Missing results are never zero.</p>
+          <p>{_esc(meta["method"])}</p>
+          <p><a href="/schools/nsw">Open full map</a> ·
+          <a href="/app?sample=nsw_schools&amp;example=nsw-map">Open the agent-generated street map</a> ·
+          <a href="/app?sample=nsw_schools&amp;example=nsw-naplan-map">Saved agent map of collected reading scores</a> ·
+          <a href="/datasets/nsw_naplan_results">Browse collected NAPLAN domain results</a></p>
+          <iframe src="/schools/nsw" title="NSW school map" loading="lazy"
+          style="width:100%;height:680px;border:1px solid var(--border);border-radius:12px"></iframe>
+          </div></section>'''
 
     # A dataset-level notebook is the lead example's: a notebook that loads a
     # file and charts nothing is not a starting point, it is homework.
@@ -404,12 +421,15 @@ def detail(ctx: router.Context) -> router.Result:
       Download CSV</a>
     {notebook_link}
     {'<a class="btn btn-ghost" href="/schools">Explore school map</a>' if key == 'queensland_schools' else ''}
+    {'<a class="btn btn-ghost" href="/schools/nsw">Explore NSW map</a>' if key == 'nsw_schools' else ''}
+    {('<a class="btn btn-ghost" href="/schools/region/'+_esc(key.removeprefix('world_schools_').replace('_','-'))+'">Explore regional map</a>') if key.startswith('world_schools_') else ''}
   </div>
   <div class="ds-meta" style="margin-top:var(--s4)">
     <span>{len(frame):,} rows</span><span>{len(frame.columns)} columns</span>
     <span>{_esc(sample.source)}</span></div>
 </div></section>
 
+{school_summary}
 <section><div class="shell">
   <h2>Worked examples</h2>
   <p class="lead-in">Each of these is a real run: the pipeline picked the

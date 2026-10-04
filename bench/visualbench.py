@@ -238,6 +238,7 @@ def main() -> int:
     workbench_failures = [
         r for r in report
         if r.get("editor_leads") is False or r.get("proposal_reviewable") is False
+        or r.get("visualization_has_room") is False
     ]
     imgs = [r for r in report if r.get("broken_images")]
 
@@ -1011,6 +1012,8 @@ SHOW_RESULT_JS = """
 async ([result]) => {
   if (!window.__thShowResult) throw new Error('__thShowResult missing - stale bundle?');
   await window.__thShowResult(result);
+  // Full-width answer layout and ResizeObserver settle after Plotly draws.
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const card = document.querySelector('.chart-view');
   const plot = document.querySelector('.chart-plot');
   const marks = plot
@@ -1022,6 +1025,8 @@ async ([result]) => {
   return {
     marks,
     spill,
+    width_fraction: plot ? plot.clientWidth / window.innerWidth : 0,
+    height_fraction: plot ? plot.clientHeight / window.innerHeight : 0,
     overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
   };
 }
@@ -1122,6 +1127,9 @@ def _capture_gallery(browser, args) -> list[dict[str, object]]:
                         "h_overflow_px": int(measured["overflow"]),
                         "marks": int(measured["marks"]),
                         "spill_px": int(measured["spill"]),
+                        "plot_width_fraction": measured["width_fraction"],
+                        "plot_height_fraction": measured["height_fraction"],
+                        "visualization_has_room": measured["width_fraction"] >= 0.82 and measured["height_fraction"] >= 0.50,
                         "console_errors": list(errors),
                     }
                     audit_count = len(result.get("audit") or [])
@@ -1129,6 +1137,8 @@ def _capture_gallery(browser, args) -> list[dict[str, object]]:
                     if int(measured["overflow"]) > 1:
                         score -= 20
                     if int(measured["spill"]) > 1:
+                        score -= 20
+                    if not row["visualization_has_room"]:
                         score -= 20
                     # An empty plot is the failure Plotly does not raise on.
                     if int(measured["marks"]) < _FLOORS.get(form, DEFAULT_MARK_FLOOR):

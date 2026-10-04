@@ -12,6 +12,7 @@ was handed unsorted stages - rather than silently producing something wrong.
 from __future__ import annotations
 
 import logging
+import html
 import math
 import re
 from typing import Any
@@ -386,6 +387,8 @@ def map_chart(
 
     value = _column(frame, config.get("y") or config.get("value"))
     color = _column(frame, config.get("color"))
+    if color and color not in (detected.get("lat"), detected.get("lon")) and _numeric_in_range(frame, color, -math.inf, math.inf):
+        value, color = color, None
     ramp = _plotly_scale(palette.sequential(9, mode))
 
     if detected["kind"] == "countries":
@@ -428,22 +431,36 @@ def map_chart(
         ], warnings
 
     latitude, longitude = detected["lat"], detected["lon"]
+    import pandas as pd
+    frame = frame.copy()
+    frame[latitude] = pd.to_numeric(frame[latitude], errors="coerce")
+    frame[longitude] = pd.to_numeric(frame[longitude], errors="coerce")
+    valid = frame[latitude].between(-90, 90) & frame[longitude].between(-180, 180)
+    omitted = int((~valid).sum())
+    frame = frame[valid]
     groups = [None]
-    warnings = []
+    warnings = [f"{omitted} rows have missing or invalid coordinates."] if omitted else []
     if color and color not in (latitude, longitude) and color != value:
         groups = list(frame[color].dropna().unique())
         limit = palette.max_series_for("map")
         if len(groups) > limit:
-            warnings.append(f"{len(groups)} groups; showing the first {limit}.")
-            groups = groups[:limit]
+            warnings.append(f"{len(groups)} groups; showing {limit} named groups and Other.")
+            kept = groups[:limit]
+            frame[color] = frame[color].where(frame[color].isin(kept), palette.OTHER_LABEL)
+            groups = kept + [palette.OTHER_LABEL]
+        if frame[color].isna().any():
+            frame[color] = frame[color].fillna(palette.OTHER_LABEL)
+            if palette.OTHER_LABEL not in groups:
+                groups.append(palette.OTHER_LABEL)
 
     traces = []
     for index, group in enumerate(groups):
         subset = frame if group is None else frame[frame[color] == group]
-        marker: dict[str, Any] = {"size": 10}
-        if value and value not in (latitude, longitude) and _numeric_in_range(
+        marker: dict[str, Any] = {"size": 6 if len(frame) > 500 else 10}
+        measured = value and value not in (latitude, longitude) and _numeric_in_range(
             subset, value, -math.inf, math.inf
-        ):
+        )
+        if measured:
             marker.update(
                 {
                     "color": _series(subset, value),
@@ -453,15 +470,41 @@ def map_chart(
             )
         traces.append(
             {
-                "type": "scattergeo",
+                "type": "scattermap",
                 "mode": "markers",
                 "lat": _series(subset, latitude),
                 "lon": _series(subset, longitude),
                 "name": str(group) if group is not None else None,
                 "marker": marker,
+                "text": ["<br>".join(html.escape(str(row[c])) for c in
+                         ("school_name", "name", "address", "suburb", "postcode")
+                         if c in subset.columns and pd.notna(row[c]))
+                         for _, row in subset.iterrows()],
+                "hovertemplate": "%{text}<br>%{lat:.5f}, %{lon:.5f}"
+                    + (f"<br>{html.escape(value)}: %{{marker.color}}" if measured else "")
+                    + "<extra>%{fullData.name}</extra>",
                 "_series_index": index,
             }
         )
+    missing_trace = {"type": "scattermap", "mode": "markers", "name": "No selected score",
+                     "lat": [], "lon": [], "text": [], "marker": {"size": 5, "opacity": 0.45}, "_neutral": True,
+                     "hovertemplate": "%{text}<br>Selected score unavailable<extra></extra>"}
+    for trace in traces:
+        colors = trace["marker"].get("color")
+        if not isinstance(colors, list):
+            continue
+        good = [i for i, v in enumerate(colors) if isinstance(v, (int, float)) and math.isfinite(v)]
+        good_set = set(good)
+        bad = [i for i in range(len(colors)) if i not in good_set]
+        for key in ("lat", "lon", "text"):
+            missing_trace[key].extend(trace[key][i] for i in bad)
+            trace[key] = [trace[key][i] for i in good]
+        trace["marker"]["color"] = [colors[i] for i in good]
+    traces = [t for t in traces if t["lat"]]
+    if missing_trace["lat"]:
+        for trace in traces:
+            trace["marker"]["size"] = 7
+        traces.insert(0, missing_trace)
     return traces, warnings
 
 

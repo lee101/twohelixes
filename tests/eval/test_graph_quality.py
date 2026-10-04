@@ -39,7 +39,7 @@ def test_country_gdp_map_is_choropleth_not_a_bar():
     assert findings == []
 
 
-def test_lat_lon_map_is_scattergeo():
+def test_lat_lon_map_is_street_map():
     frame = pd.DataFrame(
         {
             "lat": [37.77, 40.71, 51.50],
@@ -50,7 +50,7 @@ def test_lat_lon_map_is_scattergeo():
     )
     cfg, figure, warnings, findings = _build(frame, "where are our users")
     assert cfg["chart_type"] == "map"
-    assert figure["data"][0]["type"] == "scattergeo"
+    assert figure["data"][0]["type"] == "scattermap"
     assert findings == []
 
 

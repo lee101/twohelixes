@@ -29,6 +29,7 @@ import indicator from "plotly.js/lib/indicator";
 import pie from "plotly.js/lib/pie";
 import sankey from "plotly.js/lib/sankey";
 import scattergeo from "plotly.js/lib/scattergeo";
+import scattermap from "plotly.js/lib/scattermap";
 import sunburst from "plotly.js/lib/sunburst";
 import table from "plotly.js/lib/table";
 import treemap from "plotly.js/lib/treemap";
@@ -48,6 +49,7 @@ Plotly.register([
   pie,
   sankey,
   scattergeo,
+  scattermap,
   sunburst,
   table,
   treemap,
@@ -70,6 +72,7 @@ export const SUPPORTED_TRACES = new Set([
   "pie",
   "sankey",
   "scattergeo",
+  "scattermap",
   "sunburst",
   "table",
   "treemap",

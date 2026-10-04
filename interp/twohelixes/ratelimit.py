@@ -114,6 +114,16 @@ def sweep(older_than: int = 86400 * 2) -> None:
     )
 
 
+def public_read(ctx: Any, bucket: str = "public_read") -> Decision | None:
+    """Per-address cap for unauthenticated reads. None means allowed."""
+    limit = (
+        config.PUBLIC_DOWNLOAD_PER_MINUTE
+        if bucket == "public_download"
+        else config.PUBLIC_READ_PER_MINUTE
+    )
+    return _claim(f"ip:{ctx.client_ip}", [(bucket, 60, limit)])
+
+
 def anonymous_trial_left(identity: Any) -> int:
     used = _count(f"ip:{getattr(identity, 'ip', '0.0.0.0')}", "anon", 86400)
     return max(0, config.ANON_QUERIES_PER_DAY - used)

@@ -1172,3 +1172,10 @@ def test_tracker_has_privacy_guards_and_omits_risky_fields() -> None:
     assert "purchase: true" in source
     assert "begin_checkout: true" in source
     assert "subscription_dialog_opened: true" in source
+
+
+def test_future_client_clock_is_replaced_with_server_time() -> None:
+    ahead = (time.time() + 7 * 3600) * 1000
+    assert collect([{"event": "page_view", "client_id": "c-skew", "ts": ahead}]) == 204
+    stored = rows()
+    assert stored and abs(stored[-1]["ts"] - time.time()) < 60

@@ -43,6 +43,7 @@ export interface PipelineResult {
   transform_code: string;
   chart_id?: string;
   elapsed_ms: number;
+  trace?: { stage?: string; status?: string; thought?: string; [key: string]: unknown }[];
 }
 
 export interface PlotlyFigure {
