@@ -157,7 +157,7 @@ def test_bubble_caps_groups_at_three():
 # -- map -------------------------------------------------------------------
 
 
-def test_coordinate_map_builds_scattergeo_and_caps_groups():
+def test_coordinate_map_builds_street_map_and_preserves_other_locations():
     frame = pd.DataFrame({
         "latitude": [51.5, 48.9, 40.7, 35.7, -33.9],
         "longitude": [-0.1, 2.3, -74.0, 139.7, 151.2],
@@ -167,10 +167,12 @@ def test_coordinate_map_builds_scattergeo_and_caps_groups():
     figure, warnings = figures.build(
         frame, {"chart_type": "map", "y": "value", "color": "group"}
     )
-    assert len(figure["data"]) == palette.ALL_PAIRS_MAX_SERIES
-    assert all(trace["type"] == "scattergeo" for trace in figure["data"])
+    assert len(figure["data"]) == palette.ALL_PAIRS_MAX_SERIES + 1
+    assert all(trace["type"] == "scattermap" for trace in figure["data"])
     assert any("showing" in warning for warning in warnings)
     styled = defaults.apply(figure, chart_type="map")
+    assert sum(len(t["lat"]) for t in styled["data"]) == len(frame)
+    assert styled["layout"]["map"]["style"] == "open-street-map"
     assert defaults.audit(styled) == []
 
 
@@ -296,3 +298,31 @@ def test_unknown_form_is_reported():
     traces, warnings = forms.build("hologram", pd.DataFrame({"a": [1]}), {})
     assert traces == []
     assert "hologram" in warnings[0]
+
+
+def test_map_missing_values_stay_neutral_and_names_are_escaped():
+    frame = pd.DataFrame({'latitude': [-33.8, -33.9, None], 'longitude': [151.1, 151.2, 150.0],
+                          'school_name': ['<School>', 'Missing', 'Unlocated'], 'reading_y3': [410, None, 500]})
+    figure, warnings = figures.build(frame, {'chart_type': 'map', 'y': 'reading_y3'})
+    styled = defaults.apply(figure, chart_type='map')
+    assert sum(len(t['lat']) for t in styled['data']) == 2
+    scored = next(t for t in styled['data'] if not t.get('_neutral'))
+    missing = next(t for t in styled['data'] if t.get('_neutral'))
+    assert scored['marker']['color'] == [410.0]
+    assert '&lt;School&gt;' in scored['text'][0]
+    assert missing['marker']['color'] == palette.OTHER_COLOR_LIGHT
+    assert any('coordinates' in w for w in warnings)
+
+
+def test_school_location_heuristic_does_not_color_by_calendar_or_ids():
+    frame = pd.DataFrame({'school_id':['1','2'], 'latitude':[-33.,-34.], 'longitude':[151.,150.],
+                          'profile_year':[2025,2025], 'postcode':[2000,2001], 'lbote_yes_pct':[96.,4.]})
+    assert figures.heuristic_config(frame,'Show school locations on a map')['y'] is None
+
+
+def test_numeric_map_color_is_continuous_not_truncated_categories():
+    frame = pd.DataFrame({'latitude': [-33.]*5, 'longitude': [150.]*5, 'reading_y3': [350,400,450,500,550]})
+    traces,_=forms.map_chart(frame,{'y':'latitude','color':'reading_y3'})
+    assert len(traces)==1
+    assert traces[0]['marker']['color']==[350,400,450,500,550]
+    assert traces[0]['marker']['showscale']

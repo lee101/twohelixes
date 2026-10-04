@@ -119,7 +119,7 @@ def test_it_works_without_mojo_plotly(monkeypatch):
     warnings: list[str] = []
     decimate.thin([trace], warnings)
     assert len(trace["y"]) <= decimate.MAX_LINE_POINTS + 1
-    assert "fixed interval" in warnings[0]
+    assert "bucket extrema" in warnings[0]
     assert trace["x"][0] == 0
     assert trace["x"][-1] == 99_999
 
@@ -128,6 +128,31 @@ def test_the_environment_switch_turns_it_off(monkeypatch):
     monkeypatch.setenv("TWOHELIXES_MOJO_PLOTLY", "0")
     monkeypatch.setattr(decimate, "_state", {"checked": False, "lttb": None})
     assert decimate.available() is False
+
+
+def test_fallback_preserves_isolated_spike_and_trough(monkeypatch):
+    monkeypatch.setattr(decimate, "_state", {"checked": True, "lttb": None})
+    trace = line_trace(100_000, spike_at=12_345)
+    trace["y"][54_321] = -9999.0
+    decimate.thin([trace], [])
+    assert {12_345, 54_321}.issubset(trace["x"])
+    assert len(trace["x"]) <= decimate.MAX_LINE_POINTS
+
+
+def test_gaps_are_not_silently_connected():
+    trace = line_trace(10_000)
+    trace["y"][101] = None
+    assert decimate.thin([trace], []) == [trace]
+    assert len(trace["x"]) == 10_000
+
+
+def test_webgl_error_bars_and_ids_stay_aligned(monkeypatch):
+    monkeypatch.setattr(decimate, "_state", {"checked": True, "lttb": None})
+    trace = line_trace(10_000)
+    trace.update(type="scattergl", ids=list(range(10_000)),
+                 error_y={"array": list(range(10_000)), "arrayminus": list(range(10_000))})
+    decimate.thin([trace], [])
+    assert trace["ids"] == trace["x"] == trace["error_y"]["array"] == trace["error_y"]["arrayminus"]
 
 
 @pytest.mark.skipif(not decimate.available(), reason="mojo-plotly kernel not built")

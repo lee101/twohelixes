@@ -10,7 +10,7 @@ LTTB (largest-triangle-three-buckets) is the downsample that keeps the shape:
 it picks the point in each bucket that forms the largest triangle with its
 neighbours, so spikes and troughs survive where a stride or a mean would erase
 them. `mojo-plotly` has it as a Mojo kernel, 4.6x over the vectorised numpy
-version; this module uses that when it is there and falls back to a stride
+version; this module uses that when it is there and falls back to bucket extrema
 otherwise.
 
 Two rules, the same as every other accelerator here:
@@ -99,7 +99,7 @@ def _indices(values: list[Any], target: int) -> list[int] | None:
         return None
     if y.ndim != 1 or len(y) <= target:
         return None
-    if not np.isfinite(y).any():
+    if not np.isfinite(y).all():
         return None
 
     if available():
@@ -111,16 +111,19 @@ def _indices(values: list[Any], target: int) -> list[int] | None:
             if len(keep) > 1:
                 return [int(i) for i in keep]
         except Exception as exc:  # noqa: BLE001 - never required
-            log.debug("lttb failed, using the stride: %s", exc)
+            log.debug("lttb failed, using bucket extrema: %s", exc)
 
-    # Stride: cheap, order-preserving, and keeps the endpoints. It loses
-    # narrow spikes, which is exactly what LTTB is for - hence the note.
-    # Pick exactly `target` evenly spaced rows, including both endpoints.
-    # Integer division by `target` used to emit 5,001 points for a 15,000-row
-    # series with a 4,000-point limit, defeating both the documented bound and
-    # the payload budget. This is also O(target), not O(input rows).
-    last = len(y) - 1
-    return [(index * last) // (target - 1) for index in range(target)]
+    # Keep both extrema per bucket so isolated spikes survive without Mojo.
+    buckets = (target - 2) // 2
+    edges = np.linspace(1, len(y) - 1, buckets + 1, dtype=int)
+    keep = [0]
+    for start, stop in zip(edges[:-1], edges[1:]):
+        bucket = y[start:stop]
+        low = int(start + np.argmin(bucket))
+        high = int(start + np.argmax(bucket))
+        keep.extend(sorted({low, high}))
+    keep.append(len(y) - 1)
+    return keep
 
 
 def _target_for(trace: dict[str, Any]) -> int:
@@ -132,7 +135,7 @@ def _target_for(trace: dict[str, Any]) -> int:
 
 def _thin_trace(trace: dict[str, Any]) -> int:
     """Thin one trace in place. Returns the number of points dropped."""
-    if trace.get("type") != "scatter":
+    if trace.get("type") not in {"scatter", "scattergl"}:
         return 0
     ys = trace.get("y")
     xs = trace.get("x")
@@ -150,16 +153,23 @@ def _thin_trace(trace: dict[str, Any]) -> int:
     trace["y"] = [ys[i] for i in keep]
     # Anything else that is per-point has to be selected with the same rows or
     # the marker sizes stop describing the points they are drawn on.
-    for key in ("text", "customdata", "hovertext"):
+    for key in ("text", "customdata", "hovertext", "ids", "hovertemplate"):
         seq = trace.get(key)
         if isinstance(seq, list) and len(seq) == len(ys):
             trace[key] = [seq[i] for i in keep]
     marker = trace.get("marker")
     if isinstance(marker, dict):
-        for key in ("size", "color"):
+        for key in ("size", "color", "symbol", "opacity", "angle"):
             seq = marker.get(key)
             if isinstance(seq, list) and len(seq) == len(ys):
                 marker[key] = [seq[i] for i in keep]
+    for key in ("error_x", "error_y"):
+        error = trace.get(key)
+        if isinstance(error, dict):
+            for field in ("array", "arrayminus"):
+                seq = error.get(field)
+                if isinstance(seq, list) and len(seq) == len(ys):
+                    error[field] = [seq[i] for i in keep]
     return dropped
 
 
@@ -176,7 +186,7 @@ def thin(traces: list[Any], warnings: list[str]) -> list[Any]:
             total_after += len(trace["y"])
 
     if total_before:
-        how = "preserving peaks" if available() else "at a fixed interval"
+        how = "preserving peaks" if available() else "preserving bucket extrema"
         warnings.append(
             f"Drew {total_after:,} of {total_before:,} points, sampled {how}."
         )

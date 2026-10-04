@@ -677,6 +677,12 @@ def _store(rows: list[dict[str, Any]]) -> tuple[int, list[tuple[str, str]]]:
         # must abort visibly; swallowing it leaves PostgreSQL's transaction in
         # an aborted state and can otherwise turn total data loss into a 204.
         inserted_ids = _insert_event_rows(conn, rows)
+        from twohelixes import analytics_dashboards
+
+        for site_id in {str(row["site_id"]) for row in rows if str(row["id"]) in inserted_ids}:
+            if conn.execute("SELECT 1 FROM analytics_sites WHERE id = ?", (site_id,)).fetchone():
+                if analytics_dashboards.claim(conn, site_id):
+                    claimed.append((site_id, ""))
         for row in rows:
             if str(row["id"]) not in inserted_ids:
                 continue
@@ -969,6 +975,11 @@ def create_site(ctx: Context) -> Result:
             return error(409, "site_already_exists")
         raise
     row = store.one("SELECT * FROM analytics_sites WHERE id = ?", (site_id,))
+    from twohelixes import analytics_dashboards
+
+    with store.transaction() as conn:
+        analytics_dashboards.claim(conn, site_id)
+    _schedule_dashboards([(site_id, "")])
     return json_result(_site_payload(row), status=201)
 
 
@@ -1123,9 +1134,12 @@ def _dashboard_worker() -> None:
         try:
             from twohelixes.routes import dashboards
 
-            dashboard_id = dashboards.build_analytics_event_dashboard(
-                site_id, event_name
-            )
+            if event_name:
+                dashboard_id = dashboards.build_analytics_event_dashboard(site_id, event_name)
+            else:
+                from twohelixes import analytics_dashboards
+
+                dashboard_id = analytics_dashboards.build(site_id)
             if dashboard_id is None:
                 with store.transaction() as conn:
                     conn.execute(

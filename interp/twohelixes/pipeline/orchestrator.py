@@ -68,6 +68,7 @@ class PipelineResult:
     # the preview is what the client gets - but the caller needs it to keep
     # the rows for data that has no source to re-query.
     frame: Any = None
+    source_frame: Any = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -201,8 +202,12 @@ def _run(
     edit_request: str,
 ) -> PipelineResult:
     # ---- stage 1: search -------------------------------------------------
+    analysis_question = (
+        f"Original question: {question}\nRequested change: {edit_request}"
+        if edit_request else question
+    )
     emit.stage("search", "start")
-    search = _search(question, frames, catalog or [], emit, model)
+    search = _search(analysis_question, frames, catalog or [], emit, model)
     result.interpretation = search.get("interpretation") or question
     emit.stage(
         "search",
@@ -248,9 +253,11 @@ def _run(
     if len(frame) == 0:
         emit.warn("The selected data has no rows, so the chart will be empty.")
 
+    result.source_frame = frame
+
     # ---- stage 3: transform ---------------------------------------------
     emit.stage("transform", "start")
-    shaped, transform_detail = _transform(question, frame, emit, model)
+    shaped, transform_detail = _transform(analysis_question, frame, emit, model)
     result.transform_code = transform_detail.get("code", "")
     emit.stage("transform", "done", **{k: v for k, v in transform_detail.items() if k != "code"})
 
@@ -594,6 +601,9 @@ def _edit(
 
 def _preview(frame: Any, limit: int = 50) -> list[dict[str, Any]]:
     try:
-        return frame.head(limit).to_dict("records")
+        import json
+        # Pandas missing addresses/measures must become JSON null, not NaN:
+        # Python's encoder accepts NaN but browsers reject the whole response.
+        return json.loads(frame.head(limit).to_json(orient="records", date_format="iso", double_precision=15))
     except Exception:  # noqa: BLE001
         return []

@@ -105,6 +105,18 @@ export async function renderFigure(
 
   await Plotly.react(host, figure.data as any, layout as any, config as any);
   await separateTitleAndLegend(Plotly, host);
+  const pointTraces = figure.data.filter(t => t.type === "scattermap");
+  if (pointTraces.length) {
+    const lats = pointTraces.flatMap(t => t.lat as number[]).filter(Number.isFinite);
+    const lons = pointTraces.flatMap(t => t.lon as number[]).filter(Number.isFinite);
+    const map = (host as any)._fullLayout?.map?._subplot?.map;
+    if (map && lats.length && lons.length) {
+      // Use the actual canvas dimensions: one fixed zoom clips distant
+      // schools when the same map is drawn in a phone or beside a colourbar.
+      map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]],
+        {padding: 30, maxZoom: 13, duration: 0});
+    }
+  }
 }
 
 /**
@@ -340,6 +352,7 @@ export class ChartView {
    * back as an explained downgrade rather than a broken chart.
    */
   private renderControls(result: PipelineResult): void {
+    const controlsOpen = this.controls.querySelector<HTMLDetailsElement>("details")?.open ?? window.innerWidth >= 1080;
     this.controls.replaceChildren();
     const columns = result.columns ?? [];
     const config = result.config ?? ({} as ChartConfig);
@@ -354,7 +367,7 @@ export class ChartView {
     // it in words" box, which is the control most people actually want.
     const panel = document.createElement("details");
     panel.className = "chart-controls-panel";
-    panel.open = window.innerWidth >= 1080;
+    panel.open = controlsOpen;
     const summary = document.createElement("summary");
     summary.textContent = "Chart controls";
     const grid = el("div", "chart-controls-grid");

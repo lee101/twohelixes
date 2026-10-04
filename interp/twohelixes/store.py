@@ -360,6 +360,12 @@ CREATE TABLE IF NOT EXISTS analytics_event_dashboards (
 );
 CREATE INDEX IF NOT EXISTS analytics_event_dashboards_status
     ON analytics_event_dashboards(status, claimed_at);
+
+CREATE TABLE IF NOT EXISTS analytics_site_dashboards (
+    site_id       TEXT PRIMARY KEY,
+    dashboard_id  TEXT,
+    created_at    REAL NOT NULL
+);
 """
 
 

@@ -306,14 +306,23 @@ def heuristic_config(frame: Any, question: str) -> dict[str, Any]:
     geographic = forms.detect_map(frame)
     if geographic and geographic["kind"] == "points":
         coordinate_columns = {geographic["lat"], geographic["lon"]}
-        map_measures = [measure for measure in measures if measure not in coordinate_columns]
-        map_categories = [category for category in categories if category not in coordinate_columns]
+        map_measures = [measure for measure in measures if measure not in coordinate_columns
+                        and measure not in {"school_id", "postcode", "rank", "assessment_year", "location_year", "profile_year", "head_campus_id"}]
+        map_categories = [category for category in categories if category not in coordinate_columns
+                          and frame[category].nunique() <= 3]
+        if "achievement_score" in map_measures:
+            map_measures.remove("achievement_score")
+            map_measures.insert(0, "achievement_score")
         measure = map_measures[0] if map_measures else None
+        if "school_id" in frame.columns:
+            measure = next((m for m in map_measures if m.lower() in question.lower()), None)
+            if measure is None and any(word in question.lower() for word in ("achievement", "aggregate score")):
+                measure = "achievement_score" if "achievement_score" in map_measures else None
         return {
             "chart_type": "map",
             "x": None,
             "y": measure,
-            "color": map_categories[0] if map_categories else None,
+            "color": None if measure else (map_categories[0] if map_categories else None),
             "agg": None,
             "title": "Locations",
             "y_title": tools.humanise(measure) if measure else "",

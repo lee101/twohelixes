@@ -136,6 +136,7 @@ async function boot(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
   const sample = params.get("sample");
   const question = params.get("q");
+  const schoolExample = ["nsw-map", "nsw-naplan-map"].includes(params.get("example") ?? "");
   state.pendingJoin = params.get("join");
   if (sample) state.activeSample = sample;
   // Through state, not through the DOM: loadSources() and loadSamples() both
@@ -148,10 +149,32 @@ async function boot(): Promise<void> {
   if (joined) state.view = "dashboards";
   render();
   if (joined) void dashboardList().load();
-  else if (state.user?.signed_in) void loadSources();
+  else if (state.user?.signed_in && !schoolExample) void loadSources();
   // The samples are what an anonymous visitor can ask about, so they have to
   // load before sign-in rather than after it.
-  else void loadSamples();
+  else if (!schoolExample) void loadSamples();
+
+  if (schoolExample) {
+    await loadSamples();
+    try {
+      const naplanExample = params.get("example") === "nsw-naplan-map";
+      const response = await fetch(naplanExample ? "/v1/schools/nsw/agent-naplan-map" : "/v1/schools/nsw/agent-map");
+      if (!response.ok) throw new Error("The saved map could not be loaded.");
+      state.lastResult = await response.json() as PipelineResult;
+      state.lastQuestion = naplanExample ? "Map all NSW schools; colour collected 2025 Year 3 reading scores and show missing scores in grey" : "Show NSW school locations on a street map with school names and addresses";
+      trace.reset();
+      for (const entry of state.lastResult.trace ?? []) {
+        if (entry.status) trace.handle("stage", entry);
+        if (entry.thought) trace.handle("thought", {stage: entry.stage, text: entry.thought});
+      }
+      trace.handle("done", {});
+      state.ran = true;
+      render();
+      await chart.show(state.lastResult);
+    } catch (error) {
+      showFatal(error);
+    }
+  }
 
   if (question) {
     document.querySelector<HTMLTextAreaElement>(".ask-input")?.focus();
@@ -668,8 +691,23 @@ function sourcePicker(): HTMLElement {
     ? `Auto-detect from ${state.datasets.length} dataset${state.datasets.length === 1 ? "" : "s"}`
     : state.sources.length
       ? "Choose a dataset or source"
-      : "No datasets yet";
+      : state.samples.length || state.activeSample ? "Choose a sample dataset" : "No datasets yet";
   node.append(none);
+
+  for (const sample of state.samples) {
+    const item = document.createElement("option");
+    item.value = `sample:${sample.key}`;
+    item.textContent = sample.name;
+    item.selected = sample.key === state.activeSample;
+    node.append(item);
+  }
+  if (state.activeSample && !state.samples.some(s => s.key === state.activeSample)) {
+    const item = document.createElement("option");
+    item.value = `sample:${state.activeSample}`;
+    item.textContent = state.activeSample.replaceAll("_", " ");
+    item.selected = true;
+    node.append(item);
+  }
 
   for (const dataset of state.datasets) {
     const item = document.createElement("option");
@@ -688,7 +726,7 @@ function sourcePicker(): HTMLElement {
   }
   node.addEventListener("change", () => {
     const [kind, id] = node.value.split(":", 2);
-    state.activeSample = null;
+    state.activeSample = kind === "sample" ? id : null;
     state.activeDataset = kind === "dataset" ? id : null;
     state.activeSource = kind === "source" ? id : null;
   });
@@ -946,7 +984,8 @@ function ask(question: string, edit = ""): void {
 /** Apply a manual control change without spending a query. */
 async function applyConfig(config: ChartConfig): Promise<void> {
   const chartId = state.lastResult?.chart_id;
-  if (!chartId) {
+  const savedSchoolMap = !chartId && new URLSearchParams(location.search).get('sample') === 'nsw_schools' && ['nsw-map', 'nsw-naplan-map'].includes(new URLSearchParams(location.search).get('example') ?? '');
+  if (!chartId && !savedSchoolMap) {
     showError({
       code: "not_saved",
       message: "Run a query first — there is no chart to reconfigure yet.",
@@ -959,7 +998,7 @@ async function applyConfig(config: ChartConfig): Promise<void> {
       config: ChartConfig;
       warnings: string[];
       audit: PipelineResult["audit"];
-    }>(`/v1/chart/${chartId}/config`, { ...config, mode: prefersDark() ? "dark" : "light" });
+    }>(savedSchoolMap ? "/v1/schools/nsw/map-config" : `/v1/chart/${chartId}/config`, { ...config, mode: prefersDark() ? "dark" : "light" });
 
     state.lastResult = {
       ...(state.lastResult as PipelineResult),

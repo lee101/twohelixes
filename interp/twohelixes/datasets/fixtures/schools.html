@@ -4,8 +4,30 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 *{box-sizing:border-box}body{margin:0;font:15px system-ui;color:#18232d;background:#f5f7fa}header{padding:18px 24px;border-bottom:1px solid #d4dce5;background:white}a{color:#205daa}h1{margin:10px 0;font-size:26px;letter-spacing:-.6px}p{line-height:1.6;margin:8px 0}main{display:grid;grid-template-columns:340px 1fr;height:calc(100vh - 160px);min-height:480px}aside{padding:20px;overflow:auto}#map{min-height:480px}input,select{font:inherit;padding:10px;border:1px solid #acbac9;border-radius:6px;width:100%;margin:5px 0 12px}label{font-weight:600}button{font:inherit;cursor:pointer}.school{display:block;width:100%;background:white;border:1px solid #d8e0ea;border-radius:6px;padding:12px;text-align:left;margin:8px 0}.school small{display:block;margin-top:5px;color:#506070}.bar{height:10px;background:linear-gradient(90deg,#d53e4f,#fee08b,#1a9850);border-radius:5px}.ends{display:flex;justify-content:space-between}.note{background:#e8eef6;padding:12px;border-radius:8px;font-size:13px}.muted{color:#506070}details{margin:16px 0;font-size:13px}#error{color:#9b2134} @media(max-width:700px){header{padding:12px 16px}h1{font-size:22px}main{display:flex;flex-direction:column;height:auto}aside{max-height:410px}#map{height:65vh;order:-1}}
+/* Use the actual header height; keep the map and controls inside the viewport. */
+html{height:100%;overflow:hidden}
+body{height:100vh;height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden}
+header{padding:12px 20px}
+header h1{margin:4px 0}
+header p{margin:4px 0}
+main{display:grid;grid-template-columns:clamp(280px,23vw,340px) minmax(0,1fr);height:auto;min-height:0;min-width:0;overflow:hidden}
+aside{min-height:0;min-width:0;max-height:none;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+#map{height:100%;min-height:0;min-width:0;width:100%}
+@media(max-width:700px){
+  header{padding:8px 12px}
+  header h1{font-size:20px}
+  header p{font-size:12px}
+  main{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,3fr) minmax(0,2fr)}
+  #map{grid-row:1;order:0;height:100%;min-height:0}
+  aside{grid-row:2;padding:12px;max-height:none;border-top:1px solid #d8e2e5}
+}
+@media(max-height:450px) and (min-width:701px){header{padding:6px 16px}header h1{font-size:20px}header p{font-size:12px}}
+.map-fullscreen-button{font:600 13px system-ui;background:white;color:#1c3040;border:0;padding:10px 12px;cursor:pointer;min-height:40px}
+.map-fullscreen-button:focus-visible{outline:3px solid #176479;outline-offset:2px}
+#map:fullscreen,#map.map-fullscreen{width:100%;height:100%;min-height:0}
+#map.map-fullscreen{position:fixed;inset:0;z-index:10000;width:100vw;height:100dvh}
 </style></head><body>
-<header><a href="/datasets/queensland_schools">← Twohelixes dataset</a><h1>Explore Queensland schools</h1><p class="muted">School addresses from the May 2020 directory. A historical snapshot; schools may have moved or closed.</p></header>
+<header><a href="/schools/world">World school maps</a> · <a href="/datasets/queensland_schools">← Twohelixes dataset</a><h1>Explore Queensland schools</h1><p class="muted">School addresses from the May 2020 directory. A historical snapshot; schools may have moved or closed.</p></header>
 <main><aside><label for="search">School, suburb or postcode</label><input id="search" type="search" placeholder="Search schools…"><label for="sector">Sector</label><select id="sector"><option value="">All sectors</option></select>
 <p id="count" role="status">Loading schools…</p><p id="error" role="alert"></p>
 <div class="note" id="availability">Checking result availability…</div>
@@ -17,6 +39,19 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
 const byId=id=>document.getElementById(id);
 const map=L.map('map',{preferCanvas:true}).setView([-22,145],5);
+new ResizeObserver(()=>map.invalidateSize({pan:false})).observe(document.getElementById('map'));
+
+// Keep the control inside the map so it remains available in fullscreen.
+const fullscreenHost=document.getElementById('map');
+const fullscreenControl=L.control({position:'topright'});
+let fullscreenButton;
+const fullscreenActive=()=>document.fullscreenElement===fullscreenHost||fullscreenHost.classList.contains('map-fullscreen');
+function syncFullscreen(){const active=fullscreenActive();fullscreenButton.textContent=active?'Exit fullscreen':'Fullscreen';fullscreenButton.setAttribute('aria-pressed',String(active));map.invalidateSize({pan:false});}
+fullscreenControl.onAdd=()=>{const box=L.DomUtil.create('div','leaflet-bar');fullscreenButton=L.DomUtil.create('button','map-fullscreen-button',box);fullscreenButton.type='button';fullscreenButton.setAttribute('aria-label','Toggle map fullscreen');fullscreenButton.onclick=async()=>{try{if(document.fullscreenElement===fullscreenHost)await document.exitFullscreen();else if(fullscreenHost.classList.contains('map-fullscreen'))fullscreenHost.classList.remove('map-fullscreen');else if(fullscreenHost.requestFullscreen&&document.fullscreenEnabled)await fullscreenHost.requestFullscreen();else fullscreenHost.classList.add('map-fullscreen');}catch{fullscreenHost.classList.add('map-fullscreen');}syncFullscreen();};L.DomEvent.disableClickPropagation(box);L.DomEvent.disableScrollPropagation(box);return box;};
+fullscreenControl.addTo(map);
+document.addEventListener('fullscreenchange',syncFullscreen);
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&fullscreenHost.classList.contains('map-fullscreen')){fullscreenHost.classList.remove('map-fullscreen');syncFullscreen();}});
+syncFullscreen();
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(map);
 const layer=L.layerGroup().addTo(map), markers=new Map();let schools=[];
 const scoreColor=s=>s===null?'#788594':s<50?`rgb(${Math.round(213+(254-213)*s/50)},${Math.round(62+(224-62)*s/50)},${Math.round(79+(139-79)*s/50)})`:`rgb(${Math.round(254+(26-254)*(s-50)/50)},${Math.round(224+(152-224)*(s-50)/50)},${Math.round(139+(80-139)*(s-50)/50)})`;

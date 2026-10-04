@@ -21,6 +21,7 @@ from twohelixes import auth, config, ratelimit, router, store
 from twohelixes.connectors import registry
 from twohelixes.pipeline import orchestrator
 from twohelixes.routes import teams
+from twohelixes.view_api import ViewError
 
 log = logging.getLogger("twohelixes.routes.query")
 
@@ -58,6 +59,19 @@ def _load_frames(
 ) -> dict[str, Any]:
     """Resolve whatever data the request points at into named frames."""
     frames: dict[str, Any] = {}
+
+    view_id = ctx.field("view_id") or ctx.field("base_view_id")
+    if view_id:
+        from twohelixes.routes.views import view_store
+
+        if (ctx.field("view_id") and ctx.field("base_view_id") and
+                ctx.field("view_id") != ctx.field("base_view_id")) or any(
+            ctx.field(key) is not None for key in ("data", "sample", "dataset_ids", "dataset_id", "source_id", "analytics_site_id")
+        ):
+            raise ViewError("ambiguous_source")
+        if not getattr(identity, "signed_in", False):
+            raise PermissionError("sign in to query a view")
+        return {"view": view_store().evaluate(identity.user_id, str(view_id))}
 
     sample = _sample_key(ctx)
     if sample:
@@ -134,18 +148,23 @@ def _load_frames(
             "Choose a dataset from the Library, or open SQL to select a table.",
         )
 
-    dataset_ids = ctx.field("dataset_ids") or []
+    dataset_ids = ctx.field("dataset_ids") or ctx.field("dataset_id") or []
     if isinstance(dataset_ids, str):
         dataset_ids = [dataset_ids]
     rows: list[Any] = []
     if dataset_ids:
         for dataset_id in dataset_ids:
+            if str(dataset_id).startswith("data_"):
+                from twohelixes.routes.views import view_store
+
+                frames[str(dataset_id)] = view_store().source_frame(identity.user_id, {"dataset_id": str(dataset_id)})
+                continue
             if not teams.can_read(identity.user_id, "dataset", str(dataset_id)):
                 continue
             row = store.one("SELECT * FROM datasets WHERE id = ?", (dataset_id,))
             if row is not None:
                 rows.append(row)
-        if not rows:
+        if not rows and not frames:
             raise DataSelectionError(
                 "dataset_not_found",
                 "The selected dataset is no longer available. Choose another from the Library.",
@@ -355,6 +374,7 @@ def _guard(ctx: router.Context, operation: str) -> tuple[Any, router.Result | No
 
 
 @router.post("/v1/query")
+@router.post("/v1/edit")
 def run_query(ctx: router.Context) -> router.Result:
     identity, refusal = _guard(ctx, "chat_query")
     if refusal is not None:
@@ -368,6 +388,8 @@ def run_query(ctx: router.Context) -> router.Result:
 
     try:
         frames = _load_frames(identity, ctx, question)
+    except ViewError as exc:
+        return router.error(exc.status, exc.code)
     except DataSelectionError as exc:
         return router.error(400, exc.code, str(exc), candidates=exc.candidates)
     except Exception as exc:  # noqa: BLE001
@@ -573,13 +595,15 @@ def _keepable_rows(ctx: router.Context, result: Any) -> str | None:
     """
     if ctx.field("source_id"):
         return None
-    frame = getattr(result, "frame", None)
+    frame = getattr(result, "source_frame", None)
+    if frame is None:
+        frame = getattr(result, "frame", None)
     if frame is None or not hasattr(frame, "to_dict"):
         return None
     try:
         if len(frame) > MAX_KEPT_ROWS:
             return None
-        return store.dump_json(frame.head(MAX_KEPT_ROWS).to_dict("records"))
+        return frame.to_json(orient="records", date_format="iso", double_precision=15)
     except Exception:  # noqa: BLE001 - never fail a chart over its own cache
         log.exception("could not keep the rows for a chart")
         return None

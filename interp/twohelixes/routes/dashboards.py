@@ -678,10 +678,13 @@ def refresh_dashboard(ctx: router.Context) -> router.Result:
 
     from twohelixes.pipeline import figures
     from twohelixes.routes import query as query_routes
+    from twohelixes import analytics_dashboards
 
-    refreshed = 0
+    refreshed = analytics_dashboards.refresh(dashboard_id)
     failures: list[str] = []
     for row in charts:
+        if (store.load_json(row["graph_args"], {}) or {}).get("_analytics_auto"):
+            continue
         frame = query_routes._frame_for_chart(identity, row)
         if frame is None:
             failures.append(row["id"])

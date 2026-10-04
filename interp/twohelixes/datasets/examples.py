@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from twohelixes.charts import defaults, svg
-from twohelixes.datasets import samples
+from twohelixes.datasets import samples, world_schools
 from twohelixes.pipeline import figures
 
 log = logging.getLogger("twohelixes.datasets.examples")
@@ -708,6 +708,41 @@ EXAMPLES.append(Example(
     found="Queensland Department of Education school directory, May 2020, CC BY 4.0.",
     reason="Bars compare counts across sectors; missing NAPLAN scores are not treated as zero.",
 ))
+
+EXAMPLES.extend([
+    Example(dataset="nsw_schools", slug="schools-by-sector",
+        question="How many NSW school and campus entries are in each sector?",
+        headline="NSW school and campus entries by sector",
+        finding="Directory counts include subcampuses. They do not measure academic performance.",
+        transform="result = df.groupby('sector', dropna=False).size().reset_index(name='entries')",
+        config={"chart_type": "bar", "x": "sector", "y": "entries"},
+        found="All NSW My School search entries collected on 13 September 2026.",
+        reason="Bars compare directory counts across the three sectors."),
+    Example(dataset="nsw_naplan_results", slug="collected-reading",
+        question="Compare collected Year 3 reading means",
+        headline="Collected Year 3 reading means (2025)",
+        finding="Only schools collected so far with a published mean appear. This is not a statewide ranking.",
+        transform="result = df[(df['year_level'] == 3) & (df['domain'] == 'reading') & df['mean_score'].notna()].sort_values('school_name')",
+        config={"chart_type": "hbar", "x": "school_name", "y": "mean_score", "y_title": "NAPLAN mean"},
+        found="Collected 2025 NAPLAN responses; missing school means excluded.",
+        reason="Compare the same domain and year level, preserving school labels."),
+])
+
+for _key, _title in world_schools.DATASETS.items():
+    _column = 'region' if _key in ('us','ca','nz') else 'sector'
+    EXAMPLES.append(Example(
+        dataset='world_schools_'+_key.replace('-','_'), slug='directory-coverage',
+        question='How many school location records are in each '+_column+'?',
+        headline=_title+' directory coverage',
+        finding='Counts describe source directory records, not school quality or complete worldwide coverage. Smaller groups are retained as Other when needed.',
+        transform=("result = df.groupby('"+_column+"', dropna=False).size().reset_index(name='schools').rename(columns={'"+_column+"':'group'})\n"
+                   "result = result.sort_values('schools', ascending=False).reset_index(drop=True)\n"
+                   "if len(result) > 15:\n"
+                   "    result = pd.concat([result.head(15), pd.DataFrame([{'group':'Other','schools':int(result.iloc[15:]['schools'].sum())}])], ignore_index=True)"),
+        config={'chart_type':'bar','x':'group','y':'schools','title':_title+' directory records','x_title':_column.title(),'y_title':'Source records'},
+        found='The directory identifier and '+_column+' classify source records; missing coordinates are still counted.',
+        reason='A count comparison describes coverage without inventing achievement scores or attendance boundaries.',
+    ))
 
 BY_DATASET: dict[str, list[Example]] = {}
 for _example in EXAMPLES:

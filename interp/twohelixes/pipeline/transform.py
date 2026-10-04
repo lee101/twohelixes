@@ -42,7 +42,7 @@ TIME_GRAINS = {
 
 STEP_TYPES = {
     "filter", "aggregate", "derive", "sort", "limit", "select",
-    "rename", "dropna", "resample", "top_n", "pivot",
+    "rename", "dropna", "resample", "top_n", "pivot", "window",
 }
 
 MAX_STEPS = 24
@@ -182,6 +182,21 @@ def _predict_columns(step: Step, columns: list[str]) -> list[str]:
             raise TransformError("derive: 'as' is required")
         _check_expression(str(p.get("expr") or ""), columns)
         return columns + [name]
+
+    if step.type == "window":
+        from twohelixes.interpreter.temporal import OPERATIONS
+
+        need("time_column")
+        need("column")
+        if p.get("operation", "cumulative") not in OPERATIONS:
+            raise TransformError("window: unsupported operation")
+        for column in p.get("by") or []:
+            if column not in columns:
+                raise TransformError(f"window: no column named '{column}'")
+        name = str(p.get("as") or "value")
+        if name in {p.get("time_column"), *(p.get("by") or [])}:
+            raise TransformError("window: output cannot overwrite time or grouping columns")
+        return columns if name in columns else columns + [name]
 
     if step.type == "sort":
         need("column")
@@ -356,6 +371,16 @@ def _apply_step(frame: Any, step: Step) -> Any:
         out[name] = out.eval(expr, engine="python")
         return out
 
+    if step.type == "window":
+        from twohelixes.interpreter.temporal import window
+
+        return window(
+            frame, str(p.get("time_column")), str(p.get("column")),
+            operation=p.get("operation", "cumulative"), by=p.get("by"),
+            output=p.get("as", "value"), size=p.get("size", 3),
+            periods=p.get("periods", 1), opening_balance=p.get("opening_balance", 0),
+        )
+
     if step.type == "sort":
         column = _column(frame, p.get("column"), step)
         return frame.sort_values(column, ascending=not bool(p.get("desc", False)))
@@ -446,6 +471,15 @@ def to_python(steps: list[Step], frame_name: str = "df") -> str:
 def _render_step(step: Step) -> str:
     p = step.params
 
+    if step.type == "window":
+        return (
+            "from twohelixes.interpreter.temporal import window\n"
+            f"result = window(result, {p.get('time_column')!r}, {p.get('column')!r}, "
+            f"operation={p.get('operation', 'cumulative')!r}, by={p.get('by')!r}, "
+            f"output={p.get('as', 'value')!r}, size={p.get('size', 3)!r}, "
+            f"periods={p.get('periods', 1)!r}, opening_balance={p.get('opening_balance', 0)!r})"
+        )
+
     if step.type == "filter":
         column, op, value = p.get("column"), str(p.get("op") or "eq"), p.get("value")
         if op in NULL_OPS:
@@ -535,6 +569,8 @@ def _render_step(step: Step) -> str:
 def describe(step: Step) -> str:
     """A one-line human description, for the step list in the UI."""
     p = step.params
+    if step.type == "window":
+        return f"{p.get('operation', 'cumulative')} of {p.get('column')} ordered by {p.get('time_column')}"
     if step.type == "filter":
         return f"Keep rows where {p.get('column')} {str(p.get('op', 'eq')).replace('_', ' ')} {p.get('value')}"
     if step.type == "aggregate":

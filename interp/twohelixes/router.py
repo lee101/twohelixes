@@ -209,9 +209,11 @@ def build() -> None:
         seo,
         sheets,
         schools,
+        world_schools,
         sql,
         static_files,
         teams,
+        views,
     )
 
     _built = True

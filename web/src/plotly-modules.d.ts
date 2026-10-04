@@ -65,6 +65,10 @@ declare module "plotly.js/lib/sankey" {
   export default trace;
 }
 
+declare module "plotly.js/lib/scattermap" {
+  const trace: any;
+  export default trace;
+}
 declare module "plotly.js/lib/scattergeo" {
   const trace: unknown;
   export default trace;
