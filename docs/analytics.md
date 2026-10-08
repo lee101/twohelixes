@@ -25,13 +25,15 @@ is synchronous.
 | `siteId`   | required                             | the registered site's write key    |
 | `endpoint` | `https://twohelixes.com/v1/collect`  | where to send them                 |
 | `autoPage` | `true`                               | fire `page_view` on load           |
+| `autoIdentify` | `true`                           | use `window.userData.id` as the user id; set `false` if that field is not an opaque id |
 | `sampleAfterPerSecond` | `40`                     | begin adaptive client sampling above this event rate |
 | `minSampleRate` | `0.01`                          | lowest adaptive keep rate          |
 
 ## What is collected without any extra code
 
 * `page_view` on load and on every SPA navigation (`pushState`, `replaceState`,
-  `popstate`)
+  `popstate`) that changes the path or query; hash-only and same-URL history
+  writes are ignored
 * `outbound_click` for links to another host, `file_download` for common file
   extensions
 * `js_error` with an error class and source host, never the message

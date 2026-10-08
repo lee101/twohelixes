@@ -227,3 +227,10 @@ def test_tracker_skips_automated_browsers() -> None:
     assert "HeadlessChrome" in source
     built = (config.REPO_ROOT / "static" / "th.js").read_text()
     assert "webdriver" in built
+
+
+def test_tracker_dedupes_history_page_views_and_keeps_queued_identity() -> None:
+    source = (config.REPO_ROOT / "web" / "src" / "th.js").read_text()
+    assert "if (pageKey() !== lastPageKey) page();" in source
+    assert "config.autoIdentify === false" in source
+    assert "userId === autoUserId" in source

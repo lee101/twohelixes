@@ -263,7 +263,13 @@
     enqueue(baseEvent(name, props, decision.rate));
   });
 
+  var lastPageKey = null;
+  function pageKey() {
+    return location.pathname + location.search;
+  }
+
   var page = safe(function (props) {
+    lastPageKey = pageKey();
     if (sensitiveSheetOpen()) return;
     started = Date.now();
     var decision = sampled('page_view');
@@ -280,10 +286,17 @@
     enqueue(event);
   });
 
+  var autoUserId = null;
   function syncIdentity(user) {
+    if (config.autoIdentify === false) return;
     var id = user && (user.id || user.ID || user.user_id || user.uid);
-    if (id) identify(id);
-    else if (userId) identify(null);
+    if (id) {
+      if (String(id).slice(0, 64) !== userId) identify(id);
+      autoUserId = userId;
+    } else if (userId && userId === autoUserId) {
+      identify(null);
+      autoUserId = null;
+    }
   }
 
   // -- engagement: count only time the tab is actually visible --------------
@@ -301,18 +314,17 @@
       history[method] = function () {
         var result = original.apply(this, arguments);
         try {
-          setTimeout(function () {
-            page();
-          }, 0);
+          setTimeout(navigated, 0);
         } catch (e) {}
         return result;
       };
     };
+    var navigated = safe(function () {
+      if (pageKey() !== lastPageKey) page();
+    });
     wrap('pushState');
     wrap('replaceState');
-    window.addEventListener('popstate', safe(function () {
-      page();
-    }));
+    window.addEventListener('popstate', navigated);
   }
 
   function hookOutbound() {
