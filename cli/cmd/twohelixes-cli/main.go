@@ -18,7 +18,7 @@ import (
 	"github.com/lee101/twohelixes-cli/internal/termplot"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 type app struct {
 	client *client.Client
@@ -37,7 +37,7 @@ func main() {
 func run(args []string, in io.Reader, out, errOut io.Writer) error {
 	global := flag.NewFlagSet("twohelixes-cli", flag.ContinueOnError)
 	global.SetOutput(errOut)
-	baseURL := global.String("api-url", env("TWOHELIXES_URL", "https://twohelixes.com"), "twoHelixes API base URL")
+	baseURL := global.String("api-url", env("TWOHELIXES_API_URL", env("TWOHELIXES_URL", "https://twohelixes.com")), "twoHelixes API base URL")
 	apiKey := global.String("api-key", os.Getenv("TWOHELIXES_API_KEY"), "API key (or TWOHELIXES_API_KEY)")
 	if err := global.Parse(args); err != nil {
 		return err
@@ -57,6 +57,8 @@ func run(args []string, in io.Reader, out, errOut io.Writer) error {
 		return application.analytics(args[1:])
 	case "track", "event":
 		return application.track(args[1:])
+	case "mcp":
+		return application.mcp(args[1:])
 	case "version", "--version", "-v":
 		fmt.Fprintln(out, version)
 		return nil
@@ -76,10 +78,12 @@ Usage:
   twohelixes-cli render [--width N] [--height N] [FILE|-]
   twohelixes-cli analytics sites|summary|events|schema|paths|revenue|funnel|ask|export [flags]
   twohelixes-cli track --site WRITE_KEY --event NAME [--protocol native|segment|ga4|mixpanel|amplitude]
+  twohelixes-cli mcp      MCP server on stdio (claude mcp add twohelixes -- twohelixes-cli mcp)
 
 Environment:
   TWOHELIXES_API_KEY   API key from the twoHelixes account page
-  TWOHELIXES_URL       API base URL (default https://twohelixes.com)`)
+  TWOHELIXES_WRITE_KEY default site write key for track and the MCP track tool
+  TWOHELIXES_API_URL   API base URL (default https://twohelixes.com; TWOHELIXES_URL also accepted)`)
 }
 
 func (a *app) chart(args []string) error {
