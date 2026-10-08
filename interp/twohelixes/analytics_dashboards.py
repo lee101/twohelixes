@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from twohelixes import store
+from twohelixes.analytics_bots import HUMAN_E
 
 STANDARD_EVENTS = ("page_view", "session_start", "user_engagement", "page_exit", "identify", "alias")
 PERSON = "COALESCE(NULLIF(e.user_id, ''), NULLIF(i.user_id, ''), e.client_id)"
@@ -21,6 +22,17 @@ def claim(conn: Any, site_id: str) -> bool:
     return bool(cursor.rowcount)
 
 
+def enqueue_for_user(user_id: str) -> None:
+    from twohelixes.routes.analytics import _schedule_dashboards
+
+    candidates = []
+    with store.transaction() as conn:
+        for site in conn.execute("SELECT id FROM analytics_sites WHERE user_id = ?", (user_id,)).fetchall():
+            if claim(conn, str(site["id"])):
+                candidates.append((str(site["id"]), ""))
+    _schedule_dashboards(candidates)
+
+
 def panels(site_id: str, days: int = 30, *, now: float | None = None) -> dict[str, tuple[str, list[dict], dict]]:
     import pandas as pd
 
@@ -28,7 +40,7 @@ def panels(site_id: str, days: int = 30, *, now: float | None = None) -> dict[st
     end = time.time() if now is None else now
     start = (int(end) // 86400 - days + 1) * 86400
     params = (site_id, start, end)
-    where = " WHERE e.site_id = ? AND e.ts >= ? AND e.ts <= ?"
+    where = " WHERE e.site_id = ? AND e.ts >= ? AND e.ts <= ?" + HUMAN_E
     base = " FROM analytics_events e" + JOIN + where
     totals = store.row_to_dict(store.one(
         "SELECT COUNT(*) AS observed_events, COALESCE(SUM(e.sample_weight), 0) AS events,"
@@ -165,3 +177,26 @@ def refresh(dashboard_id: str) -> int:
                       (store.dump_json(figure), store.dump_json(rows), time.time(), chart["id"]))
         updated += 1
     return updated
+
+
+def refresh_if_stale(dashboard_id: str) -> None:
+    import threading
+
+    row = store.one(
+        "SELECT MIN(c.updated_at) AS updated FROM charts c"
+        " JOIN analytics_site_dashboards a ON a.dashboard_id = c.dashboard_id WHERE c.dashboard_id = ?",
+        (dashboard_id,),
+    )
+    if not row or row["updated"] is None or float(row["updated"]) > time.time() - 300:
+        return
+    if not _refresh_lock.acquire(blocking=False):
+        return
+    try:
+        refresh(dashboard_id)
+    finally:
+        _refresh_lock.release()
+
+
+import threading
+
+_refresh_lock = threading.Lock()

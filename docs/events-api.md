@@ -152,10 +152,10 @@ curl -H "$H" 'https://twohelixes.com/v1/analytics/export?site_id=SITE&days=1' > 
 
 Funnel semantics: steps are matched in event-time order within a session; each
 step counts once per session; a session that skips a step does not reach later
-steps. Steps are passed through verbatim, so step qualifiers - `page_view:/signup`
-(event restricted to a page path) and `sign_up_completed|sign_in_completed`
-(either event satisfies the step) - work wherever the server version supports
-them. Clients and the MCP server do not parse steps.
+steps. Steps are passed through verbatim: `page_view:/signup` restricts an event to a
+page path (`page_view:/blog/*` for a prefix), and
+`sign_up_completed|sign_in_completed` accepts either event (up to 8
+alternatives). Clients and the MCP server do not parse steps.
 
 Revenue reads `revenue`, `value`, `amount`, `$revenue`, or `$price * $quantity`
 from props, with `currency` (or `$currency`). Currencies are never summed.

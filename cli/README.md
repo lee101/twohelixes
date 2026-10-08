@@ -126,9 +126,9 @@ Generic client config (`.mcp.json`, Cursor, Claude Desktop):
 | `track` | `POST /v1/collect` | single event or `events` batch with a write key |
 
 Funnel steps are sent as-is, so server-side step qualifiers work without a CLI
-upgrade: `page_view:/signup` restricts a step to a path and
-`sign_up_completed|sign_in_completed` accepts either event, where the server
-supports them.
+upgrade: `page_view:/signup` restricts a step to a path, `page_view:/blog/*`
+to a path prefix, and `sign_up_completed|sign_in_completed` accepts either
+event.
 
 Example prompts: "list my twoHelixes sites and show the signup to purchase
 funnel for the last 14 days", "which page do paywall_open sessions start on?".

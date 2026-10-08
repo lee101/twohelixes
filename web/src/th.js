@@ -47,7 +47,16 @@
     navigator.globalPrivacyControl === true ||
     navigator.doNotTrack === '1' ||
     window.doNotTrack === '1';
-  if (privacySignal || !config.siteId) {
+  var automated = (function () {
+    try {
+      return navigator.webdriver === true ||
+        /HeadlessChrome|Lighthouse|PTST|Puppeteer|Playwright|PhantomJS|Selenium/i.test(navigator.userAgent || '') ||
+        Boolean(window.callPhantom || window._phantom || window.__nightmare || window.domAutomation);
+    } catch (e) {
+      return false;
+    }
+  })();
+  if (privacySignal || automated || !config.siteId) {
     window.th = function () {};
     window.analytics = window.analytics || {
       track: function () {},

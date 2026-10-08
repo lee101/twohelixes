@@ -91,8 +91,11 @@ also what keeps the request "simple" and skips the CORS preflight.
 ```
 
 Always answers `204`. Unknown event keys are kept in `props`; unusable events are
-dropped individually so one bad row never loses the batch. Bot user agents are
-discarded at ingest. Client timestamps more than a day from server time are
+dropped individually so one bad row never loses the batch. Bot and automation
+user agents (crawlers, `HeadlessChrome`, Lighthouse, WebPageTest, Puppeteer,
+Playwright, Selenium) are discarded at ingest, and so are desktop events whose
+screen/viewport pair is a headless-browser fingerprint (see *Automated
+traffic*). Client timestamps more than a day from server time are
 replaced — a wrong device clock should not create events in 2031.
 
 An unknown site/write key is discarded with the same `204`. It is not
@@ -162,7 +165,7 @@ ownership through the same team-sharing policy as charts and datasets.
 | ----------------------------------------- | ---------------------------------------------- |
 | `GET /v1/analytics/summary?site_id=&days=` | totals plus top pages, events, referrers, devices, browsers, countries, campaigns |
 | `GET /v1/analytics/timeseries?site_id=&days=` | hourly buckets (daily past 8 days) of events, page views, users |
-| `GET /v1/analytics/funnel?site_id=&days=&steps=` | ordered session/user progression through 2–12 event names |
+| `GET /v1/analytics/funnel?site_id=&days=&steps=` | ordered session/user progression through 2–12 steps |
 | `GET /v1/analytics/events?site_id=&limit=` | the raw recent event stream                    |
 | `GET /v1/analytics/schema?site_id=&days=&event=` | custom event/property catalog with types, sources, and observed/estimated counts |
 | `GET /v1/analytics/groups?site_id=&days=&type=` | typed group profiles and activity             |
@@ -182,9 +185,49 @@ Up to 100,000 recent rows can be loaded; properties are exposed as `prop_*`
 columns and the chart response has the same shape as every other `/v1/query`.
 
 Funnel steps are evaluated in event-time order within each session. A session
-can advance through each named event once; repeated events are harmless, and a
+can advance through each step once; repeated events are harmless, and a
 session that misses a step does not count toward later steps. The response
 includes reached sessions/users, overall rate, step-to-step rate, and drop-off.
+
+`steps` is comma-separated. Each step is one or more alternatives joined by
+`|` (up to 8, any of which satisfies the step), and each alternative is an
+event name optionally qualified by the page path it happened on:
+
+| step | matches |
+| --- | --- |
+| `sign_up` | any `sign_up` event |
+| `page_view:/signup` | `page_view` on `/signup` (a trailing `/` is ignored) |
+| `page_view:/blog/*` | `page_view` on any path starting `/blog/` |
+| `paywall_open\|paywall` | either event |
+| `page_view:/signup\|signup_view` | either form of "saw the sign-up screen" |
+
+The qualifier is a path only when it starts with `/`, so an event named
+`checkout:started` is still matched by name. Each stage echoes the raw step as
+`event` and the parsed alternatives as `match: [{event, path, prefix}]`.
+
+## Automated traffic
+
+Most of what a public site receives from "Chrome on desktop" is headless
+automation running a stock user agent. The tracker sends nothing when
+`navigator.webdriver` is set or the user agent names a headless/automation
+browser. The server also drops desktop events whose screen and viewport match
+a headless fingerprint, and reports exclude stored rows with the same
+fingerprint, so history is corrected without being rewritten:
+
+| rule | fingerprint |
+| --- | --- |
+| small screen | screen `800x600` or `600x800` |
+| automation viewport | viewport `800x600` or `1280x720` on a different-sized screen (Puppeteer/Playwright defaults) |
+| square fullscreen | screen equals viewport and is within 10% of square, 1000px+ (`1366x1366`, `1280x1200`, `1600x1600`) |
+| known | screen `1920x1080` with viewport `1919x992` |
+
+Mobile and tablet events, and events without both a screen and a viewport
+(server-side, pixel, SDK senders), are never matched. Fitted against 14 days of
+production sessions, the rules matched no signed-in session and no
+conversion. Summary, compact summary, timeseries, funnel, paths, schema, the
+site dashboard and the chart agent all apply the exclusion; add
+`include_bots=1` to summary/timeseries/funnel/paths/schema to see the raw
+numbers. The recent-events stream and the export stay raw.
 
 ## Privacy
 

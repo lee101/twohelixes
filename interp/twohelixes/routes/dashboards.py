@@ -222,6 +222,9 @@ def build_analytics_event_dashboard(site_id: str, event_name: str) -> str | None
 @router.get("/v1/dashboards")
 def list_dashboards(ctx: router.Context) -> router.Result:
     identity = auth.require(ctx)
+    from twohelixes import analytics_dashboards
+
+    analytics_dashboards.enqueue_for_user(identity.user_id)
     teams.ensure_schema()
     rows = store.query(
         "SELECT DISTINCT d.id, d.title, d.is_public, d.share_token, "
@@ -233,7 +236,17 @@ def list_dashboards(ctx: router.Context) -> router.Result:
         (identity.user_id, identity.user_id, identity.user_id),
     )
     dashboards = store.rows_to_dicts(rows)
+    domains = {
+        str(row["dashboard_id"]): str(row["domain"])
+        for row in store.query(
+            "SELECT a.dashboard_id, s.domain FROM analytics_site_dashboards a"
+            " JOIN analytics_sites s ON s.id = a.site_id WHERE a.dashboard_id IS NOT NULL"
+            " UNION SELECT a.dashboard_id, s.domain FROM analytics_event_dashboards a"
+            " JOIN analytics_sites s ON s.id = a.site_id WHERE a.dashboard_id IS NOT NULL"
+        )
+    }
     for dashboard in dashboards:
+        dashboard["analytics_domain"] = domains.get(str(dashboard["id"]))
         dashboard["can_edit"] = teams.can_write(
             identity.user_id, "dashboard", dashboard["id"]
         )
@@ -260,6 +273,9 @@ def get_dashboard(ctx: router.Context) -> router.Result:
     dashboard_id = ctx.params["dashboard_id"]
     if not teams.can_read(identity.user_id, "dashboard", dashboard_id):
         return router.error(404, "not_found")
+    from twohelixes import analytics_dashboards
+
+    analytics_dashboards.refresh_if_stale(dashboard_id)
     row = store.one("SELECT * FROM dashboards WHERE id = ?", (dashboard_id,))
     if row is None:
         return router.error(404, "not_found")

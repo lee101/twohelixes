@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from twohelixes import auth, config, router, store
+from twohelixes.analytics_bots import HUMAN, HUMAN_E, headless_fingerprint
 from twohelixes.router import Context, Result, error, json_result
 from twohelixes.routes import teams
 
@@ -260,7 +261,11 @@ _OSES = (
     ("Linux", "Linux"),
     ("CrOS", "ChromeOS"),
 )
-_BOT = re.compile(r"bot|crawler|spider|crawling|preview|monitor|curl|wget|python-requests", re.I)
+_BOT = re.compile(
+    r"bot|crawler|spider|crawling|preview|monitor|curl|wget|python-requests|headless|lighthouse"
+    r"|ptst|gtmetrix|pagespeed|puppeteer|playwright|phantomjs|selenium|webdriver|inspectiontool",
+    re.I,
+)
 
 
 def _parse_ua(ua: str) -> tuple[str, str, str, bool]:
@@ -443,6 +448,10 @@ def _normalise(
     is_bot = bool(meta["is_bot"])
     if is_bot:
         return None
+    screen = _clip(event.get("screen") or event.get("sr"), 32)
+    viewport = _clip(event.get("viewport"), 32)
+    if headless_fingerprint(device, screen, viewport):
+        return None
 
     raw_ts = event.get("ts") or event.get("timestamp") or event.get("timestamp_micros")
     ts = _timestamp_seconds(raw_ts, now) if raw_ts is not None else now
@@ -553,8 +562,8 @@ def _normalise(
         "device": device,
         "browser": browser,
         "os": os_name,
-        "screen": _clip(event.get("screen") or event.get("sr"), 32),
-        "viewport": _clip(event.get("viewport"), 32),
+        "screen": screen,
+        "viewport": viewport,
         "language": _clip(event.get("language") or event.get("ul") or props.get("language"), 32),
         "country": str(meta["country"]),
         "ip_hash": str(meta["ip_hash"]),
@@ -906,6 +915,8 @@ def _site_for_write(ctx: Context, payload: Any) -> dict[str, Any] | None:
 def _site_payload(row: Any) -> dict[str, Any]:
     site = store.row_to_dict(row) or {}
     write_key = str(site.get("write_key") or "")
+    overview = store.one("SELECT dashboard_id FROM analytics_site_dashboards WHERE site_id = ?", (site.get("id"),))
+    site["dashboard_id"] = overview["dashboard_id"] if overview else None
     endpoint = f"{config.site_url().rstrip('/')}/v1/collect"
     site["snippet"] = (
         "<script>window.__thConfig="
@@ -983,6 +994,21 @@ def create_site(ctx: Context) -> Result:
     return json_result(_site_payload(row), status=201)
 
 
+@router.post("/v1/analytics/sites/{site_id}/dashboard")
+def site_dashboard(ctx: Context) -> Result:
+    identity = auth.require(ctx)
+    site_id = ctx.params["site_id"]
+    if not teams.can_write(identity.user_id, "analytics_site", site_id):
+        return error(403, "forbidden")
+    from twohelixes import analytics_dashboards
+
+    dashboard_id = analytics_dashboards.build(site_id)
+    if not dashboard_id:
+        return error(404, "not_found")
+    refreshed = analytics_dashboards.refresh(dashboard_id)
+    return json_result({"dashboard_id": dashboard_id, "refreshed": refreshed})
+
+
 @router.patch("/v1/analytics/sites/{site_id}")
 def update_site(ctx: Context) -> Result:
     identity = auth.require(ctx)
@@ -1026,8 +1052,9 @@ def delete_site(ctx: Context) -> Result:
         return error(403, "forbidden")
     dashboards = store.query(
         "SELECT dashboard_id FROM analytics_event_dashboards"
-        " WHERE site_id = ? AND dashboard_id IS NOT NULL",
-        (site_id,),
+        " WHERE site_id = ? AND dashboard_id IS NOT NULL"
+        " UNION SELECT dashboard_id FROM analytics_site_dashboards WHERE site_id = ? AND dashboard_id IS NOT NULL",
+        (site_id, site_id),
     )
     dashboard_ids = [str(row["dashboard_id"]) for row in dashboards]
     busy = store.one(
@@ -1038,6 +1065,7 @@ def delete_site(ctx: Context) -> Result:
     if busy:
         return error(409, "site_busy_try_again")
     with store.transaction() as conn:
+        conn.execute("DELETE FROM analytics_site_dashboards WHERE site_id = ?", (site_id,))
         conn.execute("DELETE FROM analytics_event_dashboards WHERE site_id = ?", (site_id,))
         conn.execute("DELETE FROM analytics_event_groups WHERE site_id = ?", (site_id,))
         conn.execute("DELETE FROM analytics_groups WHERE site_id = ?", (site_id,))
@@ -1803,6 +1831,13 @@ def _window(ctx: Context) -> tuple[float, float]:
     return end - days * 86400, end
 
 
+def _human(ctx: Context, alias: bool = False) -> str:
+    """Headless fingerprints are excluded from reports unless asked for."""
+    if ctx.q_bool("include_bots"):
+        return ""
+    return HUMAN_E if alias else HUMAN
+
+
 def _identity_map(site_id: str) -> dict[str, str]:
     return {
         str(row["client_id"]): str(row["user_id"])
@@ -1820,6 +1855,14 @@ def summary(ctx: Context) -> Result:
         return denied
     site_id = str(site["id"])
     start, end = _window(ctx)
+    human, human_e = _human(ctx), _human(ctx, alias=True)
+
+    if ctx.q_bool("compact"):
+        from twohelixes.analytics_api import compact_summary
+
+        return json_result(
+            compact_summary(site_id, start, end, include_bots=ctx.q_bool("include_bots"))
+        )
 
     totals = store.row_to_dict(
         store.one(
@@ -1832,7 +1875,7 @@ def summary(ctx: Context) -> Result:
             " SUM(e.engagement_ms) AS engagement_ms"
             " FROM analytics_events e LEFT JOIN analytics_identities i"
             " ON i.site_id = e.site_id AND i.client_id = e.client_id"
-            " WHERE e.site_id = ? AND e.ts BETWEEN ? AND ?",
+            " WHERE e.site_id = ? AND e.ts BETWEEN ? AND ?" + human_e,
             (site_id, start, end),
         )
     ) or {}
@@ -1843,7 +1886,7 @@ def summary(ctx: Context) -> Result:
         " MAX(CASE WHEN event_name IN"
         " ('purchase', 'sign_up', 'generate_lead', 'conversion') THEN 1 ELSE 0 END)"
         " AS has_key_event"
-        " FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?"
+        f" FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?{human}"
         " GROUP BY session_id",
         (site_id, start, end),
     )
@@ -1867,7 +1910,7 @@ def summary(ctx: Context) -> Result:
             " FROM analytics_events e LEFT JOIN analytics_identities i"
             " ON i.site_id = e.site_id AND i.client_id = e.client_id"
             " WHERE e.site_id = ? AND e.ts BETWEEN ? AND ?"
-            f" AND e.{column} IS NOT NULL AND e.{column} != ''"
+            f" AND e.{column} IS NOT NULL AND e.{column} != ''{human_e}"
             f" GROUP BY e.{column} ORDER BY events DESC LIMIT {limit}",
             (site_id, start, end),
         )
@@ -1958,7 +2001,7 @@ def event_schema(ctx: Context) -> Result:
         store.query(
             "SELECT event_name, ts, client_id, user_id, sample_weight, source, props"
             " FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ?"
-            " AND (? = '' OR event_name = ?) ORDER BY ts DESC LIMIT 100001",
+            " AND (? = '' OR event_name = ?)" + _human(ctx) + " ORDER BY ts DESC LIMIT 100001",
             (site_id, start, end, selected_event, selected_event),
         )
     )
@@ -2093,8 +2136,8 @@ def analytics_paths(ctx: Context) -> Result:
             "SELECT session_id, client_id, user_id, event_name, page_path,"
             " sample_weight FROM analytics_events"
             " WHERE site_id = ? AND ts BETWEEN ? AND ?"
-            " AND event_name != 'session_start'"
-            " ORDER BY session_id, ts, received_at, event_sequence, id LIMIT 200001",
+            " AND event_name != 'session_start'" + _human(ctx)
+            + " ORDER BY session_id, ts, received_at, event_sequence, id LIMIT 200001",
             (site_id, start, end),
         )
     )
@@ -2259,6 +2302,47 @@ def analytics_revenue(ctx: Context) -> Result:
     )
 
 
+MAX_FUNNEL_STEP = 512
+MAX_STEP_ALTERNATIVES = 8
+
+FunnelMatch = tuple[str, str, bool]
+
+
+def _funnel_step(raw: str) -> list[FunnelMatch]:
+    """`event`, `event:/path`, `event:/prefix*`, and `a|b` alternatives.
+
+    The qualifier is only a path when it starts with `/`, so an event that is
+    itself named `checkout:started` keeps working.
+    """
+    matches: list[FunnelMatch] = []
+    for part in raw.split("|"):
+        name, sep, path = part.strip().partition(":")
+        if not sep or not path.strip().startswith("/"):
+            name, path = part.strip(), ""
+        name, path = name.strip()[:64], path.strip()
+        prefix = path.endswith("*")
+        if prefix:
+            path = path[:-1]
+        elif len(path) > 1:
+            path = path.rstrip("/") or "/"
+        if name and (name, path, prefix) not in matches:
+            matches.append((name, path, prefix))
+    return matches
+
+
+def _step_matches(matches: list[FunnelMatch], event_name: str, page_path: str) -> bool:
+    for name, path, prefix in matches:
+        if name != event_name:
+            continue
+        if not path and not prefix:
+            return True
+        if prefix and page_path.startswith(path):
+            return True
+        if not prefix and (page_path.rstrip("/") or "/") == path:
+            return True
+    return False
+
+
 @router.get("/v1/analytics/funnel")
 def funnel(ctx: Context) -> Result:
     """Count sessions that reach ordered event stages in the reporting window."""
@@ -2268,26 +2352,33 @@ def funnel(ctx: Context) -> Result:
     site_id = str(site["id"])
     raw_steps = ctx.q("steps", "")
     steps: list[str] = []
-    seen: set[str] = set()
+    step_matches: list[list[FunnelMatch]] = []
     for value in raw_steps.split(","):
-        step = _clip(value, 64)
-        if step and step not in seen:
-            steps.append(step)
-            seen.add(step)
+        step = _clip(value, MAX_FUNNEL_STEP)
+        if not step or step in steps:
+            continue
+        matches = _funnel_step(step)
+        if not matches:
+            continue
+        if len(matches) > MAX_STEP_ALTERNATIVES:
+            return error(400, "too_many_step_alternatives", limit=MAX_STEP_ALTERNATIVES)
+        steps.append(step)
+        step_matches.append(matches)
     if len(steps) < 2:
         return error(400, "at_least_two_steps_required")
     if len(steps) > 12:
         return error(400, "too_many_steps")
 
     start, end = _window(ctx)
-    event_placeholders = ", ".join("?" for _ in steps)
+    names = sorted({name for matches in step_matches for name, _path, _prefix in matches})
+    event_placeholders = ", ".join("?" for _ in names)
     rows = store.query(
-        "SELECT session_id, client_id, user_id, ts, event_name, sample_weight"
+        "SELECT session_id, client_id, user_id, ts, event_name, page_path, sample_weight"
         " FROM analytics_events"
         " WHERE site_id = ? AND ts BETWEEN ? AND ?"
-        f" AND event_name IN ({event_placeholders})"
+        f" AND event_name IN ({event_placeholders}){_human(ctx)}"
         " ORDER BY session_id, ts, received_at, event_sequence, id",
-        (site_id, start, end, *steps),
+        (site_id, start, end, *names),
     )
     sessions: dict[str, dict[str, Any]] = {}
     identities = _identity_map(site_id)
@@ -2302,6 +2393,7 @@ def funnel(ctx: Context) -> Result:
         entry["events"].append(
             {
                 "name": str(row.get("event_name") or ""),
+                "page_path": str(row.get("page_path") or ""),
                 "user_id": str(row.get("user_id") or ""),
                 "sample_weight": float(row.get("sample_weight") or 1),
             }
@@ -2313,8 +2405,9 @@ def funnel(ctx: Context) -> Result:
     for session_id, entry in sessions.items():
         next_step = 0
         for event in entry["events"]:
-            event_name = event["name"]
-            if next_step >= len(steps) or event_name != steps[next_step]:
+            if next_step >= len(steps) or not _step_matches(
+                step_matches[next_step], event["name"], event["page_path"]
+            ):
                 continue
             reached_sessions[next_step].add(session_id)
             reached_weights[next_step][session_id] = max(
@@ -2347,6 +2440,10 @@ def funnel(ctx: Context) -> Result:
         stages.append(
             {
                 "event": event_name,
+                "match": [
+                    {"event": name, "path": path or None, "prefix": prefix}
+                    for name, path, prefix in step_matches[index]
+                ],
                 "sessions": sessions_count,
                 "estimated_sessions": estimated_sessions,
                 "users": users_count,
@@ -2392,7 +2489,7 @@ def timeseries(ctx: Context) -> Result:
     rows = store.query(
         "SELECT ts, client_id, session_id, user_id, event_name, engagement_ms, sample_weight"
         " FROM analytics_events"
-        " WHERE site_id = ? AND ts BETWEEN ? AND ?",
+        " WHERE site_id = ? AND ts BETWEEN ? AND ?" + _human(ctx),
         (site_id, start, end),
     )
     buckets: dict[int, dict[str, Any]] = {}

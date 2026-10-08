@@ -18,6 +18,7 @@ export interface DashboardSummary {
   created_at?: number;
   updated_at?: number;
   can_edit?: boolean;
+  analytics_domain?: string | null;
 }
 
 export interface DashboardListOptions {
@@ -69,7 +70,20 @@ export class DashboardListView {
       return;
     }
 
+    const groups = new Map<string, DashboardSummary[]>();
     for (const item of this.items) {
+      const domain = item.analytics_domain || "Other dashboards";
+      const group = groups.get(domain) || [];
+      group.push(item);
+      groups.set(domain, group);
+    }
+    for (const [domain, items] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
+      const heading = el("li", "dash-list-group");
+      const title = el("h2", "dash-list-title");
+      title.textContent = domain;
+      heading.append(title);
+      this.list.append(heading);
+      for (const item of items) {
       const row = el("li", "dash-list-item");
 
       const open = el("button", "dash-list-open") as HTMLButtonElement;
@@ -93,6 +107,7 @@ export class DashboardListView {
         row.append(remove);
       }
       this.list.append(row);
+      }
     }
   }
 
