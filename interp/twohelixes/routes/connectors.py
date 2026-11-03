@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
 import time
 import zipfile
 from pathlib import Path
@@ -382,6 +383,17 @@ def presign_upload(ctx: router.Context) -> router.Result:
     return router.json_result(ticket)
 
 
+UPLOAD_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
+
+
+def _own_upload_key(key: str, user_id: str) -> bool:
+    prefix = f"uploads/{user_id}/"
+    if not key.startswith(prefix):
+        return False
+    name = key[len(prefix):]
+    return UPLOAD_NAME.fullmatch(name) is not None and ".." not in name
+
+
 @router.post("/v1/uploads/complete")
 def complete_upload(ctx: router.Context) -> router.Result:
     """Ingest an object the browser already uploaded."""
@@ -391,7 +403,7 @@ def complete_upload(ctx: router.Context) -> router.Result:
     key = str(ctx.field("key") or "")
     # The key is namespaced by user id; refuse anything outside the caller's
     # own prefix so a guessed key cannot pull someone else's object.
-    if not key.startswith(f"uploads/{identity.user_id}/"):
+    if not _own_upload_key(key, identity.user_id):
         return router.error(403, "not_your_upload")
 
     try:

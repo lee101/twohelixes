@@ -78,3 +78,18 @@ def test_a_zip_bomb_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("big.csv", "a\n" + "1\n" * 5000)
     assert connectors._read_any(target) is None
+
+
+def test_upload_key_must_stay_in_the_callers_prefix() -> None:
+    assert connectors._own_upload_key("uploads/u1/1730000000-rows.csv", "u1")
+    for key in (
+        "uploads/u2/1730000000-rows.csv",
+        "uploads/u1/../u2/1730000000-rows.csv",
+        "uploads/u1/..",
+        "uploads/u1/a/b.csv",
+        "uploads/u1/%2e%2e/rows.csv",
+        "uploads/u1/..\\rows.csv",
+        "uploads/u1/rows\x00.csv",
+        "uploads/u1/",
+    ):
+        assert not connectors._own_upload_key(key, "u1"), key
