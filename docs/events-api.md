@@ -217,3 +217,15 @@ sign_up_completed|sign_in_completed,paywall_open,begin_checkout,purchase
 * Python (sync + async): [`twohelixes-python`](https://github.com/lee101/twohelixes-python)
 * Go (stdlib only): [`twohelixes-go`](https://github.com/lee101/twohelixes-go)
 * Full funnel example app: [`twohelixes-examples`](https://github.com/lee101/twohelixes-examples)
+
+## Email conversions
+
+Attribute signups and purchases to email campaigns. Uses the public write key
+(`tid=thw_...`), so it works from any mail tool.
+
+- Open pixel: `<img src="https://twohelixes.com/v1/email/open.gif?tid=thw_...&camp=welcome&cid=RECIPIENT_ID" width="1" height="1">` records `email_open`.
+- Tracked link: `https://twohelixes.com/v1/email/click?tid=thw_...&camp=welcome&cid=RECIPIENT_ID&url=https%3A%2F%2Fexample.com%2Fpricing` records `email_click`, then 302s to `url` with `utm_source=email&utm_medium=email&utm_campaign=<camp>` added. `url` must be on the site's own domain (or a subdomain); anything else redirects to the site root.
+- `cid` is an opaque recipient id (not an email address). Optional: `uid`, `mid` (message id), `link`, `src`.
+- Report: `GET /v1/analytics/email?site_id=...&days=30&conversions=sign_up_completed,purchase` returns per campaign opens, clicks, unique counts, conversions by event, `converted_sessions`, `click_rate`, `conversion_rate`.
+
+Conversions are session based: any session that landed with `utm_medium=email` credits its campaign. Bot user agents are dropped; mail-proxy prefetch (Apple Mail Privacy Protection) can inflate opens, so judge campaigns by clicks and conversions.

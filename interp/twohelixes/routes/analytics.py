@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from twohelixes import auth, config, router, store
 from twohelixes.analytics_bots import HUMAN, HUMAN_E, headless_fingerprint
@@ -1817,6 +1817,197 @@ def collect_pixel(ctx: Context) -> Result:
         body=PIXEL,
         content_type="image/gif",
         headers=headers,
+    )
+
+
+# --------------------------------------------------------------------------
+# Email: open pixel, click redirect, conversion report
+# --------------------------------------------------------------------------
+
+EMAIL_CONVERSIONS = (
+    "sign_up_completed",
+    "purchase",
+    "purchase_completed",
+    "subscribe",
+)
+
+
+def _email_target_allowed(url: str, site_domain: str) -> bool:
+    """Only the site's own hosts may be redirect targets (no open redirect)."""
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        has_userinfo = parts.username is not None or parts.password is not None
+    except ValueError:
+        return False
+    domain = site_domain.lower().removeprefix("www.")
+    if parts.scheme not in ("http", "https") or not host or has_userinfo or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def _email_target(url: str, camp: str, source: str) -> str:
+    parts = urlsplit(url)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    for key, value in (
+        ("utm_source", source),
+        ("utm_medium", "email"),
+        ("utm_campaign", camp),
+    ):
+        if value and key not in query:
+            query[key] = [value]
+    pairs = [(k, v) for k, values in query.items() for v in values]
+    return parts._replace(query=urlencode(pairs)).geturl()
+
+
+def _record_email_event(
+    ctx: Context, name: str, page_location: str = ""
+) -> dict[str, Any] | None:
+    now = time.time()
+    flat = {key: values[0] for key, values in ctx.query.items() if values}
+    site = _site_for_write(ctx, flat)
+    if not site:
+        return None
+    camp = _clip(flat.get("camp") or flat.get("utm_campaign"), 128)
+    source = _clip(flat.get("src") or flat.get("utm_source") or "email", 128)
+    props = {"campaign": camp, "message": _clip(flat.get("mid"), 128)}
+    if flat.get("link"):
+        props["link"] = _clip(flat["link"], 128)
+    event = {
+        "event": name,
+        "client_id": _clip(flat.get("cid") or flat.get("rid"), 64) or "email-anon",
+        "user_id": flat.get("uid"),
+        "page_location": page_location,
+        "utm_source": source,
+        "utm_medium": "email",
+        "utm_campaign": camp,
+        "props": props,
+    }
+    site_id = str(site["id"])
+    request_meta = _request_metadata(ctx, site_id)
+    keep, effective_rate = _keep_sample(event, site_id, now, _sample_after_rps())
+    event["_effective_sample_rate"] = effective_rate
+    if keep and not request_meta["is_bot"]:
+        row = _normalise(event, ctx, site, now, {}, request_meta, {})
+        if row:
+            _written, claimed = _store(_with_session_start(row))
+            _schedule_dashboards(claimed)
+    return site
+
+
+@router.get("/v1/email/open.gif")
+def email_open(ctx: Context) -> Result:
+    """Open pixel for emails: ?tid=thw_...&camp=welcome&cid=<recipient>."""
+    _record_email_event(ctx, "email_open")
+    headers = _cors(ctx)
+    headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return Result(status=200, body=PIXEL, content_type="image/gif", headers=headers)
+
+
+@router.get("/v1/email/click")
+def email_click(ctx: Context) -> Result:
+    """Tracked link: ?tid=thw_...&camp=welcome&cid=<recipient>&url=<site url>.
+
+    Records email_click and 302s to a URL on the site's own domain with
+    utm_source/utm_medium=email/utm_campaign added, so everything the visitor
+    does afterwards in that session is attributed to the campaign.
+    """
+    target = ctx.q("url", "")
+    flat = {key: values[0] for key, values in ctx.query.items() if values}
+    site = _site_for_write(ctx, flat)
+    if not site:
+        return error(400, "unknown_site")
+    domain = str(site.get("domain") or "")
+    if not _email_target_allowed(target, domain):
+        target = f"https://{domain.removeprefix('www.')}/"
+    camp = _clip(flat.get("camp") or flat.get("utm_campaign"), 128)
+    source = _clip(flat.get("src") or flat.get("utm_source") or "email", 128)
+    destination = _email_target(target, camp, source)
+    _record_email_event(ctx, "email_click", destination)
+    headers = _cors(ctx)
+    headers["Cache-Control"] = "no-store"
+    headers["Location"] = destination
+    return Result(status=302, body="", content_type="text/plain", headers=headers)
+
+
+@router.get("/v1/analytics/email")
+def email_report(ctx: Context) -> Result:
+    """Per-campaign sends/opens/clicks and the conversions their sessions made."""
+    site, denied = _site_for_read(ctx)
+    if denied:
+        return denied
+    site_id = str(site["id"])
+    conversions = [
+        _clip(name, 64)
+        for name in (ctx.q("conversions", "") or ",".join(EMAIL_CONVERSIONS)).split(",")
+        if name.strip()
+    ][:12]
+    start, end = _window(ctx)
+    human = _human(ctx)
+    campaigns: dict[str, dict[str, Any]] = {}
+
+    def entry(name: str) -> dict[str, Any]:
+        return campaigns.setdefault(
+            name,
+            {
+                "campaign": name,
+                "opens": 0,
+                "unique_opens": 0,
+                "clicks": 0,
+                "unique_clicks": 0,
+                "conversions": {c: 0 for c in conversions},
+                "converted_sessions": 0,
+            },
+        )
+
+    for row in store.rows_to_dicts(
+        store.query(
+            "SELECT utm_campaign, event_name, COUNT(*) AS n,"
+            " COUNT(DISTINCT client_id) AS u FROM analytics_events"
+            " WHERE site_id = ? AND ts BETWEEN ? AND ?"
+            f" AND event_name IN ('email_open', 'email_click'){human}"
+            " GROUP BY utm_campaign, event_name",
+            (site_id, start, end),
+        )
+    ):
+        item = entry(str(row.get("utm_campaign") or ""))
+        kind = "opens" if row["event_name"] == "email_open" else "clicks"
+        item[kind] = int(row["n"])
+        item["unique_" + kind] = int(row["u"])
+
+    if conversions:
+        placeholders = ", ".join("?" for _ in conversions)
+        converted: dict[str, set[str]] = {}
+        for row in store.rows_to_dicts(
+            store.query(
+                "SELECT utm_campaign, event_name, session_id FROM analytics_events"
+                " WHERE site_id = ? AND ts BETWEEN ? AND ?"
+                f" AND utm_medium = 'email' AND event_name IN ({placeholders}){human}",
+                (site_id, start, end, *conversions),
+            )
+        ):
+            name = str(row.get("utm_campaign") or "")
+            item = entry(name)
+            item["conversions"][str(row["event_name"])] += 1
+            converted.setdefault(name, set()).add(str(row.get("session_id") or ""))
+        for name, sessions in converted.items():
+            campaigns[name]["converted_sessions"] = len(sessions)
+
+    for item in campaigns.values():
+        item["click_rate"] = item["unique_clicks"] / item["unique_opens"] if item["unique_opens"] else 0.0
+        item["conversion_rate"] = (
+            item["converted_sessions"] / item["unique_clicks"] if item["unique_clicks"] else 0.0
+        )
+    ordered = sorted(
+        campaigns.values(), key=lambda c: (-c["converted_sessions"], -c["clicks"], c["campaign"])
+    )
+    return json_result(
+        {
+            "site_id": site_id,
+            "window": {"start": start, "end": end},
+            "conversion_events": conversions,
+            "campaigns": ordered,
+        }
     )
 
 

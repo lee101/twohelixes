@@ -1172,3 +1172,92 @@ def test_tracker_has_privacy_guards_and_omits_risky_fields() -> None:
     assert "purchase: true" in source
     assert "begin_checkout: true" in source
     assert "subscription_dialog_opened: true" in source
+
+
+def email_query(**extra: str) -> str:
+    return urlencode({"tid": SITE["write_key"], "camp": "welcome", "cid": "rcpt1", **extra})
+
+
+def test_email_open_pixel_records_an_attributed_event() -> None:
+    status, body = dispatch("GET", "/v1/email/open.gif", query=email_query())
+    assert status == 200
+    assert body.encode("latin-1") == analytics_routes.PIXEL
+    stored = rows()
+    assert [r["event_name"] for r in stored] == ["email_open"]
+    assert stored[0]["utm_medium"] == "email"
+    assert stored[0]["utm_campaign"] == "welcome"
+    assert stored[0]["client_id"] == "rcpt1"
+
+
+def test_email_click_redirects_on_site_and_tags_the_destination() -> None:
+    raw = router.handle(
+        "GET",
+        "/v1/email/click",
+        email_query(url="https://netwrck.com/pricing?x=1"),
+        "",
+        json.dumps({"user-agent": "Mozilla/5.0 (Macintosh) Chrome/120"}),
+    )
+    status, _ctype, extra, _payload = raw
+    assert int(status) == 302
+    location = extra if isinstance(extra, str) else json.dumps(extra)
+    assert "https://netwrck.com/pricing" in location
+    assert "utm_medium=email" in location and "utm_campaign=welcome" in location and "x=1" in location
+    stored = rows()
+    assert [r["event_name"] for r in stored] == ["email_click"]
+    assert stored[0]["page_path"] == "/pricing"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://evil.example/phish",
+        "https://netwrck.com.evil.example/",
+        "https://user@evil.example/",
+        "https://evil.example/?u=https://netwrck.com/",
+        "javascript:alert(1)",
+        "//evil.example/",
+    ],
+)
+def test_email_click_never_redirects_off_site(target: str) -> None:
+    _status, _ctype, extra, _payload = router.handle(
+        "GET",
+        "/v1/email/click",
+        email_query(url=target),
+        "",
+        json.dumps({"user-agent": "Mozilla/5.0 (Macintosh) Chrome/120"}),
+    )
+    location = extra if isinstance(extra, str) else json.dumps(extra)
+    assert "evil.example/phish" not in location
+    assert "https://netwrck.com/" in location
+    assert "javascript" not in location
+
+
+def test_email_click_with_unknown_site_is_rejected() -> None:
+    status, _ = dispatch("GET", "/v1/email/click", query="tid=thw_nope&url=https%3A%2F%2Fnetwrck.com%2F")
+    assert status == 400
+
+
+def test_email_report_counts_opens_clicks_and_session_conversions() -> None:
+    now = time.time() * 1000
+    for cid in ("r1", "r2"):
+        dispatch("GET", "/v1/email/open.gif", query=email_query(cid=cid))
+    dispatch("GET", "/v1/email/click", query=email_query(cid="r1", url="https://netwrck.com/"))
+    collect(
+        [
+            {"event": "page_view", "client_id": "v1", "session_id": "s1", "ts": now - 2000,
+             "page_location": "https://netwrck.com/?utm_medium=email&utm_campaign=welcome&utm_source=email"},
+            {"event": "sign_up_completed", "client_id": "v1", "session_id": "s1", "ts": now - 1000},
+            {"event": "sign_up_completed", "client_id": "v2", "session_id": "s2", "ts": now - 1000,
+             "page_location": "https://netwrck.com/"},
+        ]
+    )
+    status, report = dispatch("GET", "/v1/analytics/email", query=f"site_id={SITE['id']}")
+    assert status == 200
+    assert len(report["campaigns"]) == 1
+    camp = report["campaigns"][0]
+    assert camp["campaign"] == "welcome"
+    assert (camp["opens"], camp["unique_opens"]) == (2, 2)
+    assert (camp["clicks"], camp["unique_clicks"]) == (1, 1)
+    assert camp["conversions"]["sign_up_completed"] == 1
+    assert camp["converted_sessions"] == 1
+    assert camp["conversion_rate"] == 1.0
