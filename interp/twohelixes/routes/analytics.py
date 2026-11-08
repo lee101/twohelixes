@@ -78,6 +78,14 @@ _NEVER_SAMPLE = {
     "sign_in_completed",
     "sign_up",
     "signup_completed",
+    "sign_up_completed",
+    "sign_in_started",
+    "checkout_started",
+    "purchase_completed",
+    "paywall",
+    "paywall_open",
+    "paywall_signup_clicked",
+    "paywall_login_clicked",
     "subscription_dialog_opened",
     "subscription_auth_required",
     "subscription_auth_selected",
@@ -624,7 +632,9 @@ _COLUMNS = (
 
 
 _warned: set[str] = set()
-_dashboard_queue: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+_dashboard_queue: queue.Queue[tuple[str, str]] = queue.Queue(
+    maxsize=max(1, min(4096, config.get_int("TWOHELIXES_ANALYTICS_DASHBOARD_QUEUE_SIZE", 256)))
+)
 _dashboard_worker_lock = threading.Lock()
 _dashboard_worker_started = False
 
@@ -682,6 +692,13 @@ def _store(rows: list[dict[str, Any]]) -> tuple[int, list[tuple[str, str]]]:
     claimed: list[tuple[str, str]] = []
     dashboard_candidates: dict[tuple[str, str], bool] = {}
     with store.transaction() as conn:
+        backlog_limit = max(1, min(100000, config.get_int("TWOHELIXES_ANALYTICS_MAX_PENDING_DASHBOARDS", 1024)))
+        backlog = conn.execute(
+            "SELECT COUNT(*) AS n FROM analytics_event_dashboards"
+            " WHERE status IN ('pending', 'building')"
+        ).fetchone()
+        if int(backlog["n"]) >= backlog_limit:
+            raise AnalyticsBackpressure("dashboard backlog is full")
         # Normalisation has already bounded every field. A database error here
         # must abort visibly; swallowing it leaves PostgreSQL's transaction in
         # an aborted state and can otherwise turn total data loss into a 204.
@@ -1111,6 +1128,7 @@ def _cors(ctx: Context) -> dict[str, str]:
     return {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Headers": "authorization, content-type",
+        "Access-Control-Expose-Headers": "Retry-After",
         "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
         "Access-Control-Max-Age": "86400",
         "Vary": "Origin",
@@ -1139,9 +1157,6 @@ def _with_session_start(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _schedule_dashboards(claimed: list[tuple[str, str]]) -> None:
-    if not claimed:
-        return
-
     global _dashboard_worker_started
     with _dashboard_worker_lock:
         if not _dashboard_worker_started:
@@ -1152,14 +1167,43 @@ def _schedule_dashboards(claimed: list[tuple[str, str]]) -> None:
             ).start()
             _dashboard_worker_started = True
     for candidate in claimed:
-        _dashboard_queue.put(candidate)
+        try:
+            _dashboard_queue.put_nowait(candidate)
+        except queue.Full:
+            _warn_once("analytics: dashboard queue full; retaining durable pending job")
+            break
+
+
+class AnalyticsBackpressure(Exception):
+    pass
+
+
+def _next_pending_dashboard() -> tuple[str, str] | None:
+    row = store.one(
+        "SELECT site_id, event_name FROM analytics_event_dashboards"
+        " WHERE status = 'pending' ORDER BY claimed_at LIMIT 1"
+    )
+    if row is not None:
+        return str(row["site_id"]), str(row["event_name"])
+    row = store.one(
+        "SELECT site_id FROM analytics_site_dashboards"
+        " WHERE dashboard_id IS NULL ORDER BY created_at LIMIT 1"
+    )
+    return (str(row["site_id"]), "") if row is not None else None
 
 
 def _dashboard_worker() -> None:
     """One serial worker per process; never one thread per custom event."""
     while True:
-        site_id, event_name = _dashboard_queue.get()
+        site_id, event_name = "", ""
         try:
+            try:
+                candidate = _dashboard_queue.get(timeout=1)
+            except queue.Empty:
+                candidate = _next_pending_dashboard()
+            if candidate is None:
+                continue
+            site_id, event_name = candidate
             from twohelixes.routes import dashboards
 
             if event_name:
@@ -1292,7 +1336,14 @@ def _collect_payload_with_stats(ctx: Context, payload: Any) -> tuple[Result, dic
                 normalised.update(attribution_cache[session_id])
             rows.extend(_with_session_start(normalised))
 
-    written, claimed = _store(rows)
+    try:
+        written, claimed = _store(rows)
+    except AnalyticsBackpressure:
+        _schedule_dashboards([])
+        rejected = error(503, "analytics_backlog_full")
+        rejected.headers.update(_cors(ctx))
+        rejected.headers["Retry-After"] = "5"
+        return rejected, stats
     stats["stored_rows"] = written
     _schedule_dashboards(claimed)
     return (

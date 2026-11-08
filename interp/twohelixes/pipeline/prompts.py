@@ -120,7 +120,7 @@ Return JSON:
 {
   "chart_type": "line"|"bar"|"hbar"|"area"|"scatter"|"pie"|"heatmap"|
                 "box"|"histogram"|"candlestick"|"sankey"|"treemap"|
-                "sunburst"|"bubble"|"map"|"funnel"|"waterfall"|"stat",
+                "sunburst"|"bubble"|"map"|"funnel"|"waterfall"|"gantt"|"stat",
   "x": "col"|null,
   "y": "col"|["col", ...]|null,
   "z": "col"|null,
@@ -128,6 +128,10 @@ Return JSON:
   "size": "col"|null,
   "facet": "col"|null,
   "agg": "sum"|"mean"|"count"|"median"|null,
+  "start": "col"|null,
+  "end": "col"|null,
+  "duration": "col"|null,
+  "progress": "col"|null,
   "orientation": "v"|"h",
   "stacked": true|false,
   "title": "a specific title that states the finding, not the columns",
@@ -147,6 +151,10 @@ Rules:
   the requested measure; never colour locations by IDs, postcodes or calendar
   years. Use null colour for a plain location map. Missing achievement scores
   are unavailable, not zero; LBOTE and participation are not achievement.
+- Use gantt for tasks, projects, schedules or phases that have a start and an
+  end (or a duration). x is the task name, start/end are columns of dates or
+  numbers (week 0..12 works), color is an optional group such as team or status,
+  progress is an optional completion column. Zero-length rows draw as milestones.
 - Use bubble when a third numeric measure should control point area.
 - Use sunburst or treemap for nested part-to-whole relationships.
 - One number as the answer means "stat" - do not draw a one-bar bar chart.

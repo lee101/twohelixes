@@ -168,3 +168,27 @@ def test_a_question_that_names_its_own_chart_costs_no_model_call(
 
     assert recorder.models == []
     assert config_out["chart_type"] in ("bar", "hbar")
+
+
+def test_dataset_search_runs_on_the_cheap_tier_and_escalates_before_degrading(
+    frame: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = {"orders": frame, "targets": frame.copy()}
+
+    recorder = _Recorder({"datasets": ["orders"], "interpretation": "q", "confidence": 0.9})
+    monkeypatch.setattr(llm, "json_call", recorder)
+    answer = orchestrator._search(OPEN_QUESTION, frames, [], orchestrator.Emitter(), config.MODEL_ESCALATE)
+    assert recorder.models == [config.MODEL_MINI]
+    assert answer["datasets"] == ["orders"]
+
+    recorder = _Recorder({"datasets": ["targets"]}, fail={config.MODEL_MINI})
+    monkeypatch.setattr(llm, "json_call", recorder)
+    answer = orchestrator._search(OPEN_QUESTION, frames, [], orchestrator.Emitter(), config.MODEL_ESCALATE)
+    assert recorder.models == [config.MODEL_MINI, config.MODEL_ESCALATE]
+    assert answer["datasets"] == ["targets"]
+
+    emit = orchestrator.Emitter()
+    recorder = _Recorder(fail={config.MODEL_MINI, config.MODEL_ESCALATE})
+    monkeypatch.setattr(llm, "json_call", recorder)
+    answer = orchestrator._search(OPEN_QUESTION, frames, [], emit, config.MODEL_ESCALATE)
+    assert answer["datasets"] == ["orders", "targets"], "never zero datasets"

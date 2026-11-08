@@ -16,6 +16,7 @@ import { SourcesPanel, type DatasetSummary, type UploadResult } from "./sources"
 import { TraceView } from "./trace";
 import type { SQLWorkbench } from "./sql-workbench";
 import type { SheetsView } from "./sheets";
+import type { CodeView } from "./code";
 import { clearUser, persistUser } from "./user";
 
 interface Sample {
@@ -26,7 +27,7 @@ interface Sample {
   rows: number;
 }
 
-type View = "chat" | "builder" | "dashboard" | "dashboards" | "sql" | "sheets";
+type View = "chat" | "builder" | "dashboard" | "dashboards" | "sql" | "sheets" | "code";
 
 interface State {
   view: View;
@@ -34,6 +35,7 @@ interface State {
   dashboard: DashboardView | null;
   sql: SQLWorkbench | null;
   sheets: SheetsView | null;
+  code: CodeView | null;
   user: User | null;
   lastResult: PipelineResult | null;
   lastQuestion: string;
@@ -60,6 +62,7 @@ const state: State = {
   dashboard: null,
   sql: null,
   sheets: null,
+  code: null,
   user: null,
   lastResult: null,
   lastQuestion: "",
@@ -253,6 +256,7 @@ function nav(): HTMLElement {
     },
     { label: "SQL", view: "sql", go: () => void openSqlWorkbench() },
     { label: "Sheets", view: "sheets", go: () => void openSheets() },
+    { label: "Code", view: "code", go: () => void openCode() },
   ];
 
   for (const item of items) {
@@ -344,6 +348,11 @@ function main(): HTMLElement {
   if (state.view === "sheets" && state.sheets) {
     wrap.classList.add("app-main-wide");
     wrap.append(state.sheets.root);
+    return wrap;
+  }
+  if (state.view === "code" && state.code) {
+    wrap.classList.add("app-main-wide");
+    wrap.append(state.code.root);
     return wrap;
   }
 
@@ -1090,6 +1099,7 @@ async function signOut(): Promise<void> {
   state.view = "chat";
   state.sql = null;
   state.sheets = null;
+  state.code = null;
   state.lastResult = null;
   state.sources = [];
   state.datasets = [];
@@ -1231,6 +1241,15 @@ async function openSqlWorkbench(): Promise<void> {
     state.sql.setSources(state.sources);
   }
   state.view = "sql";
+  render();
+}
+
+async function openCode(): Promise<void> {
+  if (!state.code) {
+    const { CodeView } = await import("./code");
+    state.code = new CodeView();
+  }
+  state.view = "code";
   render();
 }
 

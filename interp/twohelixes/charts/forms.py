@@ -740,6 +740,234 @@ def waterfall(frame: Any, config: dict[str, Any], mode: str = "light") -> tuple[
 
 
 # --------------------------------------------------------------------------
+# Gantt
+# --------------------------------------------------------------------------
+
+MAX_GANTT_TASKS = 80
+_TASK_HINTS = ("task", "activity", "name", "phase", "milestone", "project", "job", "item", "title", "step")
+_START_HINTS = ("start", "begin", "from", "kickoff", "launch")
+_END_HINTS = ("end", "finish", "due", "deadline", "until", "to")
+_DURATION_HINTS = ("duration", "days", "length", "weeks", "effort", "elapsed")
+_GROUP_HINTS = ("resource", "team", "owner", "assignee", "status", "category", "group", "department", "stage", "type")
+_PROGRESS_HINTS = ("progress", "percent", "pct", "done")
+
+
+def _hinted(columns: list[str], hints: tuple[str, ...], skip: set[str]) -> str | None:
+    for hint in hints:
+        for name in columns:
+            if name in skip:
+                continue
+            lowered = name.lower().replace("_", " ")
+            if hint in lowered.split() or (len(hint) > 3 and hint in lowered):
+                return name
+    return None
+
+
+def _as_time(series: Any) -> tuple[Any, bool]:
+    """(converted, is_datetime). Plain numbers stay numeric: week 0..12 is a schedule too."""
+    import pandas as pd
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series, True
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce"), False
+    parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+    if len(series) and parsed.notna().mean() >= 0.6:
+        return parsed, True
+    return pd.to_numeric(series, errors="coerce"), False
+
+
+def looks_like_schedule(frame: Any) -> bool:
+    """True for a task column plus named start and end columns (not just any two dates)."""
+    try:
+        names = [str(c) for c in frame.columns]
+        start = _hinted(names, _START_HINTS, set())
+        end = _hinted(names, _END_HINTS, {start or ""})
+        task = _hinted([n for n in names if n not in (start, end)], _TASK_HINTS, set())
+        return bool(start and end and task and len(frame) >= 1)
+    except Exception:  # noqa: BLE001 - detection must never break chart selection
+        return False
+
+
+def gantt(frame: Any, config: dict[str, Any], mode: str = "light") -> tuple[list, list[str]]:
+    """Tasks as horizontal bars from start to end.
+
+    Plotly has no gantt trace; the form is a horizontal bar with `base` set to
+    the start, which is also how `px.timeline` draws one. Channels: x is the
+    task, y/start the start, z/end the end (or duration), color the grouping.
+    Zero-length tasks are milestones and get a diamond, not an invisible bar.
+    A progress column shades the finished part, so completion is never colour
+    alone - it is length.
+    """
+    import pandas as pd
+
+    warnings: list[str] = []
+    if frame is None or len(frame) == 0:
+        return [], ["A gantt chart needs rows with a start and an end."]
+    names = [str(c) for c in frame.columns]
+    numeric = {n for n in names if pd.api.types.is_numeric_dtype(frame[n])}
+
+    def cfg(*keys: str) -> str | None:
+        for key in keys:
+            value = config.get(key)
+            if isinstance(value, str) and (col := _column(frame, value)):
+                return col
+        return None
+
+    def timelike(name: str) -> bool:
+        return _as_time(frame[name])[0].notna().mean() >= 0.6
+
+    task = cfg("task", "x", "label")
+    start = cfg("start")
+    end = cfg("end")
+    duration = cfg("duration")
+    group = cfg("group", "color")
+    progress = cfg("progress")
+
+    if start is None and (cand := cfg("y")) and timelike(cand):
+        start = cand
+    if end is None and (cand := cfg("z")) and timelike(cand) and cand != start:
+        end = cand
+    start = start or _hinted(names, _START_HINTS, {end or ""})
+    end = end or _hinted(names, _END_HINTS, {start or ""})
+    if start is None:
+        dated = [n for n in names if n not in numeric and timelike(n)]
+        start = dated[0] if dated else None
+        if end is None and len(dated) > 1:
+            end = dated[1]
+    if start is None:
+        pool = [n for n in names if n in numeric]
+        start = pool[0] if pool else None
+    if start is None:
+        return [], ["A gantt chart needs a start column (a date or a number)."]
+    if end is None and duration is None:
+        duration = _hinted([n for n in names if n in numeric and n != start], _DURATION_HINTS, set())
+    if end is None and duration is None:
+        pool = [n for n in names if n in numeric and n != start]
+        duration = pool[0] if pool else None
+    if end is None and duration is None:
+        return [], ["A gantt chart needs an end or a duration column."]
+
+    used = {start, end, duration}
+    text = [n for n in names if n not in used and n not in numeric]
+    task = task if task not in used else None
+    task = task or _hinted(text, _TASK_HINTS, set()) or (text[0] if text else None)
+    used.add(task)
+    group = group if group not in used else None
+    group = group or _hinted([n for n in names if n not in used and n not in numeric], _GROUP_HINTS, set())
+    progress = progress or _hinted([n for n in names if n in numeric and n not in used], _PROGRESS_HINTS, set())
+
+    work = pd.DataFrame(index=frame.index)
+    work["task"] = frame[task].astype(str) if task else [f"Task {i + 1}" for i in range(len(frame))]
+    t_start, is_date = _as_time(frame[start])
+    work["start"] = t_start
+    if end is not None:
+        t_end, end_is_date = _as_time(frame[end])
+        if end_is_date != is_date:
+            return [], ["A gantt chart's start and end must both be dates or both be numbers."]
+        work["end"] = t_end
+    else:
+        length = pd.to_numeric(frame[duration], errors="coerce")
+        work["end"] = t_start + (pd.to_timedelta(length, unit="D") if is_date else length)
+    work["group"] = frame[group].astype(str) if group else None
+    if progress:
+        share = pd.to_numeric(frame[progress], errors="coerce")
+        if share.max() > 1.0:
+            share = share / 100.0
+        work["progress"] = share.clip(0, 1).fillna(0.0)
+
+    rows = len(work)
+    work = work.dropna(subset=["start", "end"])
+    if rows != len(work):
+        warnings.append(f"{rows - len(work)} task(s) had no usable start or end and were left out.")
+    swapped = work["end"] < work["start"]
+    if swapped.any():
+        work.loc[swapped, ["start", "end"]] = work.loc[swapped, ["end", "start"]].to_numpy()
+        warnings.append(f"{int(swapped.sum())} task(s) ended before they started; the dates were swapped.")
+    work = work.sort_values(["start", "end"], kind="stable")
+    if len(work) > MAX_GANTT_TASKS:
+        warnings.append(f"{len(work)} tasks is unreadable; showing the first {MAX_GANTT_TASKS} by start.")
+        work = work.head(MAX_GANTT_TASKS)
+    if work.empty:
+        return [], ["No task had a valid start and end."]
+
+    span = work["end"] - work["start"]
+    width = span.dt.total_seconds() * 1000.0 if is_date else span.astype(float)
+
+    def at(values: Any) -> list[Any]:
+        return values.dt.strftime("%Y-%m-%d %H:%M:%S").tolist() if is_date else values.tolist()
+
+    order = work["task"].tolist()
+    tags = list(dict.fromkeys(work["group"])) if group else [None]
+    limit = palette.MAX_SERIES
+    if len(tags) > limit:
+        warnings.append(f"{len(tags)} groups; the {len(tags) - limit + 1} smallest are shown as 'Other'.")
+        biggest = work["group"].value_counts().index[: limit - 1].tolist()
+        work["group"] = work["group"].where(work["group"].isin(biggest), palette.OTHER_LABEL)
+        tags = list(dict.fromkeys(work["group"]))
+
+    traces: list[dict[str, Any]] = []
+    for index, tag in enumerate(tags):
+        part = work if tag is None else work[work["group"] == tag]
+        colour = palette.series_color(index, mode)
+        other = tag == palette.OTHER_LABEL
+        w = width.loc[part.index]
+        bars = part[w > 0]
+        name = "" if tag is None else str(tag)
+        if len(bars):
+            bw = width.loc[bars.index]
+            has_progress = "progress" in bars
+            traces.append({
+                "type": "bar",
+                "orientation": "h",
+                "y": bars["task"].tolist(),
+                "x": bw.tolist(),
+                "base": at(bars["start"]),
+                "name": name,
+                "marker": {"opacity": 0.5 if has_progress else 1.0},
+                "customdata": list(zip(at(bars["start"]), at(bars["end"]))),
+                "hovertemplate": "%{y}<br>%{customdata[0]} to %{customdata[1]}<extra>%{fullData.name}</extra>",
+                "_series_index": index,
+                "_neutral": other,
+                "_gantt": "date" if is_date else "number",
+            })
+            if has_progress:
+                traces.append({
+                    "type": "bar",
+                    "orientation": "h",
+                    "y": bars["task"].tolist(),
+                    "x": (bw * bars["progress"]).tolist(),
+                    "base": at(bars["start"]),
+                    "name": name,
+                    "showlegend": False,
+                    "hoverinfo": "skip",
+                    "_layer": True,
+                    "_series_index": index,
+                    "_neutral": other,
+                    "_gantt": "date" if is_date else "number",
+                })
+        miles = part[w <= 0]
+        if len(miles):
+            traces.append({
+                "type": "scatter",
+                "mode": "markers",
+                "y": miles["task"].tolist(),
+                "x": at(miles["start"]),
+                "name": f"{name} milestone".strip() if len(bars) else (name or "Milestone"),
+                "showlegend": not len(bars) and bool(name),
+                "marker": {"symbol": "diamond", "size": 14, "color": colour},
+                "hovertemplate": "%{y}<br>%{x}<extra>milestone</extra>",
+                "_layer": bool(len(bars)),
+                "_series_index": index,
+                "_neutral": other,
+                "_gantt": "date" if is_date else "number",
+            })
+    if traces:
+        traces[0]["_gantt_order"] = order
+    return traces, warnings
+
+
+# --------------------------------------------------------------------------
 # Box
 # --------------------------------------------------------------------------
 
@@ -814,6 +1042,7 @@ BUILDERS = {
     "map": map_chart,
     "funnel": funnel,
     "waterfall": waterfall,
+    "gantt": gantt,
     "box": box,
     "wordcloud": wordcloud,
 }

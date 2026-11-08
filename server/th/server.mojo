@@ -10,7 +10,8 @@ worker threads have buffered and writes them out. Polling is O(active
 streams), not O(connections).
 """
 
-from th.app import handle_fast, is_stream_path, security_headers
+from std.os import getenv
+from th.app import collect_body_too_large, handle_fast, is_stream_path, security_headers
 from th.http import (
     PARSE_ERROR,
     PARSE_INCOMPLETE,
@@ -160,6 +161,7 @@ struct Loop(Movable):
     var bridge: Bridge
     var worker_id: Int
     var served: Int
+    var collect_body_limit: Int
 
     def __init__(
         out self,
@@ -182,6 +184,13 @@ struct Loop(Movable):
         self.bridge = Bridge()
         self.worker_id = worker_id
         self.served = 0
+        self.collect_body_limit = 1024 * 1024
+        try:
+            var configured = getenv("TWOHELIXES_ANALYTICS_MAX_BODY_BYTES")
+            if configured != "":
+                self.collect_body_limit = max(1024, min(32 * 1024 * 1024, Int(configured)))
+        except:
+            pass
         if epoll_add(self.epfd, self.listen_fd, EPOLLIN) != 0:
             raise Error("epoll_add(listener) failed")
         self.bridge.boot(interp_dir, site_packages)
@@ -307,6 +316,10 @@ struct Loop(Movable):
                 self.conns[i].instart : self.conns[i].inlen
             ]
             var rc = parse_request(active, len(active), req)
+            # Reject the advertised length before waiting for the full body.
+            if collect_body_too_large(active, req, self.collect_body_limit):
+                self._payload_too_large(fd)
+                return
             if rc == PARSE_INCOMPLETE:
                 if len(active) >= MAX_REQUEST_BYTES:
                     self._payload_too_large(fd)

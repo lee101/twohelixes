@@ -326,3 +326,90 @@ def test_numeric_map_color_is_continuous_not_truncated_categories():
     assert len(traces)==1
     assert traces[0]['marker']['color']==[350,400,450,500,550]
     assert traces[0]['marker']['showscale']
+
+
+# -- gantt -----------------------------------------------------------------
+
+
+@pytest.fixture
+def plan() -> pd.DataFrame:
+    return pd.DataFrame({
+        "task": ["Design", "Build", "Test", "Launch"],
+        "start": ["2026-01-01", "2026-01-15", "2026-02-15", "2026-03-10"],
+        "end": ["2026-01-14", "2026-02-14", "2026-03-09", "2026-03-10"],
+        "team": ["UX", "Eng", "QA", "Ops"],
+        "percent_complete": [100, 60, 0, 0],
+    })
+
+
+def test_gantt_draws_horizontal_bars_from_the_start(plan):
+    traces, warnings = forms.gantt(plan, {})
+    assert warnings == []
+    bars = [t for t in traces if t["type"] == "bar" and t.get("hoverinfo") != "skip"]
+    assert bars and all(t["orientation"] == "h" for t in bars)
+    first = next(t for t in bars if t["y"][0] == "Design")
+    assert first["base"][0].startswith("2026-01-01")
+    assert first["x"][0] == pytest.approx(13 * 86_400_000)
+
+
+def test_gantt_zero_length_task_is_a_milestone(plan):
+    traces, _ = forms.gantt(plan, {})
+    marks = [t for t in traces if t["type"] == "scatter"]
+    assert marks and marks[0]["marker"]["symbol"] == "diamond"
+    assert "Launch" in marks[0]["y"]
+
+
+def test_gantt_progress_overlay_is_proportional(plan):
+    traces, _ = forms.gantt(plan, {})
+    base = next(t for t in traces if t["type"] == "bar" and t["y"] == ["Build"])
+    done = next(t for t in traces if t.get("hoverinfo") == "skip" and t["y"] == ["Build"])
+    assert done["x"][0] == pytest.approx(base["x"][0] * 0.6)
+
+
+def test_gantt_numeric_schedule_with_duration():
+    frame = pd.DataFrame({"phase": ["a", "b"], "start_week": [0, 3], "duration_weeks": [3, 4]})
+    figure, warnings = figures.build(frame, {"chart_type": "gantt"})
+    assert figure["layout"]["xaxis"]["type"] == "linear"
+    assert figure["data"][0]["base"] == [0, 3]
+    assert figure["data"][0]["x"] == [3, 4]
+
+
+def test_gantt_layout_reads_top_to_bottom_on_a_date_axis(plan):
+    figure, _ = figures.build(plan, {"chart_type": "gantt"})
+    assert figure["layout"]["xaxis"]["type"] == "date"
+    assert figure["layout"]["yaxis"]["autorange"] == "reversed"
+    assert figure["layout"]["yaxis"]["categoryarray"] == ["Design", "Build", "Test", "Launch"]
+
+
+def test_gantt_repairs_swapped_dates_and_reports_it():
+    frame = pd.DataFrame({"task": ["a"], "start": ["2026-02-10"], "end": ["2026-02-01"]})
+    traces, warnings = forms.gantt(frame, {})
+    assert traces[0]["x"][0] > 0
+    assert any("swapped" in w for w in warnings)
+
+
+def test_gantt_mixed_date_and_number_is_refused_with_a_reason():
+    frame = pd.DataFrame({"task": ["a"], "start": ["2026-02-10"], "end": [5]})
+    traces, warnings = forms.gantt(frame, {"start": "start", "end": "end"})
+    assert traces == [] and warnings
+
+
+def test_gantt_folds_extra_groups_instead_of_cycling_colours():
+    n = 12
+    frame = pd.DataFrame({
+        "task": [f"t{i}" for i in range(n)],
+        "start": pd.date_range("2026-01-01", periods=n).astype(str),
+        "end": pd.date_range("2026-01-05", periods=n).astype(str),
+        "team": [f"team{i}" for i in range(n)],
+    })
+    figure, warnings = figures.build(frame, {"chart_type": "gantt"})
+    styled = defaults.apply(figure, chart_type="gantt")
+    assert any("Other" in w for w in warnings)
+    assert {t["name"] for t in styled["data"]} <= {f"team{i}" for i in range(n)} | {"Other"}
+    assert defaults.audit(styled) == []
+
+
+def test_heuristic_chooses_gantt_for_a_schedule_but_not_a_plain_pair_of_dates(plan):
+    assert figures.heuristic_config(plan, "what is the plan")["chart_type"] == "gantt"
+    sales = pd.DataFrame({"day": ["2026-01-01", "2026-01-02"], "revenue": [1.0, 2.0]})
+    assert figures.heuristic_config(sales, "revenue")["chart_type"] != "gantt"

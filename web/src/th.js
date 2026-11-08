@@ -4,11 +4,11 @@
  * Rules this file lives by:
  *  - it can never throw into the host page: every entry point is wrapped
  *  - it can never block: no synchronous XHR, no layout reads on the hot path,
- *    delivery is sendBeacon first and fetch(keepalive) second
+ *    exit delivery is sendBeacon first and fetch(keepalive) second
  *  - it can never lose the tail of a session: the queue flushes on
  *    visibilitychange and pagehide, not on unload alone (which iOS ignores)
- *  - a failed request is dropped, not retried forever: analytics must not
- *    become the reason a page is slow or a device is hot
+ *  - foreground delivery retries transient failures twice, in a bounded queue;
+ *    exit delivery remains best effort
  *
  * API (GA-shaped, with a Segment-shaped alias):
  *   th('track', 'signup_started', {plan: 'pro'})
@@ -26,6 +26,9 @@
   var SESSION_GAP_MS = 30 * 60 * 1000;
   var FLUSH_DELAY_MS = 2000;
   var MAX_QUEUE = 50;
+  var MAX_PAYLOAD_BYTES = 48 * 1024;
+  var MAX_DELIVERY_BATCHES = 4;
+  var MAX_RETRIES = 2;
   var config = window[CONFIG_KEY] || {};
   var configuredSampleRps = Number(config.sampleAfterPerSecond || 40);
   var configuredMinRate = Number(config.minSampleRate || 0.01);
@@ -37,7 +40,10 @@
   var neverSample = {
     alias: true, identify: true, js_error: true, login: true, purchase: true,
     refund: true, session_start: true, sign_in_completed: true, sign_up: true,
-    signup_completed: true, begin_checkout: true,
+    signup_completed: true, sign_up_completed: true, sign_in_started: true,
+    checkout_started: true, purchase_completed: true, begin_checkout: true,
+    paywall: true, paywall_open: true, paywall_signup_clicked: true,
+    paywall_login_clicked: true, conversion: true, generate_lead: true,
     subscription_dialog_opened: true, subscription_auth_required: true,
     subscription_auth_selected: true, subscription_checkout_ready: true,
     subscription_checkout_failed: true, subscription_checkout_completed: true,
@@ -66,8 +72,12 @@
     return;
   }
   var endpoint = config.endpoint || 'https://twohelixes.com/v1/collect';
-  var siteId = config.siteId;
+  var siteId = String(config.siteId).slice(0, 128);
   var queue = [];
+  var queueBytes = 0;
+  var memoryStorage = {};
+  var deliveries = [];
+  var deliveryBusy = false;
   var timer = null;
   var started = Date.now();
   var engagement = 0;
@@ -99,6 +109,7 @@
   }
 
   function store(key, value) {
+    memoryStorage[key] = value;
     try {
       window.localStorage.setItem(key, value);
     } catch (e) {}
@@ -106,9 +117,9 @@
 
   function load(key) {
     try {
-      return window.localStorage.getItem(key);
+      return window.localStorage.getItem(key) || memoryStorage[key] || null;
     } catch (e) {
-      return null;
+      return memoryStorage[key] || null;
     }
   }
 
@@ -174,6 +185,7 @@
   function baseEvent(name, props, rate) {
     var event = {
       event: name,
+      messageId: uuid(),
       ts: Date.now(),
       client_id: clientId(),
       session_id: sessionId(),
@@ -211,7 +223,13 @@
   }
 
   function send(body, useBeacon) {
-    var payload = JSON.stringify(body);
+    if (!useBeacon) {
+      if (deliveries.length >= MAX_DELIVERY_BATCHES) return;
+      deliveries.push({ body: body, endpoint: endpoint, retries: 0 });
+      pumpDeliveries();
+      return;
+    }
+    var payload = body;
     try {
       if (useBeacon && navigator.sendBeacon) {
         // text/plain keeps it a simple request: no CORS preflight, no delay.
@@ -223,7 +241,7 @@
       fetch(endpoint, {
         method: 'POST',
         body: payload,
-        keepalive: true,
+        keepalive: useBeacon,
         mode: 'cors',
         credentials: 'omit',
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
@@ -231,18 +249,74 @@
     } catch (e) {}
   }
 
+  function pumpDeliveries() {
+    if (deliveryBusy || !deliveries.length) return;
+    deliveryBusy = true;
+    var batch = deliveries[0];
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timeout = controller ? setTimeout(function () { controller.abort(); }, 10000) : null;
+    function finished(response, failed) {
+      if (timeout) clearTimeout(timeout);
+      var transient = failed || (response && (response.status === 429 || response.status >= 500));
+      if (transient && batch.retries < MAX_RETRIES) {
+        batch.retries += 1;
+        var delay = 1000 * Math.pow(2, batch.retries - 1);
+        var retryAfter = response && response.headers && response.headers.get
+          ? response.headers.get('Retry-After') : null;
+        if (retryAfter) {
+          var seconds = Number(retryAfter);
+          if (!isFinite(seconds)) seconds = (Date.parse(retryAfter) - Date.now()) / 1000;
+          if (isFinite(seconds)) delay = Math.max(delay, Math.min(30000, Math.max(0, seconds * 1000)));
+        }
+        delay += Math.floor(Math.random() * 250);
+        setTimeout(function () {
+          deliveryBusy = false;
+          pumpDeliveries();
+        }, delay);
+        return;
+      }
+      deliveries.shift();
+      deliveryBusy = false;
+      pumpDeliveries();
+    }
+    try {
+      fetch(batch.endpoint, {
+        method: 'POST', body: batch.body, keepalive: false, mode: 'cors',
+        credentials: 'omit', headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        signal: controller ? controller.signal : undefined
+      }).then(function (response) { finished(response, false); }, function () { finished(null, true); });
+    } catch (e) {
+      finished(null, true);
+    }
+  }
+
   function flush(useBeacon) {
     if (!queue.length || !siteId) return;
     var events = queue.splice(0, queue.length);
+    queueBytes = 0;
     if (timer) {
       clearTimeout(timer);
       timer = null;
     }
-    send({ site_id: siteId, events: events }, useBeacon !== false);
+    send('{"site_id":' + JSON.stringify(siteId) + ',"events":[' + events.join(',') + ']}', useBeacon !== false);
   }
 
   function enqueue(event) {
-    queue.push(event);
+    var encoded = JSON.stringify(event);
+    var bytes = new Blob([encoded]).size;
+    if (bytes > MAX_PAYLOAD_BYTES - 1024) {
+      event.props = { _twohelixes_truncated: true };
+      if (event.traits) event.traits = {};
+      for (var key in event) {
+        if (typeof event[key] === 'string') event[key] = event[key].slice(0, 256);
+      }
+      encoded = JSON.stringify(event);
+      bytes = new Blob([encoded]).size;
+    }
+    // Keep the exit batch below the shared browser keepalive byte budget.
+    if (queue.length && queueBytes + bytes + 1024 > MAX_PAYLOAD_BYTES) flush(false);
+    queue.push(encoded);
+    queueBytes += bytes + 1;
     if (queue.length >= MAX_QUEUE) {
       flush(false);
       return;
@@ -394,7 +468,7 @@
       case 'flush':
         return flush(false);
       case 'config':
-        if (args[0] && args[0].siteId) siteId = args[0].siteId;
+        if (args[0] && args[0].siteId) siteId = String(args[0].siteId).slice(0, 128);
         if (args[0] && args[0].endpoint) endpoint = args[0].endpoint;
         return;
     }

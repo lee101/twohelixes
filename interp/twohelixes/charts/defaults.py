@@ -201,6 +201,10 @@ def _fold_extra_series(traces: list[dict[str, Any]], chart_type: str) -> list[di
     For the all-pairs forms this bites early (3 series), which is the point -
     a scatter with eight colours is unreadable under CVD no matter the hues.
     """
+    # A gantt's trace count is bars + progress overlays + milestones per group,
+    # not series; the form already folds its own groups into "Other".
+    if chart_type == "gantt":
+        return traces
     limit = palette.max_series_for(chart_type)
     # Geographic forms already fold categories by concatenating locations.
     if chart_type == "map" and sum(not t.get("_neutral") and t.get("name") != palette.OTHER_LABEL for t in traces) <= limit:
@@ -627,6 +631,9 @@ def audit(figure: dict[str, Any], mode: str = "light") -> list[dict[str, str]]:
             }
         )
 
+    # A layer (a gantt's progress fill, a milestone marker) draws on top of a
+    # series that already exists; it is not another series.
+    traces = [t for t in traces if not t.get("_layer")]
     colors = [t.get("_color") for t in traces if t.get("_color")]
     if len(colors) != len(set(colors)):
         duplicated = [c for c in set(colors) if colors.count(c) > 1]

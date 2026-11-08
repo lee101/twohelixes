@@ -38,6 +38,7 @@ VALID_TYPES = {
     "map",
     "funnel",
     "waterfall",
+    "gantt",
     "stat",
     "table",
     "wordcloud",
@@ -55,6 +56,7 @@ FORM_BUILDERS = frozenset(
         "map",
         "funnel",
         "waterfall",
+        "gantt",
         "box",
         "wordcloud",
     }
@@ -303,6 +305,20 @@ def heuristic_config(frame: Any, question: str) -> dict[str, Any]:
     measures = tools.find_measures(frame)
     categories = tools.find_categories(frame)
 
+    # A schedule is recognisable from its columns alone: a task label plus a
+    # start and an end. Ask for "gantt" by name and a start/duration pair is enough.
+    asked = "gantt" in question.lower()
+    if asked or forms.looks_like_schedule(frame):
+        traces, _ = forms.gantt(frame, {})
+        if traces:
+            return {
+                "chart_type": "gantt",
+                "x": None,
+                "y": None,
+                "agg": None,
+                "title": "Schedule",
+            }
+
     geographic = forms.detect_map(frame)
     if geographic and geographic["kind"] == "points":
         coordinate_columns = {geographic["lat"], geographic["lon"]}
@@ -473,6 +489,21 @@ def build(
         # the value axis is labelled with the category's name and the chart
         # says the opposite of what it draws.
         layout["xaxis"], layout["yaxis"] = layout["yaxis"], layout["xaxis"]
+
+    if chart_type == "gantt" and traces:
+        # Tasks read top to bottom in start order; the value axis is time.
+        # base+x only means "start+length" on a date axis when told it is one.
+        kind = next((t.get("_gantt") for t in traces if t.get("_gantt")), "number")
+        order = next((t["_gantt_order"] for t in traces if t.get("_gantt_order")), None)
+        layout["xaxis"] = {"title": {"text": config.get("x_title") or ""}, "type": "date" if kind == "date" else "linear"}
+        layout["yaxis"] = {
+            "title": {"text": config.get("y_title") or ""},
+            "autorange": "reversed",
+            "type": "category",
+            **({"categoryorder": "array", "categoryarray": order} if order else {}),
+        }
+        layout["barmode"] = "overlay"
+        layout["height"] = max(360, 32 * len(order or []) + 140)
 
     if config.get("stacked"):
         layout["barmode"] = "stack"

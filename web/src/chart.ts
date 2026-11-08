@@ -42,6 +42,7 @@ export const CHART_TYPES = [
   "heatmap",
   "candlestick",
   "waterfall",
+  "gantt",
   "funnel",
   "treemap",
   "sunburst",

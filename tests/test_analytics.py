@@ -680,6 +680,14 @@ def test_server_sampling_starts_only_after_the_rate_ceiling(monkeypatch: Any) ->
     assert keep is True
     assert rate == 1.0
     for event_name in (
+        "sign_up_completed",
+        "sign_in_started",
+        "checkout_started",
+        "purchase_completed",
+        "paywall",
+        "paywall_open",
+        "paywall_signup_clicked",
+        "paywall_login_clicked",
         "begin_checkout",
         "subscription_dialog_opened",
         "subscription_auth_required",
