@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from twohelixes import auth, config, ratelimit, router, store
+from twohelixes.analytics_bots import HUMAN_E
 from twohelixes.connectors import registry
 from twohelixes.pipeline import orchestrator
 from twohelixes.routes import teams
@@ -98,8 +99,8 @@ def _load_frames(
                 " e.external_id, e.props FROM analytics_events e"
                 " LEFT JOIN analytics_identities i"
                 " ON i.site_id = e.site_id AND i.client_id = e.client_id"
-                " WHERE e.site_id = ? AND e.ts >= ?"
-                " ORDER BY e.ts DESC LIMIT ?",
+                " WHERE e.site_id = ? AND e.ts >= ?" + HUMAN_E
+                + " ORDER BY e.ts DESC LIMIT ?",
                 (analytics_site_id, time.time() - days * 86400, limit),
             )
         )

@@ -125,9 +125,10 @@ def test_the_dynamically_built_sql_is_a_short_known_list() -> None:
     """
     listing = "\n".join(f"  {path}:{line}  {sql[:60]}" for path, line, sql in DYNAMIC)
     # Analytics adds bounded batch INSERTs, allowlisted metric columns,
-    # optional property filters, site updates and dashboard cleanup IDs.
+    # optional property filters, site updates, dashboard cleanup IDs, and the
+    # headless-traffic exclusion (a constant from analytics_bots, never input).
     # These are exercised through the analytics route suite on both backends.
-    assert len(DYNAMIC) <= 11, f"dynamic SQL has grown:\n{listing}"
+    assert len(DYNAMIC) <= 15, f"dynamic SQL has grown:\n{listing}"
 
 
 @pytest.mark.parametrize(
