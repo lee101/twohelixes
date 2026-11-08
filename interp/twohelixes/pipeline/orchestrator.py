@@ -399,8 +399,13 @@ def _search(
         f"Available datasets:\n{_format_catalog(profiles, catalog)}"
     )
 
+    # Picking datasets is a small JSON decision over profiles already computed,
+    # and its floor is "use every dataset" - the same shape as the chart choice,
+    # so it takes the same cheap-first, escalate-before-degrading path.
     try:
-        answer = llm.json_call(prompt, system=prompts.SEARCH_SYSTEM, model=model)
+        answer = _small_call(prompt, prompts.SEARCH_SYSTEM, model)
+    except llm.CircuitOpen:
+        raise
     except llm.LLMError as exc:
         emit.warn("Using all connected datasets.", detail=exc)
         return {"datasets": list(frames), "interpretation": question, "confidence": 0.3}

@@ -202,6 +202,20 @@ CREATE TABLE IF NOT EXISTS sheets (
 );
 CREATE INDEX IF NOT EXISTS sheets_user ON sheets(user_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS artifacts (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    prompt      TEXT,
+    model       TEXT,
+    version     INTEGER NOT NULL DEFAULT 1,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifacts_user ON artifacts(user_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,

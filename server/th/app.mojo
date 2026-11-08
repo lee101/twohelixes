@@ -32,23 +32,47 @@ def is_stream_path(buf: Span[UInt8, _], s: Slice) -> Bool:
 
 def is_collect_path(buf: Span[UInt8, _], s: Slice) -> Bool:
     return (
-        path_eq(buf, s, "/v1/collect")
-        or path_eq(buf, s, "/v1/batch")
-        or path_eq(buf, s, "/v1/track")
-        or path_eq(buf, s, "/v1/page")
-        or path_eq(buf, s, "/v1/screen")
-        or path_eq(buf, s, "/v1/identify")
-        or path_eq(buf, s, "/v1/group")
-        or path_eq(buf, s, "/v1/alias")
-        or path_eq(buf, s, "/mp/collect")
-        or path_eq(buf, s, "/track")
-        or path_eq(buf, s, "/import")
-        or path_eq(buf, s, "/engage")
-        or path_eq(buf, s, "/groups")
-        or path_eq(buf, s, "/2/httpapi")
-        or path_eq(buf, s, "/batch")
-        or path_eq(buf, s, "/identify")
+        collect_path_eq(buf, s, "/v1/collect")
+        or collect_path_eq(buf, s, "/v1/batch")
+        or collect_path_eq(buf, s, "/v1/track")
+        or collect_path_eq(buf, s, "/v1/page")
+        or collect_path_eq(buf, s, "/v1/screen")
+        or collect_path_eq(buf, s, "/v1/identify")
+        or collect_path_eq(buf, s, "/v1/group")
+        or collect_path_eq(buf, s, "/v1/alias")
+        or collect_path_eq(buf, s, "/mp/collect")
+        or collect_path_eq(buf, s, "/track")
+        or collect_path_eq(buf, s, "/import")
+        or collect_path_eq(buf, s, "/engage")
+        or collect_path_eq(buf, s, "/groups")
+        or collect_path_eq(buf, s, "/2/httpapi")
+        or collect_path_eq(buf, s, "/batch")
+        or collect_path_eq(buf, s, "/identify")
     )
+
+
+def collect_body_too_large(buf: Span[UInt8, _], req: Request, limit: Int) -> Bool:
+    return req.head_len > 0 and req.content_length > limit and is_collect_path(buf, req.path)
+
+
+def collect_path_eq(buf: Span[UInt8, _], s: Slice, literal: StringSlice) -> Bool:
+    # Match Python's route normalization so repeated slashes cannot evade caps.
+    var lit = literal.as_bytes()
+    var i = s.start
+    var j = 0
+    var end = s.start + s.length
+    while i < end and j < len(lit):
+        if buf[i] != lit[j]:
+            return False
+        if buf[i] == 47:
+            while i < end and buf[i] == 47:
+                i += 1
+        else:
+            i += 1
+        j += 1
+    while i < end and buf[i] == 47:
+        i += 1
+    return i == end and j == len(lit)
 
 
 def path_eq(buf: Span[UInt8, _], s: Slice, literal: StringSlice) -> Bool:

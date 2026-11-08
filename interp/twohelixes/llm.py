@@ -54,6 +54,7 @@ DIRECT_MODEL_FALLBACK = {
     "gpt-5.6-luna": "gpt-4.1-mini",
     "gpt-5.6-terra": "gpt-4.1",
     "gpt-5.6-sol": "gpt-4.1",
+    "claude-sonnet-5-5": "gpt-4.1",
 }
 
 
@@ -75,6 +76,7 @@ PRICES = {
     "gpt-5.6-luna": (1.00, 6.00),
     "gpt-5.6-terra": (2.50, 15.00),
     "gpt-5.6-sol": (5.00, 30.00),
+    "claude-sonnet-5-5": (2.00, 10.00),
     "auto-easy-task": (0.15, 0.60),
 }
 

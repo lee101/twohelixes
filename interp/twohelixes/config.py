@@ -52,6 +52,40 @@ if any("contributor" in model.lower() for model in (
         "Review provider terms and explicitly set TWOHELIXES_ALLOW_CONTRIBUTOR=1."
     )
 
+# --------------------------------------------------------------------------
+# Coding agent. A user may pick one of three models; DeepSeek is the default
+# because most code-agent turns are small edits to a single-file artifact and
+# its price is an order of magnitude below the other two. Terra and Sonnet are
+# for the turns DeepSeek visibly gets wrong. The ids are env-overridable
+# because gateway aliases move; the allowlist keeps the picker from becoming
+# an arbitrary-model, arbitrary-price API.
+# --------------------------------------------------------------------------
+AGENT_MODEL_ALIASES = {
+    "deepseek": os.environ.get("TWOHELIXES_AGENT_MODEL_DEEPSEEK") or "deepseek-v4-flash",
+    "terra": os.environ.get("TWOHELIXES_AGENT_MODEL_TERRA") or "gpt-5.6-terra",
+    "sonnet": os.environ.get("TWOHELIXES_AGENT_MODEL_SONNET") or "claude-sonnet-5-5",
+}
+AGENT_MODEL_DEFAULT_ALIAS = "deepseek"
+
+
+def resolve_agent_model(choice: object) -> str:
+    """Map a picker value (alias or full id) onto the allowlist; unknown -> default.
+
+    Never returns a model outside AGENT_MODEL_ALIASES, so a client cannot route
+    a request to an unpriced or contributor-terms model by naming it.
+    """
+    text = str(choice or "").strip().lower()
+    if text in AGENT_MODEL_ALIASES:
+        return AGENT_MODEL_ALIASES[text]
+    for model in AGENT_MODEL_ALIASES.values():
+        if text == model.lower():
+            return model
+    env_default = (os.environ.get("TWOHELIXES_AGENT_MODEL") or "").strip().lower()
+    if env_default in AGENT_MODEL_ALIASES:
+        return AGENT_MODEL_ALIASES[env_default]
+    return AGENT_MODEL_ALIASES[AGENT_MODEL_DEFAULT_ALIAS]
+
+
 DEFAULT_BASE_URL = "https://openpaths.io/v1"
 # Sibling openpaths process on this box (`../openpaths`, port 8092).
 LOCAL_OPENPATHS_BASE_URL = "http://127.0.0.1:8092/v1"

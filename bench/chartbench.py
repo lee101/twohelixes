@@ -170,6 +170,15 @@ def _cases() -> dict[str, Case]:
             "accounts": [24000, 8200, 4700, 2600, 1380],
         }
     )
+    plan = pd.DataFrame(
+        {
+            "task": ["Discovery", "Design", "Build", "Beta", "Launch"],
+            "start": ["2026-01-05", "2026-01-19", "2026-02-09", "2026-03-23", "2026-04-20"],
+            "end": ["2026-01-23", "2026-02-13", "2026-04-03", "2026-04-17", "2026-04-20"],
+            "team": ["Product", "Design", "Eng", "QA", "Product"],
+            "percent_complete": [100, 80, 45, 10, 0],
+        }
+    )
     bridge = pd.DataFrame(
         {
             "driver": [
@@ -478,6 +487,14 @@ def _cases() -> dict[str, Case]:
             },
             expect=("waterfall",),
         ),
+        "gantt": Case(
+            plan,
+            {
+                "chart_type": "gantt",
+                "title": "Project plan: discovery to launch",
+            },
+            expect=("bar",),
+        ),
         "box": Case(
             support,
             {
@@ -557,6 +574,8 @@ def _export_svg(form: str, mode: str, figure: dict[str, Any] | None, result: Res
 def _exporter_covers(figure: dict[str, Any]) -> bool:
     traces = figure.get("data") or []
     if not traces:
+        return False
+    if any(t.get("_gantt") for t in traces):
         return False
     kind = str(traces[0].get("type") or "")
     if kind == "scatter" and traces[0].get("mode") == "markers":

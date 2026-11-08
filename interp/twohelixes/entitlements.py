@@ -44,6 +44,7 @@ ALLOWANCE_FOR = {
     "dashboard_build": "chat_query",  # a dashboard is several charts
     "structure_import": "chat_query",
     "sheet_agent": "chat_query",
+    "code_agent": "chat_query",
     "deep_research": "deep_research",
     "notebook_minute": "notebook_minute",
 }

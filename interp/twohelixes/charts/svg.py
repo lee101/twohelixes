@@ -117,6 +117,10 @@ def render(
     if not traces:
         return _empty(width, height, mode, "No data")
 
+    if any(t.get("_gantt") for t in traces):
+        # Bars with a `base` are not zero-based bars; drawn here they would be
+        # wrong rather than missing. The browser renderer owns this form.
+        raise Unsupported("gantt")
     kind = _kind(traces[0])
     if kind not in SUPPORTED:
         raise Unsupported(kind)

@@ -15,6 +15,7 @@ from th.http import (
     METHOD_OPTIONS,
     METHOD_POST,
     PARSE_ERROR,
+    PARSE_INCOMPLETE,
     PARSE_OK,
     PARSE_TOO_LARGE,
     Request,
@@ -27,7 +28,28 @@ from th.http import (
     serialize,
     slice_str,
 )
-from th.app import handle_fast
+from th.app import collect_body_too_large, handle_fast
+
+
+def test_collect_body_limit_before_payload() -> Int:
+    var bad = 0
+    var paths = List[String]()
+    paths.append("/v1/collect")
+    paths.append("/v1/batch")
+    paths.append("/track")
+    paths.append("/2/httpapi")
+    paths.append("//v1//collect/")
+    for path in paths:
+        var raw = to_bytes("POST " + String(path) + " HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n")
+        var req = Request()
+        bad += check_int("body absent", parse_request(raw, len(raw), req), PARSE_INCOMPLETE)
+        bad += check_int("collector rejected before payload", Int(collect_body_too_large(raw, req, 1048576)), 1)
+        bad += check_int("configured larger cap", Int(collect_body_too_large(raw, req, 2097152)), 0)
+    var upload = to_bytes("POST /v1/connectors/upload HTTP/1.1\r\nContent-Length: 1048577\r\n\r\n")
+    var upload_req = Request()
+    _ = parse_request(upload, len(upload), upload_req)
+    bad += check_int("upload unaffected", Int(collect_body_too_large(upload, upload_req, 1048576)), 0)
+    return bad
 
 
 def check(name: StringSlice, got: StringSlice, want: StringSlice) -> Int:
@@ -316,6 +338,7 @@ def test_collect_preflight_is_cross_origin() -> Int:
 def main() raises:
     var bad = 0
     bad += test_slice_str_is_byte_exact()
+    bad += test_collect_body_limit_before_payload()
     bad += test_parse_and_slice_a_request()
     bad += test_oversized_content_length_stops_before_body()
     bad += test_request_framing_is_unambiguous()

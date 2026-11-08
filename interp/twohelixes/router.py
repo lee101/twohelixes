@@ -19,6 +19,13 @@ log = logging.getLogger("twohelixes.router")
 Handler = Callable[["Context"], "Result"]
 StreamHandler = Callable[[Any, "Context"], None]
 
+_ANALYTICS_INGEST_PATHS = {
+    tuple(path.strip("/").split("/"))
+    for path in ("/v1/collect", "/v1/batch", "/v1/track", "/v1/page", "/v1/screen",
+                 "/v1/identify", "/v1/group", "/v1/alias", "/mp/collect", "/track",
+                 "/import", "/engage", "/groups", "/2/httpapi", "/batch", "/identify")
+}
+
 
 @dataclass
 class Result:
@@ -195,6 +202,7 @@ def build() -> None:
     from twohelixes.routes import (  # noqa: F401
         agents,
         analytics,
+        artifacts,
         auth,
         billing,
         builder,
@@ -268,6 +276,14 @@ def handle(
     method: str, path: str, query: str, body: str, headers: str
 ) -> tuple[str, str, str, str]:
     build()
+    from twohelixes import config
+
+    if method.upper() == "POST" and tuple(_split(path)) in _ANALYTICS_INGEST_PATHS:
+        limit = max(1024, min(32 * 1024 * 1024, config.get_int("TWOHELIXES_ANALYTICS_MAX_BODY_BYTES", 1024 * 1024)))
+        if len(body) > limit or len(body.encode("utf-8")) > limit:
+            rejected = error(413, "analytics_body_too_large", limit=limit)
+            rejected.headers["Access-Control-Allow-Origin"] = "*"
+            return rejected.render()
     ctx = build_context(method, path, query, body, headers)
     segments = _split(path)
 

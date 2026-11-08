@@ -1986,3 +1986,18 @@ body.library-open {
 /* A table tile scrolls inside itself rather than squeezing ten columns into a
    phone. The scroller is the tile's, so the page never moves sideways. */
 .dash-plot-scroll { overflow-x: auto; min-width: 0; scrollbar-width: thin; }
+
+/* Coding agent */
+.code-view { display: grid; grid-template-columns: minmax(10rem, 16rem) minmax(0, 1fr); gap: var(--s3); min-width: 0; }
+.code-side { min-width: 0; }
+.code-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+.code-item { display: flex; gap: var(--s1); align-items: center; justify-content: space-between; }
+.code-open { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; border: 0; color: inherit; cursor: pointer; padding: var(--s1); }
+.code-open[aria-current="true"] { font-weight: 600; }
+.code-main { display: grid; gap: var(--s2); min-width: 0; align-content: start; }
+.code-prompt { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; }
+.code-bar { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+.code-status { margin: 0; min-height: 1.4em; opacity: 0.8; }
+.code-stage { display: grid; gap: var(--s1); }
+.code-frame { width: 100%; height: min(70vh, 46rem); border: 1px solid currentColor; border-radius: 6px; background: #fff; }
+@media (max-width: 760px) { .code-view { grid-template-columns: 1fr; } }
