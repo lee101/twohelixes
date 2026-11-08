@@ -539,6 +539,8 @@ def _small_call(prompt: str, system: str, model: str) -> dict[str, Any]:
         raise
     except llm.LLMError as exc:
         if model == config.MODEL_MINI:
+            model = config.MODEL_ESCALATE
+        if model == config.MODEL_MINI:
             raise
         log.info("mini model declined (%s); escalating to %s", exc, model)
         return llm.json_call(prompt, system=system, model=model)

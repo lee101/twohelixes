@@ -209,6 +209,7 @@ def build() -> None:
         charts,
         connectors,
         dashboards,
+        community,
         datasets,
         library,
         notebooks,

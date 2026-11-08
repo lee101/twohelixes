@@ -142,6 +142,18 @@ async function boot(): Promise<void> {
   const schoolExample = ["nsw-map", "nsw-naplan-map"].includes(params.get("example") ?? "");
   state.pendingJoin = params.get("join");
   if (sample) state.activeSample = sample;
+  const community = params.get("community");
+  if (community && state.user?.signed_in) {
+    try {
+      const copy = await api.post<{ dataset_id: string }>(
+        `/v1/public/datasets/${encodeURIComponent(community)}/import`,
+      );
+      state.activeDataset = copy.dataset_id;
+      window.history.replaceState(null, "", "/app");
+    } catch {
+      /* not downloadable or gone: fall through to the normal app */
+    }
+  } else if (community) state.showSignIn = true;
   // Through state, not through the DOM: loadSources() and loadSamples() both
   // re-render, and a value written straight onto the textarea is gone by the
   // time either of them lands.

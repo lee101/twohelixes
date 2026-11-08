@@ -18,7 +18,7 @@ from twohelixes import config, router
 
 log = logging.getLogger("twohelixes.routes.static")
 
-STATIC_ROOT = (config.REPO_ROOT / "static").resolve()
+STATIC_ROOT = Path(config.get("TWOHELIXES_STATIC_ROOT") or (config.REPO_ROOT / "static")).resolve()
 MAX_CACHED_BYTES = 8 * 1024 * 1024
 
 TEXT_TYPES = {

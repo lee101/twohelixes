@@ -660,3 +660,6 @@ def frame(key: str) -> Any:
     if not target.exists():
         materialise()
     return pd.read_parquet(target)
+
+
+from . import examples as _examples  # noqa: E402,F401  registers the world datasets

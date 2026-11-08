@@ -9,6 +9,7 @@ import {
   type LibrarySource,
 } from "./api";
 import { el } from "./chart";
+import { openPublishPanel } from "./publish";
 
 export interface SourceSummary {
   id: string;
@@ -637,6 +638,7 @@ export class SourcesPanel {
       actions.append(
         this.smallButton("Preview", () => void this.openPreview(item.value)),
         this.smallButton("Share", () => void this.openShare(item.value)),
+        this.smallButton("Publish", () => void this.openPublish(item.value)),
       );
     }
     actions.append(
@@ -1163,6 +1165,11 @@ export class SourcesPanel {
     table.append(head, body);
     wrap.append(table);
     return wrap;
+  }
+
+  private openPublish(dataset: LibraryDataset): void {
+    const body = this.openSheet(`Publish ${dataset.name}`, "publish-sheet");
+    void openPublishPanel(body, dataset.id, dataset.name, () => undefined);
   }
 
   private async openShare(dataset: LibraryDataset): Promise<void> {

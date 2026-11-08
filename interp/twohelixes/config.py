@@ -23,11 +23,11 @@ DOTENV_CANDIDATES = (
 )
 
 # --------------------------------------------------------------------------
-# Models. Muse Spark 1.3 is available through the OpenPaths Meta route.
+# Models. Flash handles routine work; Luna low handles advanced work/fallback.
 # Keep bounded decisions cheap and independent from the reasoning model.
 # Contributor has different data-use terms: never select it implicitly.
 # --------------------------------------------------------------------------
-MODEL_PRIMARY = os.environ.get("TWOHELIXES_MODEL") or "muse-spark-1.3"
+MODEL_PRIMARY = os.environ.get("TWOHELIXES_MODEL") or "deepseek-v4-flash"
 MODEL_DEFAULT = MODEL_PRIMARY
 MODEL_FAST = os.environ.get("TWOHELIXES_MODEL_FAST") or "deepseek-v4-flash"
 
@@ -41,7 +41,7 @@ MODEL_MINI = os.environ.get("TWOHELIXES_MODEL_MINI") or MODEL_FAST
 # Escalation uses frontier reasoning, and stays distinct from MINI:
 # "cheaper must not mean sometimes no answer" - a declined mini call
 # escalates here before anything degrades.
-MODEL_ESCALATE = os.environ.get("TWOHELIXES_MODEL_DEEP") or MODEL_PRIMARY
+MODEL_ESCALATE = os.environ.get("TWOHELIXES_MODEL_DEEP") or "gpt-6-luna"
 MODEL_DEEP = MODEL_ESCALATE
 
 if any("contributor" in model.lower() for model in (
@@ -228,6 +228,8 @@ FREE_RATE_PER_DAY = 25
 # Global safety valve, applied to every identity including paid, to bound a
 # single account's ability to saturate the box.
 HARD_RATE_PER_MINUTE = 120
+PUBLIC_READ_PER_MINUTE = 120
+PUBLIC_DOWNLOAD_PER_MINUTE = 10
 
 # --------------------------------------------------------------------------
 # API volume pricing.

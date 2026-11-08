@@ -1,0 +1,9 @@
+entity,code,year,val_a
+"Korea, South",KOR,1990,70.5
+"Korea, South",KOR,2020,84.1
+France,FRA,1990,76.9
+France,FRA,2020,82.5
+World,OWID_WRL,2020,73.3
+Empty,,2020,1.0
+"Korea, South",KOR,1989,69.0
+Ghost,AAA,2020,

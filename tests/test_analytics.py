@@ -1269,3 +1269,10 @@ def test_email_report_counts_opens_clicks_and_session_conversions() -> None:
     assert camp["conversions"]["sign_up_completed"] == 1
     assert camp["converted_sessions"] == 1
     assert camp["conversion_rate"] == 1.0
+
+
+def test_future_client_clock_is_replaced_with_server_time() -> None:
+    ahead = (time.time() + 7 * 3600) * 1000
+    assert collect([{"event": "page_view", "client_id": "c-skew", "ts": ahead}]) == 204
+    stored = rows()
+    assert stored and abs(stored[-1]["ts"] - time.time()) < 60

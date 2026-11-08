@@ -744,6 +744,12 @@ for _key, _title in world_schools.DATASETS.items():
         reason='A count comparison describes coverage without inventing achievement scores or attendance boundaries.',
     ))
 
+from .world import EXAMPLES as _WORLD_EXAMPLES, SAMPLES as _WORLD_SAMPLES
+
+EXAMPLES.extend(_WORLD_EXAMPLES)
+samples.SAMPLES.extend(_WORLD_SAMPLES)
+samples.BY_KEY.update({s.key: s for s in _WORLD_SAMPLES})
+
 BY_DATASET: dict[str, list[Example]] = {}
 for _example in EXAMPLES:
     BY_DATASET.setdefault(_example.dataset, []).append(_example)
@@ -757,6 +763,7 @@ BY_PATH: dict[tuple[str, str], Example] = {(e.dataset, e.slug): e for e in EXAMP
 
 _cache: dict[tuple[str, str, str, int, int], Rendered] = {}
 _lock = threading.Lock()
+
 
 
 def _run_transform(frame: Any, code: str) -> Any:

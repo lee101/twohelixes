@@ -21,6 +21,7 @@ PAGES: tuple[tuple[str, str, str], ...] = (
     ("/features", "weekly", "0.8"),
     ("/pricing", "weekly", "0.8"),
     ("/datasets", "weekly", "0.7"),
+    ("/datasets/community", "daily", "0.6"),
     ("/docs", "weekly", "0.6"),
     ("/blog", "weekly", "0.6"),
     ("/blog/open-product-analytics", "monthly", "0.6"),
@@ -54,6 +55,10 @@ def sitemap(ctx: router.Context) -> router.Result:
         entries.append((f"/datasets/{sample.key}", "monthly", "0.6"))
         for example in examples.BY_DATASET.get(sample.key, []):
             entries.append((example.path, "monthly", "0.5"))
+
+    from twohelixes.routes import community
+
+    entries.extend(community.sitemap_entries())
 
     urls = "".join(
         f"<url><loc>{site}{path}</loc>"

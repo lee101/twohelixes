@@ -907,3 +907,28 @@ out of. The limits themselves are unchanged; only the nagging is.
 - Every stage degrades rather than aborting; the user gets a chart plus a note
   about what was approximated.
 - Generated SQL is checked read-only before it reaches a driver.
+
+## CPU retrieval and analysis routes (September 2026)
+
+Semantic retrieval uses the existing CPU int8 pybed encoder. Exact cosine
+scoring batches unique schema fields into bounded float32 NumPy/BLAS products;
+score/margin abstention rules are unchanged. No CUDA or torch is needed.
+
+Default/fast decisions use `deepseek-v4-flash`; `TWOHELIXES_MODEL_DEEP` defaults
+to `gpt-6-luna` with low reasoning. Luna uses the direct OpenAI API when its key
+is configured, independently of an unhealthy gateway. Set `TWOHELIXES_MODEL`
+to `openpaths/free` to try the optional free route with a Luna fallback.
+
+Chart cards ignore export dimensions, fill the answer width, use viewport
+height, and resize with their container. VisualBench measures available chart
+width/height as well as overflow, visible marks, and the chart audit. Build
+with `TWOHELIXES_BUILD_OUT=/tmp/twohelixes-static`, then use
+`TWOHELIXES_STATIC_ROOT` and `TWOHELIXES_DATA_DIR` with `scripts/run-dev.py` to
+validate isolated assets/data without replacing the live build.
+
+If direct OpenAI fails and gateway credentials are configured, Luna retries
+through the gateway under an independent circuit key. The September 27 probe
+found the configured direct key returned 401 while gateway Luna worked.
+`twohelixes/bench/model_route_eval.py` evaluates chart selection and numeric
+facts on six synthetic data families. Keep failures in the report; one passed
+run does not establish broad insight accuracy.

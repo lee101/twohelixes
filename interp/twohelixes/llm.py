@@ -1,7 +1,7 @@
 """LLM access through the OpenPaths gateway.
 
-Analysis runs on Muse Spark 1.3 through the OpenPaths gateway. Small structured
-decisions use DeepSeek Flash and escalate when needed. Each model has its own
+Routine analysis uses DeepSeek Flash. Advanced decisions and fallback use
+GPT-6 Luna with low reasoning, directly via OpenAI when its key is configured. Each model has its own
 circuit breaker; a provider outage can fall back without blocking other routes.
 
 Every call is priced. `usage` comes back on the response, `PRICES` mirrors the
@@ -36,33 +36,16 @@ log = logging.getLogger("twohelixes.llm")
 _client_lock = threading.Lock()
 _client: Any = None
 _deepseek_client: Any = None
+_direct_openai_client: Any = None
 
 JSON_BLOCK = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
-
-# The gateway serves aliases (deepseek-v4-flash, openpaths/stealth/ox-alpha).
-# Talking straight to OpenAI, those do not exist, so map each to its nearest
-# public model. Kept for the no-gateway fallback path only.
-DIRECT_MODEL_FALLBACK = {
-    config.MODEL_PRIMARY: "gpt-4.1-mini",
-    config.MODEL_DEFAULT: "gpt-4.1-mini",
-    config.MODEL_ESCALATE: "gpt-4.1",
-    config.MODEL_DEEP: "gpt-4.1",
-    config.MODEL_FAST: "gpt-4.1-nano",
-    config.MODEL_MINI: "gpt-4.1-nano",
-    "deepseek-v4-flash": "gpt-4.1-mini",
-    "deepseek-v4-pro": "gpt-4.1",
-    "gpt-5.6-luna": "gpt-4.1-mini",
-    "gpt-5.6-terra": "gpt-4.1",
-    "gpt-5.6-sol": "gpt-4.1",
-    "claude-sonnet-5-5": "gpt-4.1",
-}
-
 
 # US dollars per million tokens, mirroring openpaths/config.yaml. Prices are
 # duplicated rather than fetched because a pricing decision must not depend on
 # a network call - and because a silent gateway price change should show up as
 # a margin discrepancy here, not as an invisible one.
 PRICES = {
+    "openpaths:gpt-6-luna": (0.10, 0.50),
     # Verified against the gateway catalogue, September 2026. Contributor is
     # opt-in (config); it must also be provisioned by the gateway operator.
     "muse-spark-1.3": (1.25, 4.25),
@@ -73,10 +56,12 @@ PRICES = {
     "stealth/ox-alpha": (0.0, 0.0),
     "deepseek-v4-flash": (0.14, 0.28),
     "deepseek-v4-pro": (0.435, 0.87),
+    "gpt-6-luna": (0.10, 0.50),
+    "openpaths/free": (0.0, 0.0),
+    "openpaths-free": (0.0, 0.0),
     "gpt-5.6-luna": (1.00, 6.00),
     "gpt-5.6-terra": (2.50, 15.00),
     "gpt-5.6-sol": (5.00, 30.00),
-    "claude-sonnet-5-5": (2.00, 10.00),
     "auto-easy-task": (0.15, 0.60),
 }
 
@@ -172,22 +157,27 @@ class Circuit:
     opened_at: float = 0.0
     threshold: int = 5
     cooldown: float = 30.0
+    probing: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def before(self) -> None:
         with self.lock:
+            if self.probing:
+                raise CircuitOpen("LLM recovery probe is in flight")
             if self.opened_at and time.time() - self.opened_at < self.cooldown:
                 raise CircuitOpen("LLM gateway circuit is open")
             if self.opened_at:
-                self.opened_at = 0.0
-                self.failures = 0
+                self.probing = True
 
     def ok(self) -> None:
         with self.lock:
             self.failures = 0
+            self.opened_at = 0.0
+            self.probing = False
 
     def fail(self) -> None:
         with self.lock:
+            self.probing = False
             self.failures += 1
             if self.failures >= self.threshold:
                 self.opened_at = time.time()
@@ -205,25 +195,19 @@ def _circuit_for(model: str) -> Circuit:
     with _circuits_lock:
         circuit = _circuits.get(model)
         if circuit is None:
-            circuit = Circuit()
+            circuit = Circuit(threshold=1 if model in {"openpaths/free", "openpaths-free"} else 3)
             _circuits[model] = circuit
         return circuit
 
 
-# Where each tier goes when its model's circuit is open or the calls keep
-# failing. The legacy DeepSeek routes are the "current model" every tier
-# migrated away from; they stay wired in permanently so the migration cannot
-# turn into an outage.
+# An unhealthy gateway/free lane must not block the direct OpenAI fallback.
 MODEL_FALLBACKS: dict[str, str] = {
-    config.MODEL_DEFAULT: "deepseek-v4-flash",
-    config.MODEL_FAST: "deepseek-v4-flash",
-    config.MODEL_MINI: "deepseek-v4-flash",
-    config.MODEL_ESCALATE: "deepseek-v4-flash",
-    config.MODEL_DEEP: "deepseek-v4-flash",
+    model: "gpt-6-luna" for model in (
+        config.MODEL_DEFAULT, config.MODEL_FAST, config.MODEL_MINI,
+        config.MODEL_ESCALATE, config.MODEL_DEEP,
+        "deepseek-v4-flash", "openpaths/free", "openpaths-free",
+    )
 }
-# The fast tier must also have a distinct fallback. Do not fall back from an
-# explicitly chosen non-contributor route to a contributor model.
-MODEL_FALLBACKS["deepseek-v4-flash"] = "deepseek-v4-pro"
 
 
 def fallback_model(model: str) -> str | None:
@@ -241,6 +225,8 @@ def _route_dead(exc: Exception) -> bool:
     text = str(exc).lower()
     return (
         "429" in text
+        or "timed out" in text
+        or any(code in text for code in ("401", "403", "404", "502", "503", "504"))
         or "rate-limited" in text
         or "no healthy provider" in text
         or "provider returned error" in text
@@ -248,14 +234,24 @@ def _route_dead(exc: Exception) -> bool:
 
 
 def client(model: str | None = None) -> Any:
-    global _client, _deepseek_client
-    # Prefer the openpaths gateway when configured - including for deepseek
-    # ids - so local DEV hits `../openpaths` and production stays one path.
-    # Direct DeepSeek is only for the no-gateway fallback.
+    global _client, _deepseek_client, _direct_openai_client
+    if model == "openpaths:gpt-6-luna":
+        if not config.using_gateway():
+            raise LLMError("gateway Luna needs OPENPATHS_API_KEY")
+        model = None
+    if model == "gpt-6-luna" and (key := config.get("OPENAI_API_KEY")):
+        with _client_lock:
+            if _direct_openai_client is None:
+                from openai import OpenAI
+                _direct_openai_client = OpenAI(
+                    api_key=key, base_url="https://api.openai.com/v1",
+                    timeout=20.0, max_retries=0,
+                )
+            return _direct_openai_client
+    # Direct provider routes are independent of gateway outages.
     if (
         model
         and model.startswith("deepseek-")
-        and not config.using_gateway()
     ):
         key, base_url = config.deepseek_credentials()
         if key:
@@ -268,12 +264,14 @@ def client(model: str | None = None) -> Any:
                     _deepseek_client = OpenAI(
                         api_key=key,
                         base_url=base_url,
-                        timeout=180.0,
+                        timeout=20.0,
                         max_retries=0,
                     )
                     log.info("llm provider=deepseek base=%s", base_url)
             return _deepseek_client
     if _client is not None:
+        if model and not config.using_gateway() and model.startswith(("deepseek-", "openpaths")):
+            raise LLMError("requested route needs its provider credentials")
         return _client
     with _client_lock:
         if _client is not None:
@@ -281,12 +279,14 @@ def client(model: str | None = None) -> Any:
         from openai import OpenAI
 
         key, base_url, provider = config.llm_credentials()
+        if provider != "openpaths" and model and model.startswith(("deepseek-", "openpaths")):
+            raise LLMError("requested route needs its provider credentials")
         if not key:
             raise LLMError("no OPENPATHS_API_KEY / OPENAI_API_KEY configured")
 
         kwargs: dict[str, Any] = {
             "api_key": key,
-            "timeout": 180.0,
+            "timeout": 20.0,
             # Retries are handled here so the backoff and the circuit breaker
             # see every attempt.
             "max_retries": 0,
@@ -300,12 +300,8 @@ def client(model: str | None = None) -> Any:
 
 
 def resolve_model(model: str) -> str:
-    """Map a gateway alias to a public model when talking to OpenAI directly."""
-    if config.using_gateway():
-        return model
-    if model.startswith("deepseek-") and config.deepseek_credentials()[0]:
-        return model
-    return DIRECT_MODEL_FALLBACK.get(model, model)
+    """Keep explicit model IDs; fallback candidates are selected separately."""
+    return "gpt-6-luna" if model == "openpaths:gpt-6-luna" else model
 
 
 def extract_json(text: str) -> Any:
@@ -351,7 +347,16 @@ def extract_json(text: str) -> Any:
 def _candidates(model: str) -> list[str]:
     """The requested model first, then its circuit-break fallback."""
     fallback = fallback_model(model)
-    return [model, fallback] if fallback else [model]
+    candidates = [model, fallback] if fallback else [model]
+    if "gpt-6-luna" in candidates and config.get("OPENAI_API_KEY") and config.using_gateway():
+        candidates.append("openpaths:gpt-6-luna")
+    return candidates
+
+
+def _generation_params(model: str, temperature: float, max_tokens: int) -> dict[str, Any]:
+    if resolve_model(model) == "gpt-6-luna":
+        return {"max_completion_tokens": max_tokens, "reasoning_effort": "low"}
+    return {"temperature": temperature, "max_tokens": max_tokens}
 
 
 def call(
@@ -389,8 +394,7 @@ def call(
                 response = client(candidate).chat.completions.create(
                     model=resolve_model(candidate),
                     messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
+                    **_generation_params(candidate, temperature, max_tokens),
                 )
                 # Attribute spend to the model that actually served: after a
                 # fallback the price is the legacy route's, not the primary's.
@@ -496,8 +500,7 @@ def stream(
             response = client(candidate).chat.completions.create(
                 model=resolve_model(candidate),
                 messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
+                **_generation_params(candidate, temperature, max_tokens),
                 stream=True,
                 # A streamed call reports its usage only in a final, choice-less
                 # chunk, and only if asked. Without this the trace - the most

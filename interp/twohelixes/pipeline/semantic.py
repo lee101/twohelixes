@@ -146,9 +146,11 @@ def resolve(question: str, candidates: list[str]) -> tuple[str, float] | None:
         return None
 
     scored = sorted(
-        ((float(query @ embed(str(name))), str(name)) for name in candidates),
+        ((score, name) for name, score in _score_phrases(query, candidates)),
         reverse=True,
     )
+    if not scored:
+        return None
     top_score, top_name = scored[0]
     if top_score < ACCEPT_SCORE:
         return None
@@ -158,6 +160,28 @@ def resolve(question: str, candidates: list[str]) -> tuple[str, float] | None:
         return None
 
     return top_name, top_score
+
+
+def _score_phrases(query: Any, phrases: list[str]) -> list[tuple[str, float]]:
+    """Bounded float32 matrix products use NumPy's native CPU SIMD/BLAS.
+
+    Chunking caps the temporary matrix at ~2 MiB for 512-dimensional vectors.
+    Keep exact cosine scores and the existing abstention thresholds.
+    """
+    import numpy as np
+
+    result: list[tuple[str, float]] = []
+    for start in range(0, len(phrases), 1024):
+        rows = [
+            (str(phrase), vector)
+            for phrase in phrases[start : start + 1024]
+            if phrase and (vector := embed(str(phrase))) is not None
+        ]
+        if rows:
+            matrix = np.asarray([row[1] for row in rows], dtype=np.float32)
+            scores = matrix @ np.asarray(query, dtype=np.float32)
+            result.extend((row[0], float(score)) for row, score in zip(rows, scores))
+    return result
 
 
 def rank_documents(
@@ -177,12 +201,11 @@ def rank_documents(
     if query is None:
         return []
 
+    # Score each unique field once across the library, not one Python dot
+    # product per field per document.
+    phrases = list(dict.fromkeys(str(p) for fields in documents.values() for p in fields if p))
+    scores = dict(_score_phrases(query, phrases))
     ranked: list[tuple[str, float]] = []
     for key, phrases in documents.items():
-        scores = [
-            float(query @ vector)
-            for phrase in phrases
-            if phrase and (vector := embed(str(phrase))) is not None
-        ]
-        ranked.append((str(key), max(scores) if scores else -1.0))
+        ranked.append((str(key), max((scores[str(p)] for p in phrases if str(p) in scores), default=-1.0)))
     return sorted(ranked, key=lambda item: (-item[1], item[0]))
