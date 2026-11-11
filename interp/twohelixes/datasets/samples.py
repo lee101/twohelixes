@@ -602,8 +602,19 @@ def _publish_frame(frame: Any, target: Path) -> None:
         pending.unlink(missing_ok=True)
 
 
+_MATERIALISED: dict[str, dict[str, dict[str, Any]]] = {}
+
+
 def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
     """Build every sample to Parquet once. Returns a catalogue with real shapes."""
+    root = str(storage_dir())
+    cached_catalogue = _MATERIALISED.get(root)
+    if (
+        not force
+        and cached_catalogue is not None
+        and all(path_for(sample.key).exists() for sample in SAMPLES)
+    ):
+        return cached_catalogue
     catalogue: dict[str, dict[str, Any]] = {}
 
     for sample in SAMPLES:
@@ -642,6 +653,8 @@ def materialise(force: bool = False) -> dict[str, dict[str, Any]]:
             catalogue[sample.key] = sample.to_dict()
             catalogue[sample.key]["error"] = str(exc)
 
+    if not any("error" in entry for entry in catalogue.values()):
+        _MATERIALISED[root] = catalogue
     return catalogue
 
 
