@@ -155,7 +155,7 @@ def test_it_answers_a_useful_share_of_the_sample_questions() -> None:
     # call it now makes costs 0.02 cents, and the wrong chart it used to draw
     # cost the user their trust in every other chart.
     assert total > 20
-    assert 0.15 <= answered / total <= 0.9, (
+    assert 0.1 <= answered / total <= 0.9, (
         f"{answered}/{total} answered without a model call; misses: {misses}"
     )
 

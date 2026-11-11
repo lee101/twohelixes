@@ -2,14 +2,43 @@
 
 from __future__ import annotations
 
+import logging
+
 from twohelixes import store
 from twohelixes.analytics_bots import HUMAN, HUMAN_E
 
 
+log = logging.getLogger(__name__)
+
+WORK_MEM = "128MB"
+
+
 def compact_summary(site_id: str, start: float, end: float, *, include_bots: bool = False) -> dict:
+    conn = store.connection()
+    scoped = store.is_postgres()
+    if scoped:
+        conn.execute("BEGIN")
+        conn.execute("SET LOCAL jit = off")
+        conn.execute(f"SET LOCAL work_mem = '{WORK_MEM}'")
+    try:
+        return _compact_summary(conn, site_id, start, end, include_bots)
+    finally:
+        if scoped:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:  # noqa: BLE001
+                log.exception("could not end compact summary transaction")
+
+
+def _one(conn, sql: str, params: tuple) -> dict:
+    return store.row_to_dict(conn.execute(sql, params).fetchone()) or {}
+
+
+def _compact_summary(conn, site_id: str, start: float, end: float, include_bots: bool) -> dict:
     params = (site_id, start, end)
     human, human_e = ("", "") if include_bots else (HUMAN, HUMAN_E)
-    totals = store.row_to_dict(store.one(
+    totals = _one(
+        conn,
         "SELECT COUNT(*) AS observed_events,"
         " COALESCE(SUM(COALESCE(e.sample_weight, 1)), 0) AS events,"
         " COUNT(DISTINCT COALESCE(NULLIF(e.user_id, ''), NULLIF(i.user_id, ''), e.client_id)) AS users,"
@@ -19,8 +48,9 @@ def compact_summary(site_id: str, start: float, end: float, *, include_bots: boo
         " FROM analytics_events e LEFT JOIN analytics_identities i"
         " ON i.site_id = e.site_id AND i.client_id = e.client_id"
         " WHERE e.site_id = ? AND e.ts BETWEEN ? AND ?" + human_e, params,
-    )) or {}
-    sessions = store.row_to_dict(store.one(
+    )
+    sessions = _one(
+        conn,
         "SELECT COUNT(*) AS sessions, COALESCE(SUM(CASE WHEN engagement_ms >= 10000"
         " OR page_views >= 2 OR has_key_event = 1 THEN 1 ELSE 0 END), 0) AS engaged_sessions"
         " FROM (SELECT client_id, session_id,"
@@ -30,7 +60,7 @@ def compact_summary(site_id: str, start: float, end: float, *, include_bots: boo
         " THEN 1 ELSE 0 END) AS has_key_event"
         f" FROM analytics_events WHERE site_id = ? AND ts BETWEEN ? AND ? AND session_id != ''{human}"
         " GROUP BY client_id, session_id) s", params,
-    )) or {}
+    )
     n = int(sessions.get("sessions") or 0)
     engaged = int(sessions.get("engaged_sessions") or 0)
     return {
