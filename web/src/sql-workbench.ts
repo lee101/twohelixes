@@ -295,11 +295,13 @@ export class SQLWorkbench {
     const scroll = el("div", "sql-result-scroll");
     const table = el("table", "sql-result-table") as HTMLTableElement;
     const head = table.createTHead().insertRow();
-    for (const column of result.columns) {
+    const numeric = result.columns.map((_, i) => result.rows.length > 0 && result.rows.every((r) => r[i] === null || typeof r[i] === "number"));
+    result.columns.forEach((column, i) => {
       const cell = document.createElement("th");
       cell.textContent = column;
+      if (numeric[i]) cell.className = "num";
       head.append(cell);
-    }
+    });
     const body = table.createTBody();
     for (const row of result.rows) {
       const tr = body.insertRow();
@@ -307,11 +309,31 @@ export class SQLWorkbench {
         const cell = tr.insertCell();
         cell.textContent = value === null ? "NULL" : typeof value === "object" ? JSON.stringify(value) : String(value);
         if (value === null) cell.className = "is-null";
+        else if (typeof value === "number") cell.className = "num";
         cell.title = cell.textContent;
       }
     }
     scroll.append(table);
-    this.resultHost.append(scroll);
+    const bar = el("div", "sql-result-bar");
+    const csv = document.createElement("button");
+    csv.type = "button";
+    csv.className = "btn btn-ghost btn-small";
+    csv.textContent = "Download CSV";
+    csv.addEventListener("click", () => {
+      const quote = (v: unknown) => {
+        const text = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+        return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+      };
+      const body = [result.columns.map(quote).join(","), ...result.rows.map((r) => r.map(quote).join(","))].join("\n");
+      const url = URL.createObjectURL(new Blob([body], { type: "text/csv;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "query.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+    bar.append(csv);
+    this.resultHost.append(bar, scroll);
   }
 
   private async save(): Promise<void> {
