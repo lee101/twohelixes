@@ -27,6 +27,7 @@ is periodic. No JavaScript, no sprite sheet: one inert SVG.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from dataclasses import dataclass
 
 from twohelixes.charts import palette
@@ -266,6 +267,7 @@ def _tones(mode: str) -> dict[str, str]:
     }
 
 
+@lru_cache(maxsize=32)
 def logo(size: int = 64, mode: str = "light", uid: str = "thl") -> str:
     """The wordless mark, for the header.
 

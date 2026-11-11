@@ -11,6 +11,7 @@ case the same SQL surface as a warehouse.
 
 from __future__ import annotations
 
+import os
 import json
 import logging
 import time
@@ -217,6 +218,10 @@ class ElasticsearchConnector(Connector):
         )
 
 
+DUCKDB_THREADS = int(os.environ.get("TWOHELIXES_DUCKDB_THREADS", "2"))
+DUCKDB_MEMORY_LIMIT = os.environ.get("TWOHELIXES_DUCKDB_MEMORY", "1GB")
+
+
 class FilesConnector(Connector):
     """CSV / Parquet / JSON / Excel, queried in place through DuckDB."""
 
@@ -227,6 +232,15 @@ class FilesConnector(Connector):
     def __init__(self, config: dict[str, Any]):
         super().__init__(config)
         self.conn: Any = None
+
+    def close(self) -> None:
+        conn, self.conn = self.conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        super().close()
 
     def _root(self) -> Path:
         root = self.config.get("root")
@@ -240,7 +254,11 @@ class FilesConnector(Connector):
         except ModuleNotFoundError as exc:
             raise ConnectorError("duckdb is not installed") from exc
 
-        self.conn = duckdb.connect(":memory:")
+        self.close()
+        self.conn = duckdb.connect(
+            ":memory:",
+            config={"threads": DUCKDB_THREADS, "memory_limit": DUCKDB_MEMORY_LIMIT},
+        )
         root = self._root()
         if not root.exists():
             raise ConnectorError(f"{root} does not exist")

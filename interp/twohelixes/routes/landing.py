@@ -1,5 +1,7 @@
 """Homepage-only presentation. Real SVG output, no heavyweight chart runtime."""
 
+from functools import lru_cache
+
 from twohelixes.charts import helix, palette
 
 
@@ -117,7 +119,11 @@ CSS = """
 
 
 def artwork(mode: str) -> str:
-    mode = "dark" if mode == "dark" else "light"
+    return _artwork("dark" if mode == "dark" else "light")
+
+
+@lru_cache(maxsize=2)
+def _artwork(mode: str) -> str:
     style = helix.HelixStyle(width=280, height=430, turns=1.5,
                              strand_width=19, rung_width=2, rungs_per_turn=9,
                              strand_a=palette.BRAND[mode],

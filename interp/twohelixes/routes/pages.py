@@ -653,6 +653,9 @@ header.site,main,footer.site{{position:relative;z-index:1}}
   background:var(--accent)}}
 
 .band{{background:var(--panel-2);border-block:1px solid var(--border)}}
+.faq details{{border-bottom:1px solid var(--border);padding:.8rem 0}}
+.faq summary{{cursor:pointer;font-weight:600}}
+.faq p{{margin-top:.5rem;color:var(--text-secondary);max-width:62ch}}
 .kicker{{font-size:.74rem;font-weight:660;letter-spacing:.09em;
   text-transform:uppercase;color:var(--text-muted);margin-bottom:.55rem}}
 """
@@ -799,7 +802,7 @@ def _page(
   <span>twoHelixes — connect data. Discover what matters.</span>
   <nav aria-label="Footer">
     <a href="/features">Features</a><a href="/datasets">Datasets</a>
-    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/blog">Blog</a><a href="/app">App</a>
+    <a href="/pricing">Pricing</a><a href="/docs">Docs</a><a href="/blog">Blog</a><a href="/alternatives">Alternatives</a><a href="/use-cases">Use cases</a><a href="/app">App</a>
   </nav>
 </div></footer>
 <script type="module" src="{_asset('marketing.js')}"></script>
@@ -807,8 +810,17 @@ def _page(
 </body></html>"""
 
 
+def _public_html(body: str) -> router.Result:
+    return router.html(
+        body,
+        **{"Cache-Control": "public, max-age=300, stale-while-revalidate=3600"},
+    )
+
+
 @router.get("/")
 def home(ctx: router.Context) -> router.Result:
+    from twohelixes.routes import growth
+
     mode = ctx.q("mode", "light") or "light"
     model_label = html.escape({"muse-spark-1.3": "Muse Spark 1.3"}.get(
         config.MODEL_DEFAULT, config.MODEL_DEFAULT
@@ -1027,16 +1039,17 @@ def home(ctx: router.Context) -> router.Result:
     <a class="btn btn-ghost" href="/pricing">See plans</a>
   </div>
 </div></section>
+{growth.faq_html()}
 </main>"""
 
-    return router.html(
+    return _public_html(
         _page(
             "twoHelixes — AI data intelligence, from question to decision",
             "Connect files and databases. Explore with AI, build charts and dashboards, "
             "and go deeper with SQL, sheets, Python notebooks, and agents. Try sample data free.",
             body,
             "/",
-            head=f"<style>{landing.CSS}</style>",
+            head=f"<style>{landing.CSS}</style>" + growth.home_head(),
         )
     )
 
@@ -1192,7 +1205,7 @@ def features(ctx: router.Context) -> router.Result:
   </div>
 </div></section>
 </main>"""
-    return router.html(
+    return _public_html(
         _page(
             "Features — twoHelixes",
             "Nineteen chart forms, fifteen data sources, a Python code "
@@ -1390,7 +1403,7 @@ def pricing(ctx: router.Context) -> router.Result:
   minutes. Credits do not expire.</p>
 </div></section>
 </main>"""
-    return router.html(
+    return _public_html(
         _page("Pricing — twoHelixes", "Plans and credit pricing.", body, "/pricing")
     )
 
@@ -1533,7 +1546,7 @@ def docs(ctx: router.Context) -> router.Result:
      style="margin-top:var(--s5)">Get an API key</a>
 </div></section>
 </main>"""
-    return router.html(
+    return _public_html(
         _page(
             "API docs — twoHelixes",
             "The twoHelixes HTTP API: ask a question, stream the reasoning, "
@@ -1595,7 +1608,7 @@ def analytics_parity(ctx: router.Context) -> router.Result:
   self-referrals, session UTM persistence, and engaged-session bounce rules.</p>
 </div></section>
 </main>"""
-    return router.html(
+    return _public_html(
         _page(
             "GA4 analytics parity — twoHelixes",
             "An honest GA4 to twoHelixes analytics capability map.",
@@ -1624,7 +1637,7 @@ def blog_index(ctx: router.Context) -> router.Result:
   </a>
 </div></div></section>
 </main>"""
-    return router.html(
+    return _public_html(
         _page(
             "twoHelixes field notes",
             "Engineering notes from the twoHelixes data and chart platform.",
@@ -1741,7 +1754,7 @@ twohelixes-cli analytics revenue --site netwrck.com --days 30</code></pre>
 </div></section>
 </article>
 </main>"""
-    return router.html(
+    return _public_html(
         _page(
             "Product analytics should end in a question — twoHelixes",
             "First-party analytics with GA4, Segment, Mixpanel, and Amplitude compatibility, adaptive weighted sampling, agent queries, and an open Go CLI.",

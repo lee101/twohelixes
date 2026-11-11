@@ -46,7 +46,7 @@ command -v uv >/dev/null || die "uv is not installed (https://docs.astral.sh/uv/
 build_env() {
   local path="$1" version="$2" dev="${3:-0}"
   say "Building $path (python $version)"
-  uv venv --python "$version" "$path"
+  { [ -x "$path/bin/python" ] && "$path/bin/python" -c "import sys;sys.exit(0 if sys.version_info[:2]==tuple(map(int,\"$version\".split(\".\"))) else 1)"; } || uv venv --clear --python "$version" "$path"
   uv pip install --python "$path/bin/python" -r requirements.txt
   if [ "$version" = "3.12" ]; then
     # std.python resolves CPython symbols from the process. The AOT binary is

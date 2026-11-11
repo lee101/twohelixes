@@ -198,7 +198,13 @@ def for_source(source_id: str, user_id: str) -> Connector:
         (now, source_id),
     )
     with _cache_lock:
+        previous = _cache.get(source_id)
         _cache[source_id] = (connector, now)
+    if previous and previous[0] is not connector:
+        try:
+            previous[0].close()
+        except Exception:  # noqa: BLE001
+            pass
     return connector
 
 

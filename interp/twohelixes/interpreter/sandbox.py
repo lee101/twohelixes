@@ -463,9 +463,11 @@ def _first_line(text: str) -> str:
 
 def _accel_stats(names: dict[str, Any], accelerated: list[str]) -> dict[str, Any]:
     if not accelerated:
-        return {}
+        return {"mojo_rejected": dict(accel.LAST_REJECTED)} if accel.LAST_REJECTED else {}
     summary = accel.stats(names)
     summary["mojo_candidates"] = accelerated
+    if accel.LAST_REJECTED:
+        summary["mojo_rejected"] = dict(accel.LAST_REJECTED)
     return summary
 
 

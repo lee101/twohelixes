@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import traceback
@@ -24,7 +25,9 @@ log = logging.getLogger("twohelixes.streams")
 # A stream is dropped this long after completion so a client that reconnects
 # late still gets the tail instead of a 404.
 REAP_AFTER_SECONDS = 300
-MAX_BUFFERED_FRAMES = 4096
+MAX_BUFFERED_FRAMES = 1024
+MAX_ACTIVE_STREAMS = int(os.environ.get("TWOHELIXES_MAX_STREAMS", "48"))
+THREAD_STACK_BYTES = 1 << 20
 
 
 def sse(event: str, data: Any) -> str:
@@ -77,6 +80,31 @@ class Cancelled(Exception):
 
 _streams: dict[str, Stream] = {}
 _streams_lock = threading.Lock()
+_active = 0
+_active_lock = threading.Lock()
+
+
+def _acquire() -> bool:
+    global _active
+    with _active_lock:
+        if _active >= MAX_ACTIVE_STREAMS:
+            return False
+        _active += 1
+        return True
+
+
+def _release() -> None:
+    global _active
+    with _active_lock:
+        _active -= 1
+
+
+def _start_thread(thread: threading.Thread) -> None:
+    previous = threading.stack_size(THREAD_STACK_BYTES)
+    try:
+        thread.start()
+    finally:
+        threading.stack_size(previous)
 
 
 def _reap() -> None:
@@ -122,15 +150,29 @@ def _run(stream: Stream, fn: Callable[[Stream], None]) -> None:
         except Exception:
             pass
         stream.finish()
+        _release()
 
 
 def spawn(fn: Callable[[Stream], None], name: str = "job") -> str:
     """Run `fn` on a daemon thread, returning the stream id immediately."""
     stream = _register()
+    if not _acquire():
+        return _busy(stream)
     thread = threading.Thread(
         target=_run, args=(stream, fn), name=f"th-{name}-{stream.id[:8]}", daemon=True
     )
-    thread.start()
+    try:
+        _start_thread(thread)
+    except BaseException:
+        _release()
+        raise
+    return stream.id
+
+
+def _busy(stream: Stream) -> str:
+    stream.emit("error", {"message": "server busy, retry shortly", "type": "Busy"})
+    stream.emit("done", {"elapsed_ms": 0})
+    stream.finish()
     return stream.id
 
 
@@ -153,11 +195,9 @@ def start(path: str, query: str, body: str, headers: str) -> str:
 def start_failed(message: str) -> str:
     """Return a stream that immediately reports an error."""
     stream = _register()
-
-    def job(s: Stream) -> None:
-        s.emit("error", {"message": message.strip().splitlines()[-1]})
-
-    threading.Thread(target=_run, args=(stream, job), daemon=True).start()
+    stream.emit("error", {"message": message.strip().splitlines()[-1]})
+    stream.emit("done", {"elapsed_ms": 0})
+    stream.finish()
     return stream.id
 
 

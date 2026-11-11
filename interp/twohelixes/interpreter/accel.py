@@ -30,6 +30,7 @@ second time anyone runs the same function it is native from the first call.
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 from typing import Any
@@ -120,35 +121,63 @@ _ALLOWED_CALLS = frozenset({
 })
 
 
-def eligible(fn: ast.FunctionDef, local_names: set[str]) -> bool:
-    """Whether this function is worth handing to the transpiler."""
+def _reason(fn: ast.FunctionDef, local_names: set[str]) -> str | None:
+    """Why this function cannot be handed to the transpiler, or None."""
     args = fn.args
     if args.vararg or args.kwarg or args.kwonlyargs or args.defaults:
-        return False
+        return "signature: varargs, kwargs or defaults"
     if not args.args:
-        return False
+        return "signature: no arguments"
     if not any(isinstance(n, (ast.For, ast.While)) for n in ast.walk(fn)):
-        return False  # no loop, nothing to win
+        return "no loop"
     for node in ast.walk(fn):
         if isinstance(node, _REJECTED_NODES):
-            return False
+            return "syntax: " + type(node).__name__
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node is not (fn.body[0].value if isinstance(fn.body[0], ast.Expr) else None):
-                return False  # a string literal anywhere but the docstring
+                return "syntax: string literal"
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name):
                 if func.id not in _ALLOWED_CALLS and func.id not in local_names:
-                    return False
+                    return "call: " + func.id
             elif isinstance(func, ast.Attribute):
                 root = func.value
                 if not (isinstance(root, ast.Name) and root.id in ("math", "np", "numpy")):
-                    return False
+                    return "call: " + ast.unparse(func)[:60]
                 if func.attr not in _ALLOWED_CALLS:
-                    return False
+                    return "call: " + ast.unparse(func)[:60]
             else:
-                return False
-    return True
+                return "call: dynamic"
+    return None
+
+
+def eligible(fn: ast.FunctionDef, local_names: set[str]) -> bool:
+    """Whether this function is worth handing to the transpiler."""
+    return _reason(fn, local_names) is None
+
+
+REJECTION_LOG_MAX_BYTES = 512 * 1024
+
+
+def _record_rejections(rejected: dict[str, str]) -> None:
+    """Append why loop-bearing functions were skipped, so support can be
+    prioritised by what agents actually write. Best effort and size-capped."""
+    cache = os.environ.get("MOJOSUB_CACHE")
+    if not cache or not rejected:
+        return
+    try:
+        path = os.path.join(cache, "rejections.jsonl")
+        if os.path.exists(path) and os.path.getsize(path) > REJECTION_LOG_MAX_BYTES:
+            return
+        with open(path, "a") as handle:
+            for name, reason in rejected.items():
+                handle.write(json.dumps({"fn": name, "reason": reason}) + "\n")
+    except Exception:  # noqa: BLE001 - diagnostics never matter to the run
+        pass
+
+
+LAST_REJECTED: dict[str, str] = {}
 
 
 def accelerate(tree: ast.Module) -> list[str]:
@@ -165,13 +194,20 @@ def accelerate(tree: ast.Module) -> list[str]:
         node.name for node in tree.body if isinstance(node, ast.FunctionDef)
     }
     touched: list[str] = []
+    rejected: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or node.decorator_list:
             continue
-        if not eligible(node, local_names):
+        reason = _reason(node, local_names)
+        if reason is not None:
+            if reason != "no loop":
+                rejected[node.name] = reason
             continue
         node.decorator_list = [ast.Name(id=DECORATOR, ctx=ast.Load())]
         touched.append(node.name)
+    LAST_REJECTED.clear()
+    LAST_REJECTED.update(rejected)
+    _record_rejections(rejected)
     if touched:
         ast.fix_missing_locations(tree)
     return touched

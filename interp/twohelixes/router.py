@@ -211,6 +211,7 @@ def build() -> None:
         dashboards,
         community,
         datasets,
+        growth,
         library,
         notebooks,
         pages,

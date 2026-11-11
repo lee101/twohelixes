@@ -56,9 +56,10 @@ def sitemap(ctx: router.Context) -> router.Result:
         for example in examples.BY_DATASET.get(sample.key, []):
             entries.append((example.path, "monthly", "0.5"))
 
-    from twohelixes.routes import community
+    from twohelixes.routes import community, growth
 
     entries.extend(community.sitemap_entries())
+    entries.extend(growth.sitemap_entries())
 
     urls = "".join(
         f"<url><loc>{site}{path}</loc>"
