@@ -458,7 +458,7 @@ def _normalise(
         return None
     screen = _clip(event.get("screen") or event.get("sr"), 32)
     viewport = _clip(event.get("viewport"), 32)
-    if headless_fingerprint(device, screen, viewport):
+    if headless_fingerprint(device, screen, viewport, browser):
         return None
 
     raw_ts = event.get("ts") or event.get("timestamp") or event.get("timestamp_micros")
@@ -2097,14 +2097,23 @@ def summary(ctx: Context) -> Result:
         return denied
     site_id = str(site["id"])
     start, end = _window(ctx)
-    human, human_e = _human(ctx), _human(ctx, alias=True)
 
     if ctx.q_bool("compact"):
         from twohelixes.analytics_api import compact_summary
 
         return json_result(
-            compact_summary(site_id, start, end, include_bots=ctx.q_bool("include_bots"))
+            compact_summary(
+                site_id, start, end,
+                include_bots=ctx.q_bool("include_bots"), human_only=ctx.q_bool("human_only"),
+            )
         )
+
+    from twohelixes.analytics_api import human_scope
+
+    start, only, only_e, human_only = human_scope(
+        site_id, start, end, human_only=ctx.q_bool("human_only")
+    )
+    human, human_e = _human(ctx) + only, _human(ctx, alias=True) + only_e
 
     totals = store.row_to_dict(
         store.one(
@@ -2162,6 +2171,7 @@ def summary(ctx: Context) -> Result:
         {
             "site_id": site_id,
             "window": {"start": start, "end": end},
+            "human_only": human_only,
             "totals": {
                 "events": round(float(totals.get("events") or 0)),
                 "observed_events": int(totals.get("observed_events") or 0),
@@ -2612,13 +2622,16 @@ def funnel(ctx: Context) -> Result:
         return error(400, "too_many_steps")
 
     start, end = _window(ctx)
+    from twohelixes.analytics_api import human_scope
+
+    start, only, _only_e, human_note = human_scope(site_id, start, end, human_only=ctx.q_bool("human_only"))
     names = sorted({name for matches in step_matches for name, _path, _prefix in matches})
     event_placeholders = ", ".join("?" for _ in names)
     rows = store.query(
         "SELECT session_id, client_id, user_id, ts, event_name, page_path, sample_weight"
         " FROM analytics_events"
         " WHERE site_id = ? AND ts BETWEEN ? AND ?"
-        f" AND event_name IN ({event_placeholders}){_human(ctx)}"
+        f" AND event_name IN ({event_placeholders}){_human(ctx)}{only}"
         " ORDER BY session_id, ts, received_at, event_sequence, id",
         (site_id, start, end, *names),
     )
@@ -2712,6 +2725,7 @@ def funnel(ctx: Context) -> Result:
         {
             "site_id": site_id,
             "window": {"start": start, "end": end},
+            "human_only": human_note,
             "steps": stages,
             "totals": {"sessions": first_sessions, "users": first_users},
         }

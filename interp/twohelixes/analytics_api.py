@@ -5,7 +5,18 @@ from __future__ import annotations
 import logging
 
 from twohelixes import store
-from twohelixes.analytics_bots import HUMAN, HUMAN_E
+from twohelixes.analytics_bots import HUMAN, HUMAN_E, human_only_since, human_only_sql
+
+
+def human_scope(site_id: str, start: float, end: float, *, human_only: bool) -> tuple[float, str, str, dict]:
+    """Window start and the extra session predicates for `human_only`, plus
+    the note reports echo so the narrowing is never silent."""
+    since = human_only_since(site_id) if human_only else None
+    note = {"requested": human_only, "applied": since is not None, "since": since}
+    if since is None:
+        return start, "", "", note
+    start = max(start, since)
+    return start, human_only_sql(site_id, start, end), human_only_sql(site_id, start, end, "e"), note
 
 
 log = logging.getLogger(__name__)
@@ -13,17 +24,20 @@ log = logging.getLogger(__name__)
 WORK_MEM = "128MB"
 
 
-def compact_summary(site_id: str, start: float, end: float, *, include_bots: bool = False) -> dict:
+def compact_summary(
+    site_id: str, start: float, end: float, *, include_bots: bool = False, human_only: bool = False
+) -> dict:
+    scope = human_scope(site_id, start, end, human_only=human_only)
     conn = store.connection()
-    scoped = store.is_postgres()
-    if scoped:
+    postgres = store.is_postgres()
+    if postgres:
         conn.execute("BEGIN")
         conn.execute("SET LOCAL jit = off")
         conn.execute(f"SET LOCAL work_mem = '{WORK_MEM}'")
     try:
-        return _compact_summary(conn, site_id, start, end, include_bots)
+        return _compact_summary(conn, site_id, end, include_bots, scope)
     finally:
-        if scoped:
+        if postgres:
             try:
                 conn.execute("ROLLBACK")
             except Exception:  # noqa: BLE001
@@ -34,9 +48,11 @@ def _one(conn, sql: str, params: tuple) -> dict:
     return store.row_to_dict(conn.execute(sql, params).fetchone()) or {}
 
 
-def _compact_summary(conn, site_id: str, start: float, end: float, include_bots: bool) -> dict:
+def _compact_summary(conn, site_id: str, end: float, include_bots: bool, scope: tuple) -> dict:
+    start, only, only_e, note = scope
     params = (site_id, start, end)
     human, human_e = ("", "") if include_bots else (HUMAN, HUMAN_E)
+    human, human_e = human + only, human_e + only_e
     totals = _one(
         conn,
         "SELECT COUNT(*) AS observed_events,"
@@ -66,6 +82,7 @@ def _compact_summary(conn, site_id: str, start: float, end: float, include_bots:
     return {
         "site_id": site_id,
         "window": {"start": start, "end": end},
+        "human_only": note,
         "totals": {
             "events": round(float(totals.get("events") or 0)),
             "observed_events": int(totals.get("observed_events") or 0),

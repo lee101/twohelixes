@@ -21,7 +21,30 @@ CASES = [
     ("desktop", "1920x1080", "1280x720", "automation_viewport"),
     ("desktop", "1920x1080", "1919x992", "known_fingerprint"),
     ("desktop", "1920x1080", "1920x1080", ""),
-    ("desktop", "1280x720", "1280x720", ""),
+    ("desktop", "1280x720", "1280x720", "default_window"),
+    ("desktop", "1920x1080", "1920x961", "known_fingerprint"),
+    ("desktop", "1440x900", "1080x1920", "known_fingerprint"),
+    ("desktop", "1440x900", "945x939", "known_fingerprint"),
+    ("desktop", "1536x960", "945x972", "known_fingerprint"),
+    ("desktop", "1800x1125", "1800x1125", "known_fingerprint"),
+    ("desktop", "1263x1099", "1263x979", "synthetic_window"),
+    ("desktop", "1396x1309", "1396x1185", "synthetic_window"),
+    ("desktop", "1200x1022", "1200x902", "synthetic_window"),
+    ("desktop", "1399x1327", "1399x1207", "synthetic_window"),
+    ("desktop", "1263x1099", "1263x1000", ""),
+    ("desktop", "1263x1099", "1263x950", ""),
+    ("desktop", "1263x1099", "1262x979", ""),
+    ("desktop", "1280x1024", "1280x904", ""),
+    ("desktop", "1600x1200", "1600x1080", ""),
+    ("desktop", "1920x1080", "1920x955", ""),
+    ("desktop", "1920x1080", "1920x969", ""),
+    ("desktop", "1440x900", "1440x812", ""),
+    ("desktop", "1080x1920", "1080x1795", ""),
+    ("desktop", "1440x2560", "1440x2435", ""),
+    ("desktop", "1000x990", "1000x870", ""),
+    ("desktop", "1263x1099", "1263x97", ""),
+    ("tablet", "1263x1099", "1263x979", ""),
+    ("mobile", "1263x1099", "1263x979", ""),
     ("desktop", "1440x900", "1440x900", ""),
     ("desktop", "1280x1024", "1280x1024", ""),
     ("desktop", "1366x1366", "1366x1200", ""),
@@ -38,9 +61,24 @@ CASES = [
 ]
 
 
-@pytest.mark.parametrize("device,screen,viewport,rule", CASES)
-def test_headless_fingerprint_rules(device: str, screen: str, viewport: str, rule: str) -> None:
-    assert headless_fingerprint(device, screen, viewport) == rule
+BROWSER_CASES = [
+    ("desktop", "1280x720", "1280x720", "Firefox", ""),
+    ("desktop", "1280x720", "1280x720", "Safari", ""),
+    ("desktop", "1280x720", "1280x720", "other", ""),
+    ("desktop", "1280x720", "1280x720", "Edge", ""),
+    ("desktop", "1263x1099", "1263x979", "Firefox", ""),
+    ("desktop", "1800x1125", "1800x1125", "Safari", ""),
+    ("desktop", "1920x1080", "1920x961", "Firefox", ""),
+    ("desktop", "1366x1366", "1366x1366", "Firefox", "square_fullscreen"),
+    ("desktop", "1920x1080", "1919x992", "Firefox", "known_fingerprint"),
+    ("desktop", "800x600", "800x600", "Safari", "small_screen"),
+]
+ALL_CASES = [(d, s, v, "Chrome", r) for d, s, v, r in CASES] + BROWSER_CASES
+
+
+@pytest.mark.parametrize("device,screen,viewport,browser,rule", ALL_CASES)
+def test_headless_fingerprint_rules(device: str, screen: str, viewport: str, browser: str, rule: str) -> None:
+    assert headless_fingerprint(device, screen, viewport, browser) == rule
 
 
 def test_sql_predicate_agrees_with_python_on_this_backend() -> None:
@@ -49,8 +87,10 @@ def test_sql_predicate_agrees_with_python_on_this_backend() -> None:
     seeded = len(rows(include_session_start=True))
     columns = [key for key in template if key != "id"]
     with store.transaction() as conn:
-        for index, (device, screen, viewport, _rule) in enumerate(CASES + [("desktop", None, None, "")]):
-            values = dict(template, device=device, screen=screen, viewport=viewport,
+        for index, (device, screen, viewport, browser, _rule) in enumerate(
+            ALL_CASES + [("desktop", None, None, "Chrome", "")]
+        ):
+            values = dict(template, device=device, screen=screen, viewport=viewport, browser=browser,
                           client_id=f"case-{index}", session_id=f"case-{index}", external_id=None)
             conn.execute(
                 f"INSERT INTO analytics_events (id, {', '.join(columns)})"
@@ -58,14 +98,16 @@ def test_sql_predicate_agrees_with_python_on_this_backend() -> None:
                 (store.new_id(), *[values[column] for column in columns]),
             )
     found = store.rows_to_dicts(store.query(
-        f"SELECT device, screen, viewport, CASE WHEN {bot_sql()} THEN 1 ELSE 0 END AS bot,"
+        f"SELECT device, screen, viewport, browser, CASE WHEN {bot_sql()} THEN 1 ELSE 0 END AS bot,"
         f" CASE WHEN NOT {bot_sql('e')} THEN 1 ELSE 0 END AS human"
         " FROM analytics_events e WHERE site_id = ?",
         (SITE["id"],),
     ))
-    assert len(found) == len(CASES) + 1 + seeded
+    assert len(found) == len(ALL_CASES) + 1 + seeded
     for row in found:
-        expected = int(bool(headless_fingerprint(row["device"] or "", row["screen"] or "", row["viewport"] or "")))
+        expected = int(bool(headless_fingerprint(
+            row["device"] or "", row["screen"] or "", row["viewport"] or "", row["browser"] or ""
+        )))
         assert (row["bot"], row["human"]) == (expected, 1 - expected), row
 
 
@@ -86,6 +128,9 @@ def test_headless_fingerprints_are_dropped_at_ingest() -> None:
     assert _send("1366x1366", "1366x1366", client="square") == 204
     assert _send("800x600", "1024x569", client="small") == 204
     assert _send("1920x1080", "1919x992", client="known") == 204
+    assert _send("1280x720", "1280x720", client="default") == 204
+    assert _send("1263x1099", "1263x979", client="synthetic") == 204
+    assert _send("1800x1125", "1800x1125", client="mac") == 204
     assert rows() == []
     assert _send("1920x1080", "1920x945", client="human") == 204
     assert _send("360x640", "360x640", ua=MOBILE_UA, client="phone") == 204
@@ -100,6 +145,81 @@ def test_headless_fingerprints_are_dropped_at_ingest() -> None:
 def test_automation_user_agents_are_dropped(ua: str) -> None:
     assert _send("1920x1080", "1920x945", ua=ua) == 204
     assert rows() == []
+
+
+def _session(client: str, *, interact_after: float | None = None, base: float = 0.0, user: str | None = None,
+             extra: str | None = None) -> list[dict]:
+    start = time.time() * 1000 - 60_000 - base
+    shape = {"client_id": client, "session_id": client, "screen": "1920x1080", "viewport": "1920x945"}
+    events = [{"event": "page_view", "ts": start, "page_location": "https://netwrck.com/", **shape}]
+    if interact_after is not None:
+        events.append({"event": "first_interaction", "ts": start + interact_after * 1000, **shape})
+    if extra:
+        events.append({"event": extra, "ts": start + 500, **shape})
+    if user:
+        events.append({"event": "page_view", "ts": start + 600, "user_id": user, **shape})
+    return events
+
+
+def _summary(extra: str = "") -> dict:
+    status, body = dispatch("GET", "/v1/analytics/summary", query=f"site_id={SITE['id']}&days=1{extra}")
+    assert status == 200
+    return body
+
+
+def test_human_only_requires_a_site_that_emits_first_interaction() -> None:
+    assert collect(_session("a") + _session("b", extra="game_started")) == 204
+    for extra in ("", "&compact=1"):
+        raw = _summary(extra)
+        scoped = _summary(extra + "&human_only=1")
+        assert raw["totals"]["sessions"] == scoped["totals"]["sessions"] == 2
+        assert scoped["human_only"] == {"requested": True, "applied": False, "since": None}
+        assert raw["human_only"]["requested"] is False
+
+
+def test_human_only_keeps_sessions_with_a_human_signal() -> None:
+    old = time.time() * 1000 - 3600_000
+    assert collect([{"event": "page_view", "ts": old, "client_id": "old", "session_id": "old",
+                     "screen": "1920x1080", "viewport": "1920x945"}]) == 204
+    assert collect(
+        _session("scripted", interact_after=0.0)
+        + _session("fast", interact_after=0.4)
+        + _session("human", interact_after=6.0)
+        + _session("intent", extra="game_started")
+        + _session("member", user="u1")
+        + _session("glance")
+    ) == 204
+    for extra in ("", "&compact=1"):
+        raw = _summary(extra)
+        assert raw["totals"]["sessions"] == 7
+        scoped = _summary(extra + "&human_only=1")
+        assert scoped["totals"]["sessions"] == 3
+        assert scoped["human_only"]["applied"] is True
+        assert scoped["human_only"]["since"] > time.time() - 120
+        assert scoped["window"]["start"] == scoped["human_only"]["since"]
+        assert _summary(extra + "&human_only=0")["totals"]["sessions"] == 7
+        both = _summary(extra + "&human_only=1&include_bots=1")
+        assert both["totals"]["sessions"] == 3
+
+
+def test_human_only_funnel() -> None:
+    assert collect(_session("scripted", interact_after=0.0) + _session("human", interact_after=6.0, extra="game_started")) == 204
+    query = f"site_id={SITE['id']}&days=1&steps=page_view,game_started"
+    _, raw = dispatch("GET", "/v1/analytics/funnel", query=query)
+    _, scoped = dispatch("GET", "/v1/analytics/funnel", query=query + "&human_only=1")
+    assert [stage["sessions"] for stage in raw["steps"]] == [2, 1]
+    assert [stage["sessions"] for stage in scoped["steps"]] == [1, 1]
+    assert scoped["human_only"]["applied"] is True
+
+
+def test_human_only_still_drops_headless_fingerprints() -> None:
+    assert collect(_session("human", interact_after=6.0)) == 204
+    store.execute(
+        "UPDATE analytics_events SET screen = '1366x1366', viewport = '1366x1366' WHERE site_id = ?",
+        (SITE["id"],),
+    )
+    assert _summary("&human_only=1")["totals"]["sessions"] == 0
+    assert _summary("&human_only=1&include_bots=1")["totals"]["sessions"] == 1
 
 
 def _history() -> None:
